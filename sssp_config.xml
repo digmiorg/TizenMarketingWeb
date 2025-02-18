@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget>
+    <ver>2.0</ver>
+    <size>10240</size>
+    <widgetname>DigmiMarketing</widgetname>
+    <description>Digmi Marketing Signage App</description>
+    <width>1920</width>
+    <height>1080</height>
+    <author>
+        <name>Digmi</name>
+        <email>support@digmi.com</email>
+        <link>https://digmi.com</link>
+        <organization>Digmi</organization>
+    </author>
+</widget>
