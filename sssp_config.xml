@@ -1,11 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<widget xmlns:tizen="http://tizen.org/ns/widgets"
-			xmlns="http://www.w3.org/ns/widgets"
-			id="https://portal.staging.digmi.eu"
-			version="1.0.5"
-			viewmodes="fullscreen">
+<widget>
 	<ver>1.0.5</ver>
-	<size>25095</size>
 	<widgetname>DigmiMarketingStaging</widgetname>
 	<webtype>tizen</webtype>
 </widget>
