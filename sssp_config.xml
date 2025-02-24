@@ -3,6 +3,5 @@
 	<ver>1.0.5</ver>
 	<size>26</size>
 	<widgetname>DigmiMarketingStaging</widgetname>
-	<location>https://digmiorg.github.io/TizenMarketingWeb/DigmiMarketingStaging.wgt</location>
-	<update>Y</update>
+	<webtype>tizen</webtype>
 </widget>
