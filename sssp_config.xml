@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <widget>
-	<ver>1.3</ver>
-	<widgetname>DigmiMarketing</widgetname>
-	<location>https://digmiorg.github.io/TizenMarketingWeb/DigmiMarketing.wgt</location>
+	<ver>1.4.0</ver>
+	<widgetname>DigmiMarketingStaging</widgetname>
+	<location>https://digmiorg.github.io/TizenMarketingWeb/DigmiMarketingStaging.wgt</location>
 	<update>Y</update>
 </widget>
