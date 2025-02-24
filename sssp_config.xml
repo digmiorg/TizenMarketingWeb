@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <widget>
-	<ver>1.4.0</ver>
+	<ver>1.7.0</ver>
+	<size>67</size>
 	<widgetname>DigmiMarketingStaging</widgetname>
-	<location>https://digmiorg.github.io/TizenMarketingWeb/DigmiMarketingStaging.wgt</location>
-	<update>Y</update>
 </widget>
