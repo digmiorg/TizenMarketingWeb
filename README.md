@@ -11,7 +11,9 @@ This is a hosted Digmi Marketing webapp for Tizen url starter.
 ## howto tizen
 
 sssp\_config <widgetname> much match wgt file name
+
 sssp\_config <widgetname> much match app config.xml name
+
 sssp\_config <widgetname> much match app config.xml  \<tizen:application id={id.widgetname}>
 
 example appName = MyApp
