@@ -240,15 +240,19 @@ async function fetchDeviceMedia(uuid) {
 
     return data;
   } catch (error) {
-    document.getElementById('checkdevice-response').textContent = `Error: ${error.message}`;
+    showStatus('Media fetch failed: ' + (error && error.message ? error.message : error));
 
     // If we have cached data, keep using it during error
     if (cachedData) {
       return cachedData;
     }
 
-    // Retry after 5 seconds
-    setTimeout(() => fetchDeviceMedia(uuid), 5000);
+    // No retry of its own. checkDevice()'s capped backoff is the single retry
+    // owner: this used to schedule a 5 s chain here, and now that checkDevice
+    // keeps polling on an empty playlist, every failed poll would have stacked
+    // another chain on top of the last. Returning null also lets the caller
+    // tell a failed fetch apart from a genuinely empty playlist.
+    return null;
   }
 }
 
@@ -583,28 +587,35 @@ function checkDevice(uuid) {
         // Start fetching and displaying media
         const media = await fetchDeviceMedia(uuid);
 
-        // Hide the whole registration screen, not just the QR square. Only the
-        // QR itself used to go, so a device that was registered but had no
-        // slides yet kept showing "Scan the QR-code to connect this TV" and
-        // read to the salon as still broken (Hair & Co, 2026-09-04).
-        hideRegistrationScreen();
+        // A null payload means the media fetch failed, which is not the same
+        // thing as a screen with nothing planned. Leave the registration
+        // screen up rather than blanking it, keep the reason fetchDeviceMedia
+        // already put on screen, and fall through to the backoff below.
+        if (media) {
+          // Hide the whole registration screen, not just the QR square. Only
+          // the QR itself used to go, so a device that was registered but had
+          // no slides yet kept showing "Scan the QR-code to connect this TV"
+          // and read to the salon as still broken (Hair & Co, 2026-09-04).
+          hideRegistrationScreen();
 
-        // Show campaign container
-        const campaignContainer = document.getElementById('campaign-container');
-        campaignContainer.style.display = 'block';
+          // Show campaign container
+          const campaignContainer = document.getElementById('campaign-container');
+          campaignContainer.style.display = 'block';
 
-        if (media && media.campaign_media && media.campaign_media.length > 0) {
-          clearInterval(checkInterval);
+          if (media.campaign_media && media.campaign_media.length > 0) {
+            clearInterval(checkInterval);
 
-          return;
+            return;
+          }
+
+          // Paired, but nothing planned yet. Keep asking: the media poll is set
+          // up inside displayMediaContent(), which only runs when there is
+          // media, so a screen that paired into an empty playlist had nothing
+          // watching for content to appear. That is the state Hair & Co's TV
+          // sat in.
+          showStatus('Connected to ' + (media.location || 'DIGMI') +
+            ' — no content planned for this screen yet.');
         }
-
-        // Paired, but nothing planned yet. Keep asking: the media poll is set
-        // up inside displayMediaContent(), which only runs when there is media,
-        // so a screen that paired into an empty playlist had nothing watching
-        // for content to appear. That is the state Hair & Co's TV sat in.
-        showStatus('Connected to ' + (media && media.location ? media.location : 'DIGMI') +
-          ' — no content planned for this screen yet.');
       }
     } catch (error) {
       // This catch used to be empty, which is why a week of this outage left
