@@ -1,0 +1,170 @@
+body,
+html {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+  background-color: #25262b;
+  color: white;
+  overflow: hidden;
+}
+
+#content {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: 20px;
+}
+
+.media-container {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.media-player {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+}
+
+/* Main media content */
+.media-player video,
+.media-player img.main-media {
+  position: absolute;
+  /* Without `inset` an absolutely positioned child of a flex container falls
+     back to its static position, which engines resolve differently — on the
+     Samsung panels the slide landed in the bottom-right corner instead of
+     filling the screen (Hair & Co QH43C, 2026-09-04). Pin it to the viewport. */
+  inset: 0;
+  z-index: 10;
+  height: 100vh;
+  width: 100vw;
+  object-fit: contain;
+}
+
+/* Background blur */
+.media-player img.background {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  height: 100%;
+  width: 100%;
+  object-fit: cover;
+  filter: blur(10px);
+}
+
+#qrcode {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background-color: white;
+  border-radius: 20px;
+  box-shadow: 0 8px 12px rgba(0, 0, 0, 0.2);
+  border: 5px solid #c293d0;
+  padding: 20px;
+  z-index: 20;
+}
+
+#qr-text {
+  margin-top: 36px;
+  text-align: center;
+  font-size: 40px;
+  width: 100%;
+  z-index: 20;
+}
+
+#logo {
+  position: absolute;
+  top: 50px;
+  left: 50px;
+  width: 150px;
+  z-index: 20;
+}
+
+/* Opened with INFO or the red button — see the keydown handler in main.js. */
+.device-info.visible {
+  display: block;
+}
+
+.device-info {
+  display: none;
+  margin-top: 2rem;
+  font-size: 24px;
+  padding: 2rem;
+  background-color: rgba(0, 0, 0, 0.8);
+  z-index: 20;
+}
+
+.device-info p {
+  margin: 0.5rem 0;
+}
+
+/* Survives hideRegistrationScreen() on purpose: when a screen is paired but
+   has nothing planned, this line is the only thing that says so. */
+#status-line {
+  display: none;
+  margin-top: 24px;
+  max-width: 80%;
+  text-align: center;
+  font-size: 28px;
+  opacity: 0.75;
+  z-index: 20;
+}
+
+#reload-modal {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.8);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 30;
+  width: 100%;
+  height: 100%;
+}
+
+#reload-modal .text-center {
+  text-align: center;
+  color: white;
+  font-size: 2rem;
+  padding: 2rem;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+  display: inline-block;
+  width: 4rem;
+  height: 4rem;
+  border: 4px solid white;
+  border-top-color: transparent;
+  border-radius: 50%;
+  margin-bottom: 1rem;
+}
+
+.fade-in {
+  animation: fadeIn 0.5s ease-in;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

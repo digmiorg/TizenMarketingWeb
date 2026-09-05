@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Digmi Signage" />
+    <link
+        href="https://portal.digmi.eu"
+        rel="preconnect"
+    />
+    <link
+        href="https://unpkg.com"
+        rel="preconnect"
+    />
+    <link
+        href="https://cdn.jsdelivr.net"
+        rel="preconnect"
+    />
+    <link
+        href="https://storage.googleapis.com"
+        rel="preconnect"
+    />
+    <link
+        href="https://browser.sentry-cdn.com"
+        rel="preconnect"
+    />
+    <link
+        href="https://js-de.sentry-cdn.com"
+        rel="preconnect"
+    />
+    <link
+        href="https://region1.google-analytics.com"
+        rel="preconnect"
+    />
+    <link
+        href="https://firebasestorage.googleapis.com"
+        rel="preconnect"
+    />
+
+    <title>Digmi Signage - Probably the best signage in the world</title>
+    <script type="text/javascript" src="$B2BAPIS/b2bapis/b2bapis.js"></script>
+    <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
+
+    <!-- Vendored from cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@04f46c6a0708418cb7b96fc563eacae0fbf77674
+         (sha384-3zSEDfvllQohrq0PHL1fOXJuC/jSOO34H46t6UQfobFOmxE5BpjjaIJY5F2/bMnU).
+         The CDN path carried no ref, so every boot fetched whatever that repo's
+         default branch happened to hold — arbitrary code on the whole fleet.
+         Serving it locally also means a salon with broken DNS still gets a QR
+         code instead of a blank pairing screen. -->
+    <script src="js/vendor/qrcode.min.js"></script>
+
+    <link type="text/css" href="css/style.css" rel="stylesheet" />
+</head>
+
+<body>
+    <img
+        id="logo"
+        src="https://firebasestorage.googleapis.com/v0/b/digmi-d34ea.appspot.com/o/customers%2FDigmi%2FLogo%2FDigmiWhite.png?alt=media&token=55af51fb-866d-44da-8047-b78a882586b6"
+        alt="Logo"
+    />
+    <div id="content" class="prose">
+        <img
+            id="image-banner"
+            src="https://firebasestorage.googleapis.com/v0/b/digmi-d34ea.appspot.com/o/customers%2FDigmi%2FDigmiSignage%2Fthe%20seasons.png?alt=media&token=9e7ccc3d-1195-4b8f-bcd9-247960063251"
+            alt="The Seasons Banner"
+        />
+
+        <div id="qrcode"></div>
+
+        <h2 id="qr-text">Scan the QR-code to connect this TV<br/>to your location at DIGMI.</h2>
+        <p id="status-line"></p>
+        <div class="device-info">
+            <p>App Version: <span id="app-version-text"></span></p>
+            <p>Model: <span id="device-model"></span></p>
+            <p>tizenid: <span id="device-systeminfo-caps"></span></p>
+            <p>DUID: <span id="device-duid"></span></p>
+            <p>uuID: <span id="device-uuid"></span></p>
+            <p>Response: <span id="checkdevice-response"></span></p>
+            <p>Playing: <span id="media-playing-info"></span></p>
+            <p>Stage: <span id="stage-geometry"></span></p>
+            <p>Next check in: <span id="check-countdown">0</span> seconds</p>
+        </div>
+    </div>
+    <img
+        id="background-image"
+        src="https://firebasestorage.googleapis.com/v0/b/digmi-d34ea.appspot.com/o/customers%2FDigmi%2FDigmiSignage%2Fbackground.png?alt=media&token=f0e07b0f-f555-4ae5-9245-d6890b8f5ae3"
+        alt="Background Image"
+    />
+    <div id="reload-modal" style="display: none">
+        <div class="p-8 text-center text-4xl text-white">
+            <div
+                class="mb-4 inline-block h-16 w-16 animate-spin rounded-full border-4 border-white border-t-transparent"
+            ></div>
+            <p>Reloading...</p>
+        </div>
+    </div>
+    <div class="media-container">
+        <div id="campaign-container"></div>
+    </div>
+    <script src="js/keyTizen.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
