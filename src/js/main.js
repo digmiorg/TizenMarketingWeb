@@ -37,13 +37,14 @@ document.addEventListener('keydown', function (e) {
 
   switch (e.keyCode) {
     case window.tvKey.ENTER:
-      deviceInfoElement = document.querySelector('.device-info'); // Select the device-info element
+    case window.tvKey.INFO:
+      deviceInfoElement = document.querySelector('.device-info');
       if (deviceInfoElement) {
-        // Toggle the element's display property
-        deviceInfoElement.style.display =
-          deviceInfoElement.style.display === 'none' || !deviceInfoElement.style.display
-            ? 'block'
-            : 'none';
+        // One mechanism, the `.visible` class. This assigned `style.display`
+        // inline in two separate copies, which silently beats any stylesheet
+        // rule and made the panel's state depend on which key opened it.
+        deviceInfoElement.classList.toggle('visible');
+        updateStageGeometry();
       }
       e.preventDefault();
       break;
@@ -70,17 +71,6 @@ document.addEventListener('keydown', function (e) {
       break;
     case window.tvKey.EXIT:
       showReloadModal();
-      e.preventDefault();
-      break;
-    case window.tvKey.INFO:
-      deviceInfoElement = document.querySelector('.device-info'); // Select the device-info element
-      if (deviceInfoElement) {
-        // Toggle the element's display property
-        deviceInfoElement.style.display =
-          deviceInfoElement.style.display === 'none' || !deviceInfoElement.style.display
-            ? 'block'
-            : 'none';
-      }
       e.preventDefault();
       break;
   }
@@ -425,12 +415,26 @@ function displayMediaContent(data) {
                 window.currentMediaIndex = 0;
                 window.mediaLength = data.campaign_media.length;
 
+                clearInterval(window.rotationInterval);
+                window.rotationInterval = null;
+
+                if (window.mediaLength === 0) {
+                  // A campaign can be unplanned while the screen is playing it.
+                  // displayMedia() and startRotationTimer() both read
+                  // campaign_media[0] without a guard and threw a TypeError
+                  // here, which killed the very poll that would have picked the
+                  // next campaign up.
+                  mediaPlayer.innerHTML = '';
+                  showStatus('Connected to ' + (data.location || 'DIGMI') +
+                    ' — no content planned for this screen yet.');
+
+                  return true;
+                }
+
                 // Immediately display the first item of the new content
                 window.displayMedia(0);
-
-                // Restart the rotation timer with the new content
-                clearInterval(window.rotationInterval);
                 startRotationTimer();
+                updateStageGeometry();
 
                 return true; // Data changed and updated
               }
@@ -576,8 +580,6 @@ function checkDevice(uuid) {
           (data.device_exists ? '( 👍 ) ' : '( 👎 ) ') + data.message;
       }
       if (data.device_exists) {
-        clearInterval(checkInterval);
-
         // Start fetching and displaying media
         const media = await fetchDeviceMedia(uuid);
 
@@ -591,12 +593,18 @@ function checkDevice(uuid) {
         const campaignContainer = document.getElementById('campaign-container');
         campaignContainer.style.display = 'block';
 
-        if (!media || !media.campaign_media || media.campaign_media.length === 0) {
-          showStatus('Connected to ' + (media && media.location ? media.location : 'DIGMI') +
-            ' — no content planned for this screen yet.');
+        if (media && media.campaign_media && media.campaign_media.length > 0) {
+          clearInterval(checkInterval);
+
+          return;
         }
 
-        return;
+        // Paired, but nothing planned yet. Keep asking: the media poll is set
+        // up inside displayMediaContent(), which only runs when there is media,
+        // so a screen that paired into an empty playlist had nothing watching
+        // for content to appear. That is the state Hair & Co's TV sat in.
+        showStatus('Connected to ' + (media && media.location ? media.location : 'DIGMI') +
+          ' — no content planned for this screen yet.');
       }
     } catch (error) {
       // This catch used to be empty, which is why a week of this outage left
@@ -654,30 +662,3 @@ window.onload = function () {
       generateQRCode();
     });
 };
-
-// The device panel (uuid, model, last API response) is hidden by default and
-// had no way of being opened on a TV, so nobody on site could read the device
-// id off the screen — the QR code was the only route to it. INFO or the red
-// button toggles it.
-document.addEventListener('keydown', function (event) {
-  const keys = window.tvKey || {};
-  if (event.keyCode !== keys.INFO && event.keyCode !== keys.RED) {
-    return;
-  }
-
-  const panel = document.querySelector('.device-info');
-  if (panel) {
-    panel.classList.toggle('visible');
-    updateStageGeometry();
-  }
-});
-
-try {
-  if (window.tizen && tizen.tvinputdevice) {
-    tizen.tvinputdevice.registerKey('Info');
-    tizen.tvinputdevice.registerKey('ColorF0Red');
-  }
-} catch (error) {
-  // Best effort: without the registration the panel just stays unreachable,
-  // which is the behaviour we had before anyway.
-}
