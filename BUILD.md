@@ -75,9 +75,21 @@ Set them with `gh secret set`, never by pasting into a chat or a file.
 ### Creating the certificate profile
 
 Commercial signage displays need a **Samsung** certificate at **Partner**
-privilege. A generic Tizen certificate, or a Samsung one at Public privilege,
-fails with *error -3: invalid certificate chain* — current C-series hardware
-(QBC/QMC/QHC) rejects it outright.
+privilege. Samsung's TEP material states the rule directly: a Tizen certificate
+*"allows only for using the Public Level API privileges"* and a Samsung
+certificate *"is required if application uses TEP API"*. Anything the app needs
+beyond public privileges — SystemControl, Timer, SyncPlay, b2bcontrol — is
+unreachable without it, whatever config.xml declares. A generic Tizen
+certificate, or a Samsung one at Public privilege, also fails with *error -3:
+invalid certificate chain* on current hardware.
+
+A Samsung certificate is **valid for one year**. Renewal keeps the installed
+estate updatable only if the same author key is reused: Certificate Manager's
+*Use an existing author certificate* option *"will create a new author
+certificate using the same RSA key"*. The key, and its password, are therefore
+the one artefact that must never be lost — there is no password reset, and
+without it the certificate can never be renewed and every display needs a
+manual reinstall.
 
 1. Open Certificate Manager. In VS Code that is `Tizen Web: Run
    Certificate-Manager` or `Tizen TV: Run Certificate Manager` — the extensions
@@ -90,17 +102,49 @@ fails with *error -3: invalid certificate chain* — current C-series hardware
 3. Device type: **Samsung**.
 4. Author certificate: create new, set a password, **write the password down**.
    The previous one was lost, which is part of why this document exists.
-5. Distributor certificate: privilege level **Partner**, then add the **EMUID**
-   of every display that should accept the build. Up to 50 per certificate;
-   beyond that the fleet needs a Partner certificate from Samsung's partner
-   portal.
+5. Distributor certificate: privilege level **Partner**, then add the **Unique
+   Device ID** of every display that should accept the build (see below for
+   which field that is). Samsung caps this at 50 *"for development purposes"*;
+   selling beyond that means distributing through Seller Office and TBM
+   instead — see *Distribution at scale*.
 6. For each display: Device Manager → right-click → **Permit to install apps**.
    Mandatory, easily missed, and it has to be redone whenever the certificate
    profile changes.
 
-EMUID is the UUID-shaped identifier on the display's **Menu → Support → About**
-screen. It is not the "Unique Device ID" shown next to it; that one is for
-Samsung server registration.
+The DUID to use is **Unique Device ID**, found under **Contact Samsung →
+Product Information** on the display. Samsung's own TEP training material is
+explicit and underlines it: *"Make sure to select correct DUID value – Unique
+Device ID NOT Unique ID"*, with a screenshot of a QM43R marking `Unique ID` as
+the incorrect value. It is a 13-character string such as `RLCN5JUZ3TEC4`, not a
+UUID. Field guides circulating online say the opposite; Samsung's own material
+is the one to follow, and the wrong field fails with *error -4: invalid
+signature* after the certificate has already been issued.
+
+## Distribution at scale
+
+Everything above describes the self-hosted path: we sign a .wgt, serve it with
+its descriptor, and point displays at that directory. Samsung treats that as the
+development arrangement — the 50-DUID cap on the distributor certificate is
+stated as being *"for development purposes"*.
+
+The production path, in Samsung's own words, is different: *"Application signed
+with Samsung Certificate can be uploaded to Seller Office and later distributed
+via TBM."* Tizen Business Manager then handles enrolment and Zero Touch
+configuration, and exposes a partner-gated Open API for integrating device
+management into our own portal.
+
+Two things gate that route, neither of them technical:
+
+- Seller Office partnership is requested online *"if a prior agreement has been
+  made with your Samsung Content Manager"* — so it starts with a Samsung
+  relationship, not a form.
+- Whether Seller Office distribution removes the DUID list entirely for signage
+  Custom Apps is **not confirmed**. It is the question that decides whether we
+  can sell display number 51, and it is open with Samsung.
+
+Until that is answered, treat the published `production/` directories as test
+infrastructure rather than fleet distribution, and prove releases on a single
+panel through the SSSP path.
 
 ## Keeping the toolchain pinned
 
