@@ -42,12 +42,21 @@ Actions → **Release widget** → Run workflow.
    touching the repository — use it to read the verification output and the
    signing identity.
 3. Run with **publish** on to commit `production/<version>/`.
-4. Install that build on **one panel** and confirm it starts.
+4. Prove that build on **one panel, through the SSSP path** — put the `.wgt`
+   and `sssp_config.xml` on a URL, point the panel's Custom App at that
+   directory, reboot, and watch it come up on its own.
 5. Only then run with **publish_latest** on. That is the step the fleet follows.
 
-Step 4 is not ceremony. A display refuses an update signed by a different author
-certificate than the one it already carries, and the only way to find out is to
-try it on a screen you can reach.
+Step 4 is not ceremony, and the method matters. A display refuses an update
+signed by a different author certificate than the one it already carries, and
+the only way to find out is to try it on a screen you can reach.
+
+Do not prove it with `tizen install` over SDB. The same .wgt behaves differently
+depending on how it arrives: installed over SDB it registers as a separate app
+beside the Custom App player and **never auto-starts on boot**, while the SSSP
+path registers it *as* the Custom App player and does. A screen in a shop window
+has to come back by itself after a power cut, so SDB would prove the certificate
+and nothing that matters about the product.
 
 ## Certificates
 
