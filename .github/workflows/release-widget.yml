@@ -1,0 +1,172 @@
+name: Release widget
+
+# Manual only, and publishing to `latest/` is a separate opt-in.
+#
+# The fleet follows `production/latest/`, so a workflow that wrote there on
+# every push would hand every screen an untested build. A Samsung display also
+# refuses an update signed by a different author certificate than the one it
+# already has, which means the first release after a certificate change has to
+# be proven on one panel before the rest of the estate is pointed at it.
+#
+# So: build and verify freely, publish deliberately.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Commit the package to production/<version>/'
+        type: boolean
+        default: false
+      publish_latest:
+        description: 'Also update production/latest/ — this rolls out to the fleet'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  # Pinned deliberately: Samsung re-spins installers under the same URL, so the
+  # checksum is the only thing that says we got what we tested against. Both
+  # live as repository variables; see BUILD.md for how to refresh them.
+  TIZEN_INSTALLER_URL: ${{ vars.TIZEN_INSTALLER_URL }}
+  TIZEN_INSTALLER_SHA256: ${{ vars.TIZEN_INSTALLER_SHA256 }}
+  TIZEN_HOME: ${{ github.workspace }}/.tizen-studio
+  CERT_PROFILE: digmi-ci
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      sssp_ver: ${{ steps.build.outputs.sssp_ver }}
+      size: ${{ steps.build.outputs.size }}
+      widget_name: ${{ steps.build.outputs.widget_name }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check the signing inputs are present
+        env:
+          AUTHOR_P12: ${{ secrets.TIZEN_AUTHOR_P12_BASE64 }}
+          DISTRIBUTOR_P12: ${{ secrets.TIZEN_DISTRIBUTOR_P12_BASE64 }}
+        run: |
+          missing=0
+          for v in TIZEN_INSTALLER_URL TIZEN_INSTALLER_SHA256; do
+            [ -n "${!v}" ] || { echo "::error::repository variable $v is not set"; missing=1; }
+          done
+          [ -n "$AUTHOR_P12" ] || { echo "::error::secret TIZEN_AUTHOR_P12_BASE64 is not set"; missing=1; }
+          [ -n "$DISTRIBUTOR_P12" ] || { echo "::error::secret TIZEN_DISTRIBUTOR_P12_BASE64 is not set"; missing=1; }
+          exit $missing
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install the Tizen Studio CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL -o installer.bin "$TIZEN_INSTALLER_URL"
+          echo "$TIZEN_INSTALLER_SHA256  installer.bin" | sha256sum -c -
+          chmod +x installer.bin
+          ./installer.bin --accept-license "$TIZEN_HOME"
+          echo "$TIZEN_HOME/tools/ide/bin" >> "$GITHUB_PATH"
+
+      - name: Install the Samsung Certificate Extension
+        run: |
+          set -euo pipefail
+          # Samsung certificates do not exist as a profile type without this.
+          "$TIZEN_HOME/package-manager/package-manager-cli.bin" \
+            install --no-java-check --accept-license "Samsung Certificate Extension"
+
+      - name: Load the signing certificates
+        env:
+          AUTHOR_P12: ${{ secrets.TIZEN_AUTHOR_P12_BASE64 }}
+          AUTHOR_PASSWORD: ${{ secrets.TIZEN_AUTHOR_PASSWORD }}
+          DISTRIBUTOR_P12: ${{ secrets.TIZEN_DISTRIBUTOR_P12_BASE64 }}
+          DISTRIBUTOR_PASSWORD: ${{ secrets.TIZEN_DISTRIBUTOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          certs="$RUNNER_TEMP/certs"
+          mkdir -p "$certs"
+          printf '%s' "$AUTHOR_P12" | base64 -d > "$certs/author.p12"
+          printf '%s' "$DISTRIBUTOR_P12" | base64 -d > "$certs/distributor.p12"
+          chmod 600 "$certs"/*.p12
+
+          # security-profiles rather than a hand-written profiles.xml: Tizen
+          # obfuscates the stored password with its own scheme, and a profile
+          # written by hand is the kind of thing that signs successfully and
+          # then fails on the display.
+          tizen security-profiles add \
+            -n "$CERT_PROFILE" \
+            -a "$certs/author.p12" -p "$AUTHOR_PASSWORD" \
+            -d "$certs/distributor.p12" -dp "$DISTRIBUTOR_PASSWORD"
+
+      - name: Build and sign
+        id: build
+        run: |
+          chmod +x scripts/build-wgt.sh
+          scripts/build-wgt.sh "$CERT_PROFILE"
+
+      - name: Verify the package
+        run: |
+          chmod +x scripts/verify-wgt.sh
+          scripts/verify-wgt.sh .build/out
+
+      - name: Remove the certificates from the runner
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/certs" "$TIZEN_HOME/tools/certificate-generator" || true
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: widget-${{ steps.build.outputs.version }}
+          path: .build/out/
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: widget-${{ needs.build.outputs.version }}
+          path: .build/out
+
+      - name: Place the package
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "production/$VERSION"
+          cp .build/out/*.wgt .build/out/sssp_config.xml "production/$VERSION/"
+
+          if [ "${{ inputs.publish_latest }}" = "true" ]; then
+            mkdir -p production/latest
+            cp .build/out/*.wgt .build/out/sssp_config.xml production/latest/
+            echo "::warning::production/latest/ updated — the fleet will pick this up"
+          else
+            echo "production/latest/ left alone; test on one panel, then re-run with publish_latest"
+          fi
+
+      - name: Commit
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add production
+          git diff --cached --quiet && { echo 'nothing changed'; exit 0; }
+          git commit -m "build(widget): publish $VERSION (sssp ver $SSSP_VER)
+
+          Built and signed by the Release widget workflow, run ${{ github.run_number }}.
+          production/latest/ updated: ${{ inputs.publish_latest }}"
+          git push
