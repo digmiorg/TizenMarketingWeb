@@ -205,28 +205,54 @@ updatability when the same RSA key is reused, and there is no password reset.
 ## Distribution at scale
 
 Everything above describes the self-hosted path: we sign a .wgt, serve it with
-its descriptor, and point displays at that directory. Samsung treats that as the
-development arrangement — the 50-DUID cap on the distributor certificate is
-stated as being *"for development purposes"*.
+its descriptor, and point displays at that directory.
 
-The production path, in Samsung's own words, is different: *"Application signed
-with Samsung Certificate can be uploaded to Seller Office and later distributed
-via TBM."* Tizen Business Manager then handles enrolment and Zero Touch
-configuration, and exposes a partner-gated Open API for integrating device
-management into our own portal.
+### Why the DUID list exists, and when it stops applying
 
-Two things gate that route, neither of them technical:
+The certificate Certificate Manager issues is not the real thing. Samsung's own
+documentation is explicit: *"the distributor certificate that you create using
+the Certificate Manager is actually called a **pseudo-distributor
+certificate**. In fact, when you submit your application on the app store, your
+distributor certificate will be switched to the actual distributor certificate
+of the store."*
 
-- Seller Office partnership is requested online *"if a prior agreement has been
-  made with your Samsung Content Manager"* — so it starts with a Samsung
-  relationship, not a form.
-- Whether Seller Office distribution removes the DUID list entirely for signage
-  Custom Apps is **not confirmed**. It is the question that decides whether we
-  can sell display number 51, and it is open with Samsung.
+The DUID list is a property of that pseudo certificate, and its purpose is
+anti-leak, not licensing: *"This ensures that the application can only be
+installed on your device and the ones that you have approved even when your
+package file is leaked. You can think of it as a 'personal' distributor
+certificate."* The cap is **50 DUIDs**.
 
-Until that is answered, treat the published `production/` directories as test
-infrastructure rather than fleet distribution, and prove releases on a single
-panel through the SSSP path.
+So per-display registration is a cost of **sideloading**, not a property of the
+product. Signing and serving the .wgt ourselves means every new display has to
+be added to the certificate, the certificate re-issued, and the package
+re-signed. Going through Samsung's distribution means the device list is
+replaced along with the certificate.
+
+What is **not** confirmed is that a signage Custom App rides that same swap. The
+page documenting it describes app-store submission generally; the TV Seller
+Office distribution guide never mentions distributor certificates at all, and
+its DUID list is a 30-day alpha test on a *different field* — "Unique ID" under
+`Support > About This TV > Smart Hub Information`, not the "Unique Device ID"
+under `Contact Samsung > Product Information` that signage certificates use.
+That difference is itself a sign the two tracks are not the same thing.
+
+This is the question that decides whether display number 51 can be sold, and it
+is the one to put to Samsung in their own vocabulary: *does distributing a
+signage Custom App through Seller Office and TBM replace the pseudo-distributor
+certificate, as app-store submission does?*
+
+### The production route as Samsung describes it
+
+*"Application signed with Samsung Certificate can be uploaded to Seller Office
+and later distributed via TBM."* Tizen Business Manager then handles enrolment
+and Zero Touch configuration, and exposes a partner-gated Open API for
+integrating device management into our own portal. Seller Office partnership is
+requested online *"if a prior agreement has been made with your Samsung Content
+Manager"* — so it starts with a Samsung relationship, not a form.
+
+Until the question above is answered, treat the published `production/`
+directories as test infrastructure rather than fleet distribution, and prove
+releases on a single panel through the SSSP path.
 
 ## Keeping the toolchain pinned
 
