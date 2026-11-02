@@ -20,6 +20,10 @@ on:
         description: 'Also update production/latest/ — this rolls out to the fleet'
         type: boolean
         default: false
+      force:
+        description: 'Overwrite an already-published production/<version>/'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,6 +40,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    # A blocked password prompt inside the Tizen CLI waits forever; without a
+    # ceiling it would hold a runner for the default six hours.
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.build.outputs.version }}
       sssp_ver: ${{ steps.build.outputs.sssp_ver }}
@@ -48,7 +55,9 @@ jobs:
       - name: Check the signing inputs are present
         env:
           AUTHOR_P12: ${{ secrets.TIZEN_AUTHOR_P12_BASE64 }}
+          AUTHOR_PASSWORD: ${{ secrets.TIZEN_AUTHOR_PASSWORD }}
           DISTRIBUTOR_P12: ${{ secrets.TIZEN_DISTRIBUTOR_P12_BASE64 }}
+          DISTRIBUTOR_PASSWORD: ${{ secrets.TIZEN_DISTRIBUTOR_PASSWORD }}
         run: |
           missing=0
           for v in TIZEN_INSTALLER_URL TIZEN_INSTALLER_SHA256; do
@@ -56,6 +65,11 @@ jobs:
           done
           [ -n "$AUTHOR_P12" ] || { echo "::error::secret TIZEN_AUTHOR_P12_BASE64 is not set"; missing=1; }
           [ -n "$DISTRIBUTOR_P12" ] || { echo "::error::secret TIZEN_DISTRIBUTOR_P12_BASE64 is not set"; missing=1; }
+          # Without these the CLI signs with an empty password and fails deep
+          # inside the packager rather than in the step that exists to say
+          # "not configured".
+          [ -n "$AUTHOR_PASSWORD" ] || { echo "::error::secret TIZEN_AUTHOR_PASSWORD is not set"; missing=1; }
+          [ -n "$DISTRIBUTOR_PASSWORD" ] || { echo "::error::secret TIZEN_DISTRIBUTOR_PASSWORD is not set"; missing=1; }
           exit $missing
 
       - uses: actions/setup-java@v5
@@ -72,6 +86,9 @@ jobs:
           ./installer.bin --accept-license "$TIZEN_HOME"
           echo "$TIZEN_HOME/tools/ide/bin" >> "$GITHUB_PATH"
 
+      - name: Install the keyring the signing engine expects
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gnome-keyring dbus-x11
+
       - name: Install the Samsung Certificate Extension
         run: |
           set -euo pipefail
@@ -79,7 +96,8 @@ jobs:
           "$TIZEN_HOME/package-manager/package-manager-cli.bin" \
             install --no-java-check --accept-license "Samsung Certificate Extension"
 
-      - name: Load the signing certificates
+      - name: Sign and build
+        id: build
         env:
           AUTHOR_P12: ${{ secrets.TIZEN_AUTHOR_P12_BASE64 }}
           AUTHOR_PASSWORD: ${{ secrets.TIZEN_AUTHOR_PASSWORD }}
@@ -87,26 +105,37 @@ jobs:
           DISTRIBUTOR_PASSWORD: ${{ secrets.TIZEN_DISTRIBUTOR_PASSWORD }}
         run: |
           set -euo pipefail
-          certs="$RUNNER_TEMP/certs"
-          mkdir -p "$certs"
-          printf '%s' "$AUTHOR_P12" | base64 -d > "$certs/author.p12"
-          printf '%s' "$DISTRIBUTOR_P12" | base64 -d > "$certs/distributor.p12"
-          chmod 600 "$certs"/*.p12
+          # Before the files exist, not after: a chmod afterwards leaves them
+          # readable for the moment in between.
+          umask 077
+          CERTS="$RUNNER_TEMP/certs"
+          mkdir -p "$CERTS"
+          printf '%s' "$AUTHOR_P12" | base64 -d > "$CERTS/author.p12"
+          printf '%s' "$DISTRIBUTOR_P12" | base64 -d > "$CERTS/distributor.p12"
+          export CERTS
 
-          # security-profiles rather than a hand-written profiles.xml: Tizen
-          # obfuscates the stored password with its own scheme, and a profile
-          # written by hand is the kind of thing that signs successfully and
-          # then fails on the display.
-          tizen security-profiles add \
-            -n "$CERT_PROFILE" \
-            -a "$certs/author.p12" -p "$AUTHOR_PASSWORD" \
-            -d "$certs/distributor.p12" -dp "$DISTRIBUTOR_PASSWORD"
+          # One session for both commands. The signing engine keeps certificate
+          # passwords in a Freedesktop keyring, and `security-profiles add` and
+          # `tizen package` only round-trip them within a single session bus.
+          # Split across two steps, the second finds no password and blocks on
+          # an interactive prompt until the job times out.
+          dbus-run-session -- bash -euo pipefail -c '
+            echo "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
 
-      - name: Build and sign
-        id: build
-        run: |
-          chmod +x scripts/build-wgt.sh
-          scripts/build-wgt.sh "$CERT_PROFILE"
+            # The CLI resolves a relative profiles path against its own bin
+            # directory, and TIZEN_HOME here is not the default location.
+            tizen cli-config "profiles.path=$TIZEN_HOME/tools/certificate-generator/profiles.xml"
+
+            tizen security-profiles add \
+              -n "$CERT_PROFILE" \
+              -a "$CERTS/author.p12" -p "$AUTHOR_PASSWORD" \
+              -d "$CERTS/distributor.p12" -dp "$DISTRIBUTOR_PASSWORD"
+
+            # Fail here, loudly, rather than inside the packager.
+            tizen security-profiles list
+
+            scripts/build-wgt.sh "$CERT_PROFILE"
+          '
 
       - name: Verify the package
         run: |
@@ -115,7 +144,13 @@ jobs:
 
       - name: Remove the certificates from the runner
         if: always()
-        run: rm -rf "$RUNNER_TEMP/certs" "$TIZEN_HOME/tools/certificate-generator" || true
+        run: |
+          # profiles.xml too: the CLI stores the certificate password there
+          # under its own reversible obfuscation, so leaving it behind leaves
+          # the password behind.
+          rm -rf "$RUNNER_TEMP/certs" \
+                 "$TIZEN_HOME/tools/certificate-generator" \
+                 "$HOME/tizen-studio-data/profile" || true
 
       - uses: actions/upload-artifact@v5
         with:
@@ -139,6 +174,47 @@ jobs:
           name: widget-${{ needs.build.outputs.version }}
           path: .build/out
 
+      - name: Refuse to overwrite a released version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -d "production/$VERSION" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "::error::production/$VERSION already exists. A rebuild of the same"
+            echo "::error::version produces a different .wgt (fresh signature timestamps)"
+            echo "::error::and therefore a different <size>, while <ver> stays put — so"
+            echo "::error::displays never re-download it and latest/ would advertise a"
+            echo "::error::package the fleet does not have. Bump the version, or re-run"
+            echo "::error::with force if you know the old one was never distributed."
+            exit 1
+          fi
+
+      - name: Refuse to go backwards
+        if: inputs.publish_latest
+        env:
+          SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
+        run: |
+          set -euo pipefail
+          published="$(sed -n 's|.*<ver>\([0-9]*\)</ver>.*|\1|p' \
+            production/latest/sssp_config.xml 2>/dev/null | head -1)"
+
+          if [ -z "$published" ]; then
+            echo "no readable <ver> in production/latest/ — nothing to compare against"
+            exit 0
+          fi
+
+          # workflow_dispatch accepts any ref, so a run from an older branch can
+          # publish a lower <ver> to latest/. Displays only re-download when the
+          # number grows, so that would freeze the whole fleet on the build it
+          # already has, silently and permanently.
+          if [ "$SSSP_VER" -le "$published" ]; then
+            echo "::error::latest/ already advertises <ver>$published and this build is"
+            echo "::error::<ver>$SSSP_VER. Publishing it would strand every display on"
+            echo "::error::the version it already runs. Check which ref you dispatched."
+            exit 1
+          fi
+          echo "<ver> $published -> $SSSP_VER"
+
       - name: Place the package
         env:
           VERSION: ${{ needs.build.outputs.version }}
@@ -150,9 +226,9 @@ jobs:
           if [ "${{ inputs.publish_latest }}" = "true" ]; then
             mkdir -p production/latest
             cp .build/out/*.wgt .build/out/sssp_config.xml production/latest/
-            echo "::warning::production/latest/ updated — the fleet will pick this up"
+            echo "::warning::production/latest/ updated — the fleet follows this directory"
           else
-            echo "production/latest/ left alone; test on one panel, then re-run with publish_latest"
+            echo "production/latest/ left alone; prove it on one panel through SSSP first"
           fi
 
       - name: Commit
@@ -170,3 +246,33 @@ jobs:
           Built and signed by the Release widget workflow, run ${{ github.run_number }}.
           production/latest/ updated: ${{ inputs.publish_latest }}"
           git push
+
+      - name: Confirm the published descriptor is actually being served
+        if: inputs.publish_latest
+        env:
+          SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
+          PAGES_URL: https://digmiorg.github.io/TizenMarketingWeb/production/latest/sssp_config.xml
+        run: |
+          set -euo pipefail
+          # Committing is not publishing. This directory is served by GitHub
+          # Pages, and a push made with GITHUB_TOKEN does not trigger a Pages
+          # build — so the job can go green while displays keep being served the
+          # previous descriptor, which is precisely the silent failure this
+          # pipeline exists to end. Check what is actually on the wire.
+          for attempt in $(seq 1 20); do
+            served="$(curl -fsS --max-time 20 "$PAGES_URL" 2>/dev/null \
+              | sed -n 's|.*<ver>\([0-9]*\)</ver>.*|\1|p' | head -1 || true)"
+            if [ "$served" = "$SSSP_VER" ]; then
+              echo "serving <ver>$served — the fleet can see this build"
+              exit 0
+            fi
+            echo "attempt $attempt: serving '${served:-nothing}', waiting for $SSSP_VER"
+            sleep 30
+          done
+
+          echo "::error::After ten minutes $PAGES_URL still serves '${served:-nothing}'"
+          echo "::error::instead of $SSSP_VER. The commit landed but the site was not"
+          echo "::error::rebuilt, so no display will see this release. Publishing from"
+          echo "::error::Actions needs a token that triggers Pages, or the site needs to"
+          echo "::error::be built by a workflow rather than from the branch."
+          exit 1

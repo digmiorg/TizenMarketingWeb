@@ -27,6 +27,11 @@ SRC_DIR="src"
 STAGE_DIR="${BUILD_STAGE_DIR:-.build/package}"
 OUT_DIR="${BUILD_OUT_DIR:-.build/out}"
 
+# Both are wiped with `rm -rf` below, and both are overridable. Refuse anything
+# outside .build/ so that `BUILD_STAGE_DIR=src` cannot delete the source tree.
+case "$STAGE_DIR" in .build/*) ;; *) echo "BUILD_STAGE_DIR must live under .build/" >&2; exit 1 ;; esac
+case "$OUT_DIR" in .build/*) ;; *) echo "BUILD_OUT_DIR must live under .build/" >&2; exit 1 ;; esac
+
 say() { printf '==> %s\n' "$1"; }
 die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
 
@@ -73,11 +78,16 @@ mkdir -p "$STAGE_DIR" "$OUT_DIR"
 # package.
 cp -R "$SRC_DIR"/. "$STAGE_DIR"/
 
-# Dotfiles at any depth: .gitignore, .gitattributes, .project, .DS_Store …
-find "$STAGE_DIR" -mindepth 1 -name '.*' -exec rm -rf {} + 2>/dev/null || true
+# One sweep, at any depth, for everything that must not be signed: dotfiles
+# (.gitignore, .gitattributes, .project, .DS_Store …) and Tizen Studio's output
+# directories. Previously `Build` was only stripped at the top level while
+# dotfiles were stripped everywhere, so a nested js/Build/ survived staging and
+# was caught later by verify — a build that fails at the wrong end.
+# No `|| true`: a strip that silently fails is a package that silently carries
+# metadata.
+find "$STAGE_DIR" -mindepth 1 \( -name '.*' -o -name Build -o -name Debug \) \
+    -prune -exec rm -rf {} +
 
-# Tizen Studio's own output directories, and any artefact of a previous build.
-rm -rf "$STAGE_DIR/Build" "$STAGE_DIR/Debug"
 rm -f "$STAGE_DIR"/*.wgt "$STAGE_DIR/author-signature.xml" "$STAGE_DIR/signature1.xml"
 
 [ -f "$STAGE_DIR/config.xml" ] || die "config.xml missing from the staged package"
@@ -91,8 +101,12 @@ say "staged files:"
 (cd "$STAGE_DIR" && find . -type f | sort | sed 's/^/      /')
 
 # ------------------------------------------------------------------ build ---
+# Absolute: the CLI resolves a relative path against its own bin directory,
+# which is somewhere else entirely.
+stage_abs="$(cd "$STAGE_DIR" && pwd)"
+
 say "packaging and signing with profile '$PROFILE'"
-"$TIZEN" package -t wgt -s "$PROFILE" -- "$STAGE_DIR"
+"$TIZEN" package -t wgt -s "$PROFILE" -- "$stage_abs"
 
 wgt="$(find "$STAGE_DIR" -maxdepth 1 -name '*.wgt' | head -1)"
 [ -n "$wgt" ] || die "tizen package produced no .wgt"
