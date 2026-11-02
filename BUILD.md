@@ -100,6 +100,54 @@ the one artefact that must never be lost — there is no password reset, and
 without it the certificate can never be renewed and every display needs a
 manual reinstall.
 
+### How the password gets lost
+
+Not by being forgotten. Tizen Studio never shows the password again after the
+profile is created; it writes it to a `.pwd` file next to the `.p12` and reads
+it from there. On Windows that file is a **DPAPI blob** — encrypted against the
+Windows *user account* that created it. Copying `Tizen-data/` to OneDrive, or to
+another machine, therefore carries the key across and leaves the password
+behind: the `.p12` arrives intact and permanently unopenable.
+
+A `.pwd` beginning `01 00 00 00 d0 8c 9d df 01 15 d1 11` (after Tizen's 4-byte
+length prefix) is such a blob — `df9d8cd0-1501-11d1-8c7a-00c04fc297eb` is
+DPAPI's provider GUID. It can only be decrypted on the originating Windows
+install, signed in as that user.
+
+**So: record the password somewhere outside Tizen Studio when you create the
+profile.** The `.pwd` file is not a backup of it.
+
+### What this machine actually holds
+
+Read from the unencrypted `author.crt` / `distributor.crt` beside each key
+(2026-11-02):
+
+| Profile | Author | Author CA | Expires | Distributor privilege | DUIDs |
+| --- | --- | --- | --- | --- | --- |
+| `TV` | `93295b0f…` CN=Digmi | Samsung VD Author CA | 2026-11-10 | **Public** | `2DCPQL4LSAA66` |
+| `Tizen7` | `93227dd2…` CN=Digmi | Samsung VD Author CA | 2026-11-12 | **Public** | `2DCPQL4LSAA66` |
+
+Three things follow, and none of them were assumed before the certificates were
+read:
+
+- **Neither is Partner.** Both distributor certificates are issued by `VD
+  DEVELOPER Public CA Class`. No TEP API, no `b2bcontrol`, whatever `config.xml`
+  declares — and renewing them as-is would not change that.
+- **Neither registers a display.** Both carry the same single DUID, a bench
+  device. No shop panel would accept a build signed by either.
+- **Both are already unusable, not expiring.** Their `.pwd` files are absent, so
+  the CLI cannot sign with them and Certificate Manager cannot renew them —
+  renewal has to open the existing author key. This is why the profile lists in
+  Certificate Manager with every field reading *N/A*: the `.p12` is found, the
+  password beside it is not.
+
+The build the fleet runs is signed by a third identity again — `e318dc37…`,
+CN=Digmi, issued by **Tizen Developers CA**, valid to 2027-01-01 — whose key is
+not on this machine under any password. The nearest candidate,
+`Tizen-data/keystore/author/DigmiTizen.p12`, came from that same Tizen
+certificate-generator path and still has its `.pwd`, but that file is the
+Windows DPAPI blob described above.
+
 1. Open Certificate Manager. In VS Code that is `Tizen Web: Run
    Certificate-Manager` or `Tizen TV: Run Certificate Manager` — the extensions
    bundle Samsung's CA chain (`vd_tizen_dev_partner2.crt` among it), so the
