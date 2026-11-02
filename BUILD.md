@@ -70,10 +70,14 @@ privilege. A generic Tizen certificate, or a Samsung one at Public privilege,
 fails with *error -3: invalid certificate chain* — current C-series hardware
 (QBC/QMC/QHC) rejects it outright.
 
-1. Tizen Studio Package Manager → Extension SDK → install **Samsung Certificate
-   Extension**. Without it the Samsung profile type does not exist.
-2. Certificate Manager → **+** → new profile. Create a fresh profile rather than
-   editing an existing one; editing is unreliable.
+1. Open Certificate Manager. In VS Code that is `Tizen Web: Run
+   Certificate-Manager` or `Tizen TV: Run Certificate Manager` — the extensions
+   bundle Samsung's CA chain (`vd_tizen_dev_partner2.crt` among it), so the
+   Samsung profile type and Partner privilege are available without installing
+   anything further. On a classic Tizen Studio install the **Samsung
+   Certificate Extension** has to be added through its Package Manager first.
+2. **+** → new profile. Create a fresh profile rather than editing an existing
+   one; editing is unreliable.
 3. Device type: **Samsung**.
 4. Author certificate: create new, set a password, **write the password down**.
    The previous one was lost, which is part of why this document exists.
