@@ -23,8 +23,12 @@ have bitten this repository:
 | `<size>` | the exact byte count of the `.wgt` | the display fetches the descriptor and then declines the package |
 | `<widgetname>` | identical to `<name>` in `config.xml` | install fails |
 
-The package directory must also hold **app files only**. Tizen signs everything
-it finds, so a stray `.gitignore` or `Build/` produces "unsigned file found".
+The package directory should hold **app files only**. The published 1.0.7
+package carries `.gitignore`, `.gitattributes`, `Build/` and a nested
+`tizen5.wgt`, and runs, so this is hygiene rather than a hard rule: a smaller
+package, fewer signed files, and nothing in the artefact that nobody meant to
+ship. Keep it anyway — a build that packages whatever happens to be in the
+working tree is a build whose contents depend on who ran it.
 
 Pointing a display at a bare web page does not work. `<type>url</type>` in the
 descriptor is silently ignored on current firmware; only a signed `.wgt` is
@@ -80,8 +84,13 @@ privilege. Samsung's TEP material states the rule directly: a Tizen certificate
 certificate *"is required if application uses TEP API"*. Anything the app needs
 beyond public privileges — SystemControl, Timer, SyncPlay, b2bcontrol — is
 unreachable without it, whatever config.xml declares. A generic Tizen
-certificate, or a Samsung one at Public privilege, also fails with *error -3:
-invalid certificate chain* on current hardware.
+certificate, or a Samsung one at Public privilege, is reported to fail with
+*error -3: invalid certificate chain* on Tizen 8.0 hardware. Do not read that
+as a general rule: the build this fleet runs today is signed with a Tizen
+Association certificate and installs and starts perfectly well. What a Tizen
+certificate costs is narrower and certain — the partner-level privileges
+`config.xml` declares are simply never granted, so `b2bcontrol`, `productinfo`
+and the rest are unreachable however the app calls them.
 
 A Samsung certificate is **valid for one year**. Renewal keeps the installed
 estate updatable only if the same author key is reused: Certificate Manager's
@@ -119,6 +128,31 @@ the incorrect value. It is a 13-character string such as `RLCN5JUZ3TEC4`, not a
 UUID. Field guides circulating online say the opposite; Samsung's own material
 is the one to follow, and the wrong field fails with *error -4: invalid
 signature* after the certificate has already been issued.
+
+## The signing identity
+
+A display refuses an update signed by a different author certificate than the
+one it already carries. The pipeline therefore compares the identity of each
+build against `production/latest/DigmiMarketing.wgt` and refuses to continue
+unless `accept_new_author_certificate` is set.
+
+This is not theoretical here. The three published packages in this repository
+carry three different author identities:
+
+| Release | Author certificate |
+| --- | --- |
+| 1.0.5 | `7461c1fb…` |
+| 1.0.7 (live) | `e318dc37…`, `CN=Digmi`, Tizen Developers CA, expires **2027-01-01** |
+| 1.0.9 | `35c211a7…` (never distributable: different identity, already expired) |
+
+The identity changed at every release, which is why the fleet cannot be updated
+from a laptop that happens to have a certificate on it.
+
+Two consequences worth holding on to. The live certificate expires
+**2027-01-01**, and its private key is not in our possession, so the installed
+estate will need a one-time manual reinstall whatever else happens. And the key
+chosen for the next identity becomes permanent: renewal only preserves
+updatability when the same RSA key is reused, and there is no password reset.
 
 ## Distribution at scale
 

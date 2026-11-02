@@ -24,6 +24,10 @@ on:
         description: 'Overwrite an already-published production/<version>/'
         type: boolean
         default: false
+      accept_new_author_certificate:
+        description: 'Allow a different signing identity — the installed estate will stop updating'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -152,6 +156,31 @@ jobs:
                  "$TIZEN_HOME/tools/certificate-generator" \
                  "$HOME/tizen-studio-data/profile" || true
 
+      - name: Compare the signing identity against the published build
+        run: |
+          set -euo pipefail
+          published="production/latest/DigmiMarketing.wgt"
+          if [ ! -f "$published" ]; then
+            echo "nothing published yet — no identity to compare against"
+            exit 0
+          fi
+
+          was="$(scripts/author-identity.sh "$published")"
+          now="$(scripts/author-identity.sh "$(ls .build/out/*.wgt)")"
+          echo "published: $was"
+          echo "built:     $now"
+
+          if [ "$was" != "$now" ]; then
+            echo "::error::This build is signed by a different author certificate than"
+            echo "::error::the one the installed estate carries. A display refuses an"
+            echo "::error::update signed by a different author identity, so publishing"
+            echo "::error::this means every screen already in the field needs the app"
+            echo "::error::uninstalled and reinstalled by hand. If that migration is the"
+            echo "::error::intent, re-run with accept_new_author_certificate."
+            [ "${{ inputs.accept_new_author_certificate }}" = "true" ] || exit 1
+            echo "::warning::new author identity accepted — the installed estate will not update"
+          fi
+
       - uses: actions/upload-artifact@v5
         with:
           name: widget-${{ steps.build.outputs.version }}
@@ -195,13 +224,32 @@ jobs:
           SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
         run: |
           set -euo pipefail
-          published="$(sed -n 's|.*<ver>\([0-9]*\)</ver>.*|\1|p' \
-            production/latest/sssp_config.xml 2>/dev/null | head -1)"
-
-          if [ -z "$published" ]; then
-            echo "no readable <ver> in production/latest/ — nothing to compare against"
+          if [ ! -f production/latest/sssp_config.xml ]; then
+            echo "nothing published yet — no version to compare against"
             exit 0
           fi
+
+          # `|| true`: under pipefail a failed sed in a command substitution
+          # takes the whole step down before the checks below can report why.
+          raw="$(sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' \
+            production/latest/sssp_config.xml | head -1 || true)"
+
+          # An empty result and a non-integer are different problems, and
+          # folding them together is how this gate came to pass silently
+          # against the very format it exists to replace: latest/ currently
+          # advertises <ver>1.0.7</ver>, which an integer-only match reads as
+          # nothing at all.
+          if ! [[ "$raw" =~ ^[0-9]+$ ]]; then
+            echo "::error::production/latest/ advertises <ver>${raw:-nothing}</ver>,"
+            echo "::error::which is not an integer. Displays compare this numerically,"
+            echo "::error::so the currently published descriptor is already broken."
+            echo "::error::Publishing over it is fine, but do it knowingly: re-run with"
+            echo "::error::force once you have confirmed what the fleet actually fetches."
+            [ "${{ inputs.force }}" = "true" ] || exit 1
+            echo "force set — proceeding over a non-integer descriptor"
+            exit 0
+          fi
+          published="$raw"
 
           # workflow_dispatch accepts any ref, so a run from an older branch can
           # publish a lower <ver> to latest/. Displays only re-download when the
