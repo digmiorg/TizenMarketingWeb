@@ -99,7 +99,12 @@ verified, and if the answer is "nothing", the fleet's own `production/latest/`
 2. Settings → Pages → Source → **GitHub Actions**.
 3. Run **Deploy site** by hand from `main` straight away. That establishes the
    first workflow-built deployment and proves the path before any release
-   depends on it.
+   depends on it. This dispatch is also the only test of one thing that could
+   not be verified in advance: whether `permissions: { pages: read }` is enough
+   for `GET /repos/{owner}/{repo}/pages`. GitHub's API description gives no
+   fine-grained permission for that endpoint, only the classic `repo` scope. If
+   the `gate` job fails here with 403, that is what it is — widen it to
+   `{ contents: read, pages: read }`. The job says so itself when it happens.
 4. Only then the first **Release widget** run.
 
 After the cutover the meaning of a skipped `Deploy site` run inverts. Before it,

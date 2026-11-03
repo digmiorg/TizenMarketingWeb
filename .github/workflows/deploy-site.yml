@@ -19,6 +19,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A floor, not a grant: this repository's default for GITHUB_TOKEN is write,
+# so a job added later without its own `permissions:` would silently get
+# write-all — including `contents: write` — in the workflow that owns the
+# fleet's deployment path. Each job opts in to what it needs below.
+permissions: {}
+
 jobs:
   # Split from the deploy on purpose. With the check and the deploy in one job,
   # the job runs either way, so during the cutover every push to main would
@@ -60,12 +66,16 @@ jobs:
             # One message for three unrelated situations would send someone to
             # the wrong place: 404 is an outage, 403 is a setting, 5xx is a
             # retry.
+            # Anchored on gh's own format — "gh: Not Found (HTTP 404)" — rather
+            # than a bare 404, so a repository name or a documentation URL
+            # carrying those digits cannot pick an arm. Exactly one (HTTP n) is
+            # written per error, so the arms cannot both match.
             case "$err" in
-              *404*)
+              *"(HTTP 404)"*)
                 echo "::error::GitHub Pages is not enabled for this repository, so"
                 echo "::error::nothing is served at all — production/latest/ included."
                 echo "::error::This is an outage, not a configuration preference." ;;
-              *403*)
+              *"(HTTP 403)"*)
                 echo "::error::This job's token cannot read the Pages configuration."
                 echo "::error::Check its 'pages' permission and any organisation policy"
                 echo "::error::that reduces GITHUB_TOKEN." ;;
