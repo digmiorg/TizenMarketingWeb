@@ -44,11 +44,18 @@ echo "reference sha256:$reference_sha  ($REFERENCE)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# 15 tries 10s apart: 2m20s of sleeping per directory, and with curl's own
-# --max-time 20 a worst case of 5m20s per directory — up to three directories,
-# inside a 30-minute job that deploying may already have spent ten minutes of.
-# No sleep after the last try.
-attempts="${CHECK_SERVED_ATTEMPTS:-15}"
+# 10 tries 10s apart. Worst case per directory, counted rather than guessed:
+# 10 fetches that each sit out curl's --max-time 20, plus 9 sleeps of 10s, is
+# 4m50s, and a .wgt download may add up to its own --max-time 180. Three
+# directories like that is about 24 minutes, which fits inside the 30-minute
+# job with the deployment that precedes it. At 15 tries it did not: 3 x 7m20s
+# plus downloads overran the timeout, and a live check killed by its own
+# timeout reports nothing at all — the worst outcome available, since the
+# release is already committed and deployed by then.
+#
+# The two env vars exist so the loop can be driven in a test; nothing in CI
+# sets them.
+attempts="${CHECK_SERVED_ATTEMPTS:-10}"
 interval="${CHECK_SERVED_INTERVAL:-10}"
 
 for dir in "$@"; do

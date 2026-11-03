@@ -102,12 +102,11 @@ verified, and if the answer is "nothing", the fleet's own `production/latest/`
 2. Settings → Pages → Source → **GitHub Actions**.
 3. Run **Deploy site** by hand from `main` straight away. That establishes the
    first workflow-built deployment and proves the path before any release
-   depends on it. This dispatch is also the only test of one thing that could
-   not be verified in advance: whether `permissions: { pages: read }` is enough
-   for `GET /repos/{owner}/{repo}/pages`. GitHub's API description gives no
-   fine-grained permission for that endpoint, only the classic `repo` scope. If
-   the `gate` job fails here with 403, that is what it is — widen it to
-   `{ contents: read, pages: read }`. The job says so itself when it happens.
+   depends on it. (`permissions: { pages: read }` is enough for `GET
+   /repos/{owner}/{repo}/pages` — observed on the merge run of 2026-11-03,
+   where the `gate` job read `build_type: legacy` with no 403. GitHub's API
+   description still lists no fine-grained permission for that endpoint, so the
+   job keeps its 403 arm.)
 4. Only then the first **Release widget** run.
 
 After the cutover the meaning of a skipped `Deploy site` run inverts. Before it,
@@ -163,15 +162,15 @@ Actions → **Release widget** → Run workflow.
 
 Step 5 is a separate workflow for one reason, and it is the reason this
 pipeline exists. Running Release widget a second time **rebuilds**, and a
-rebuild of one version is a different `.wgt` — fresh signature timestamps, a
-different byte count, the same `<ver>`. Rolling that out would hand the fleet a
+rebuild of one version is a different `.wgt` — fresh signature timestamps at
+least — carrying the same `<ver>`. Rolling that out would hand the fleet a
 package nobody tested, and displays that already have the version would never
 re-download it anyway. Promote release copies the bytes that were proven. It
 needs no certificates at all, and it re-runs the full verification against the
 committed package before it moves anything, so a hand-built directory from
 before this pipeline cannot be rolled out by typing its name into the form — it
-fails the check that `<ver>` is an integer, as `production/1.0.5` and
-`production/1.0.9` both do.
+fails the first check that reads its descriptor — `<ver>` is not an integer —
+as `production/1.0.5` and `production/1.0.9` both do.
 
 There is a shortcut: **publish** and **publish_latest** in the same Release
 widget run. It builds, publishes and rolls out in one go, and what it skips is
@@ -199,10 +198,14 @@ live check calls for a decision, not a retry. The recovery is a revert on
 `<ver>` higher than the bad one is published, so a revert alone will not pull a
 build off screens that already took it.
 
-A release that appears to hang may simply be waiting: the publish job and
-`Deploy site` share one concurrency group, so a release queued behind one or
-more site deployments sits there, and its own 30-minute timeout does not start
-counting until the job starts. Look at the queue before cancelling anything.
+A release that appears to hang may simply be waiting. All three workflows
+share the `pages-deploy` group, and the two publishing ones also share a
+workflow-level group, so a release or a promotion queued behind site
+deployments sits there — and its own 30-minute timeout does not start counting
+until the job starts. Both groups are `queue: max` rather than the default
+`single`, which is deliberate: the default cancels whatever is already pending
+when something new is queued, and that would let a dispatch silently throw away
+a rollout waiting its turn. Look at the queue before cancelling anything.
 
 `Deploy site` reports success when the deployment is accepted and verifies
 nothing beyond that — the byte-level check belongs to the publishing
@@ -211,11 +214,17 @@ workflows. After a revert, check what is being served rather than assuming:
 ```sh
 curl -s https://digmiorg.github.io/TizenMarketingWeb/production/latest/sssp_config.xml
 
-# or the same check the workflows run, by bytes, against what you reverted to:
+# or, when you reverted to a CI-built release, the same check the workflows
+# run — by bytes, against both served directories:
 scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ \
   <ver> DigmiMarketing production/latest/DigmiMarketing.wgt \
   production/latest production
 ```
+
+The script compares integers, so it cannot confirm a revert all the way back to
+the legacy `<ver>1.0.7</ver>` — it would report the descriptor as "absent or
+non-integer" and fail while the right tree is in fact being served. For that
+one case, read the `curl` output yourself.
 
 Step 4 is not ceremony, and the method matters. A display refuses an update
 signed by a different author certificate than the one it already carries, and
@@ -258,16 +267,27 @@ certificate costs is narrower and certain — the partner-level privileges
 `config.xml` declares are simply never granted, so `b2bcontrol`, `productinfo`
 and the rest are unreachable however the app calls them.
 
-A Samsung certificate is **valid for one year**. Renewal keeps the installed
-estate updatable because it reuses the author key, and Samsung says so in as
-many words: *"Samsung will issue a new author certificate for you using the
-same RSA key as in existing author certificate. You will be able to update your
-existing app […] if your current author certificate is expired already"*, and
-*"This renewed certificate will be the same as your original RSA key so
-upgrading your application is guaranteed."*
+A Samsung certificate is **valid for one year**, and renewal is issued over
+the author key you already have. Samsung's two pages on it, quoted in full
+because the difference between them matters:
 
-- <https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/extend.html>
-- <https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/create.html>
+> This renewed certificate will be the same as your original RSA key so
+> upgrading your application is guaranteed.
+> — <https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/create.html>
+
+> In this process, Samsung will issue a new author certificate for you using
+> the same RSA key as in existing author certificate. You will be able to
+> update your existing app **on Galaxy store** if your current author
+> certificate is expired already.
+> — <https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/extend.html>
+
+The first is unconditional. The second is about **store** publishing, and we
+sideload over SSSP. That a renewal also keeps a sideloaded signage app
+updatable follows from the first quote and from how the author signature works,
+but it is an inference, nobody here has put a renewed certificate on a panel,
+and elsewhere Samsung says only that *"the update must be signed with the same
+author certificate as the original application"*. The release gates are built
+around that gap rather than over it: see *The signing identity*.
 
 The key, and its password, are therefore the one artefact that must never be
 lost — there is no password reset, and without it the certificate can never be
@@ -379,22 +399,29 @@ signature* after the certificate has already been issued.
 ## The signing identity
 
 A display refuses an update signed by a different author than the one it
-already carries, and *author* means **the author's public key**, not the
-certificate wrapped around it. That distinction is the whole reason Samsung's
-renewal path works at all: a renewal is a new certificate issued over the
-existing RSA key, and Samsung states that an app signed with it still updates
-(quoted under *Certificates* above). `scripts/author-identity.sh` therefore
-hashes the key's DER `SubjectPublicKeyInfo`, and prints the certificate hash
-beside it as a label. Both publishing workflows compare that identity against
-`production/latest/DigmiMarketing.wgt` and refuse to continue unless
-`accept_new_author_certificate` is set.
+already carries. What the gates compare is the author's **public key**, hashed
+from its DER `SubjectPublicKeyInfo` by `scripts/author-identity.sh`, against
+whatever `production/latest/sssp_config.xml` says is live — and they refuse to
+continue unless `accept_new_author_certificate` is set.
 
-Hashing the certificate instead would have been the easy mistake: a routine
-renewal would read as a new identity, and the gate would then tell whoever is
-holding the certificate that every screen in the field needs a manual
-reinstall — at the one moment when that is false and the advice is expensive.
+Both readings of *author* fail, in opposite directions, which is why the gate
+reports three outcomes rather than two:
 
-This is not theoretical here. The three published packages carry three
+| What changed | What the gate does |
+| --- | --- |
+| nothing | passes quietly |
+| the certificate, over the same key | passes, with a `::warning::` naming it as a renewal |
+| the key | refuses, unless `accept_new_author_certificate` is set |
+
+Comparing certificates alone would call every routine renewal a new author and
+send someone to every screen in the field for nothing. Comparing keys alone
+would wave a renewal through, and if a display turns out to bind on the whole
+certificate the fleet would stop updating with no warning anywhere. The middle
+row is the honest answer to a question Samsung's own pages leave open for
+sideloaded apps: it does not block the renewal, and it does not pretend the
+renewal is proven. **Watch the first screen take that update.**
+
+None of this is theoretical here. The three published packages carry three
 different keys, not merely three certificates (measured 2026-11-03 with
 `scripts/author-identity.sh`):
 

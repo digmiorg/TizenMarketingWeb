@@ -1,30 +1,49 @@
 #!/usr/bin/env bash
 #
-# Print the identity that decides whether a display will accept an update of
-# this .wgt: the SHA-256 of the author's public key. Prints `none` when the
-# package carries no author signature.
+# Print what identifies the author of a .wgt, or `none` when it carries no
+# author signature:
 #
-# The public key, NOT the certificate around it. Samsung issues a renewal as a
-# new author certificate over the existing RSA key, and says what that is for:
-# "Samsung will issue a new author certificate for you using the same RSA key
-# as in existing author certificate. You will be able to update your existing
-# app [even] if your current author certificate is expired already", and
-# "This renewed certificate will be the same as your original RSA key so
-# upgrading your application is guaranteed."
-#   https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/extend.html
+#   scripts/author-identity.sh pkg.wgt         the author public key  (default)
+#   scripts/author-identity.sh pkg.wgt cert    the author certificate
+#
+# The KEY is what the release gates compare, and the reasoning is worth stating
+# because the two readings fail in opposite directions.
+#
+# Samsung issues a certificate renewal over the EXISTING RSA key, and says what
+# that buys, unconditionally: "This renewed certificate will be the same as
+# your original RSA key so upgrading your application is guaranteed."
 #   https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/create.html
-# Hashing the certificate instead would report a routine renewal as a new
-# identity, and the release gate would then tell whoever is holding the
-# certificate that every screen in the field needs a manual reinstall — at
-# exactly the moment that is false and the advice is expensive. The certificate
-# hash is still printed, on stderr, because it is what identifies a particular
-# certificate in a log or in BUILD.md's table.
+# The companion page describes the same flow and is explicit about one route in
+# particular: "In this process, Samsung will issue a new author certificate for
+# you using the same RSA key as in existing author certificate. You will be
+# able to update your existing app on Galaxy store if your current author
+# certificate is expired already."
+#   https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/extend.html
 #
-# Usage: scripts/author-identity.sh <package.wgt>
+# Note "on Galaxy store". That a renewal also keeps a SIDELOADED signage app
+# updatable is an inference from the first quote, not something Samsung states
+# about SSSP, and it has not been tried on a panel here. Elsewhere Samsung says
+# only that "the update must be signed with the same author certificate as the
+# original application", which is the loose phrasing the renewal pages
+# resolve.
+#
+# So the gates compare keys AND report a changed certificate over an unchanged
+# key as a warning rather than passing it in silence. Comparing certificates
+# alone would call every routine renewal a new author and send someone to every
+# screen in the field for nothing; comparing keys alone would wave a renewal
+# through and, if a display does bind on the whole certificate, leave the fleet
+# refusing updates with no warning anywhere. The warning is the part that does
+# not pretend to know.
 
 set -euo pipefail
 
-PKG="${1:?usage: author-identity.sh <package.wgt>}"
+PKG="${1:?usage: author-identity.sh <package.wgt> [key|cert]}"
+WHAT="${2:-key}"
+case "$WHAT" in
+    key|cert) ;;
+    *) echo "usage: author-identity.sh <package.wgt> [key|cert]" >&2; exit 2 ;;
+esac
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -52,8 +71,10 @@ then
     exit 0
 fi
 
-cert_sha="$(openssl dgst -sha256 -r "$WORK/author.der" | cut -d' ' -f1)"
-echo "certificate sha256:$cert_sha" >&2
+if [ "$WHAT" = cert ]; then
+    openssl dgst -sha256 -r "$WORK/author.der" | cut -d' ' -f1
+    exit 0
+fi
 
 # -pubkey emits the SubjectPublicKeyInfo as PEM; `pkey -outform DER` turns that
 # back into the same DER bytes any renewal over this key would carry.

@@ -39,6 +39,12 @@ permissions:
 concurrency:
   group: release-widget
   cancel-in-progress: false
+  # `queue: max`, not the default `single`: GitHub cancels and replaces any
+  # pending run in a group when a new one is queued, and this group now holds
+  # two workflows. A Release widget dispatch would silently evict a Promote
+  # release that was waiting behind it — losing a rollout of an already-proven
+  # package, with a grey run as the only trace.
+  queue: max
 
 env:
   # Pinned deliberately: Samsung re-spins installers under the same URL, so the
@@ -199,34 +205,60 @@ jobs:
           WIDGET: ${{ steps.build.outputs.widget_name }}
         run: |
           set -euo pipefail
-          # The identity compared here is the author's public KEY, not the
-          # certificate around it — see scripts/author-identity.sh for why, and
-          # for Samsung's own wording. A renewal issued over the existing key
-          # therefore compares equal and needs no flag, which is the whole
-          # point: the gate has to stay quiet for the routine case or nobody
-          # will believe it in the expensive one.
-
-          # Without this, an empty WIDGET makes $published a path that cannot
-          # exist, and the step reports "nothing published yet" and waves a
-          # changed signing identity through on a publishing run.
+          # An empty WIDGET is a bug in the build, and this step is one of the
+          # places it would otherwise pass unnoticed.
           [ -n "$WIDGET" ] || { echo "::error::no widget name from the build"; exit 1; }
 
-          published="production/latest/$WIDGET.wgt"
-          if [ ! -f "$published" ]; then
+          # Which package is live is decided by the descriptor the fleet reads,
+          # not by the name this build happens to carry. Taking the built name
+          # would report "nothing published yet" after a rename, and skip the
+          # comparison entirely.
+          live_cfg="production/latest/sssp_config.xml"
+          if [ ! -f "$live_cfg" ]; then
             echo "nothing published yet — no identity to compare against"
             exit 0
           fi
+          live_widget="$(sed -n 's|.*<widgetname>\([^<]*\)</widgetname>.*|\1|p' \
+            "$live_cfg" | head -1 || true)"
+          [ -n "$live_widget" ] || { echo "::error::$live_cfg has no <widgetname>"; exit 1; }
 
-          built="$(find .build/out -maxdepth 1 -name '*.wgt' | head -1 || true)"
-          [ -n "$built" ] || { echo "::error::no built .wgt to compare"; exit 1; }
+          live="production/latest/$live_widget.wgt"
+          if [ ! -f "$live" ]; then
+            echo "::error::$live_cfg advertises <widgetname>$live_widget and $live is"
+            echo "::error::not there. That is not 'nothing published yet' — it is a"
+            echo "::error::descriptor and a package that disagree, which a display"
+            echo "::error::resolves by failing the install. Fix latest/ first."
+            exit 1
+          fi
 
-          was="$(scripts/author-identity.sh "$published")"
-          now="$(scripts/author-identity.sh "$built")"
-          echo "published: $was"
-          echo "built:     $now"
+          candidate="$(find .build/out -maxdepth 1 -name '*.wgt' | head -1 || true)"
+          [ -n "$candidate" ] || { echo "::error::no built .wgt to compare"; exit 1; }
 
-          if [ "$was" = "$now" ]; then
-            echo "same signing identity as the published build"
+          was_key="$(scripts/author-identity.sh "$live")"
+          now_key="$(scripts/author-identity.sh "$candidate")"
+          echo "live key: $was_key"
+          echo "this key: $now_key"
+
+          if [ "$was_key" = "$now_key" ]; then
+            # Same key, different certificate is what a renewal looks like.
+            # Reported rather than passed in silence: the claim that a renewal
+            # keeps a SIDELOADED app updatable is an inference from Samsung's
+            # wording about Galaxy store, not something anyone here has seen a
+            # panel do. See scripts/author-identity.sh.
+            was_cert="$(scripts/author-identity.sh "$live" cert)"
+            now_cert="$(scripts/author-identity.sh "$candidate" cert)"
+            if [ "$was_cert" = "$now_cert" ]; then
+              echo "same signing key and the same certificate as the live build"
+            else
+              echo "::warning::Same signing key, a different certificate — this is what a"
+              echo "::warning::renewal looks like, and the gate treats it as the same author."
+              echo "::warning::Samsung states a renewal over the existing key keeps an app"
+              echo "::warning::updatable, but states it about Galaxy store; nobody here has"
+              echo "::warning::confirmed it through SSSP. Watch the FIRST screen take this"
+              echo "::warning::update before trusting the rest of the estate to it."
+              echo "::warning::live certificate: $was_cert"
+              echo "::warning::this certificate: $now_cert"
+            fi
             exit 0
           fi
 
@@ -243,14 +275,19 @@ jobs:
             exit 0
           fi
 
-          echo "::error::This build is signed by a different KEY than the one the"
-          echo "::error::installed estate carries — not a renewed certificate over the"
-          echo "::error::same key, which would compare equal here, but a different"
-          echo "::error::author. A display refuses that update, so publishing this means"
-          echo "::error::every screen already in the field needs the app uninstalled and"
-          echo "::error::reinstalled by hand. If that migration is the intent, re-run"
-          echo "::error::with accept_new_author_certificate."
-          [ "${{ inputs.accept_new_author_certificate }}" = "true" ] || exit 1
+          # The flag is checked BEFORE the explanation is printed. A run that
+          # ends green after printing six ::error:: lines is how people learn to
+          # ignore annotations.
+          if [ "${{ inputs.accept_new_author_certificate }}" != "true" ]; then
+            echo "::error::This package is signed by a different KEY than the one the"
+            echo "::error::installed estate carries — not a renewed certificate over the"
+            echo "::error::same key, which this gate treats as the same author, but a"
+            echo "::error::different one. A display refuses that update, so publishing it"
+            echo "::error::means every screen already in the field needs the app"
+            echo "::error::uninstalled and reinstalled by hand. If that migration is the"
+            echo "::error::intent, re-run with accept_new_author_certificate."
+            exit 1
+          fi
           echo "::warning::new signing key accepted — the installed estate will not update"
 
       # Keep the package even when a later gate rejects it. The identity
@@ -295,7 +332,14 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
 
     steps:
+      # `ref: main`, not the dispatched commit: this job may have waited in the
+      # pages-deploy queue, and it both pushes a commit and deploys the whole
+      # tree. From the dispatch-time commit the push is a non-fast-forward, and
+      # on the branch where nothing changed there is no push to fail — it would
+      # just deploy an older tree and quietly undo whatever landed meanwhile.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: main
 
       - name: Check Pages is built by this workflow, not from the branch
         env:
@@ -325,11 +369,11 @@ jobs:
           set -euo pipefail
           if [ -d "production/$VERSION" ] && [ "${{ inputs.force }}" != "true" ]; then
             echo "::error::production/$VERSION already exists. A rebuild of the same"
-            echo "::error::version produces a different .wgt (fresh signature timestamps)"
-            echo "::error::and therefore a different <size>, while <ver> stays put — so"
-            echo "::error::displays never re-download it and latest/ would advertise a"
-            echo "::error::package the fleet does not have. Bump the version, or re-run"
-            echo "::error::with force if you know the old one was never distributed."
+            echo "::error::version produces a different .wgt — fresh signature timestamps"
+            echo "::error::at least — while <ver> stays put, so displays never re-download"
+            echo "::error::it and latest/ would advertise bytes the fleet does not have."
+            echo "::error::Bump the version, or re-run with force if you know the old one"
+            echo "::error::was never distributed."
             exit 1
           fi
 
@@ -339,52 +383,43 @@ jobs:
           SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
         run: |
           set -euo pipefail
-          if [ ! -f production/latest/sssp_config.xml ]; then
-            echo "nothing published yet — no version to compare against"
-            exit 0
-          fi
+          # Across BOTH served directories, not just latest/: they are written
+          # together and nothing enforces that they agree, so the number to
+          # beat is the higher of the two.
+          baseline="$(scripts/served-baseline.sh)"
 
-          # `|| true`: under pipefail a failed sed in a command substitution
-          # takes the whole step down before the checks below can report why.
-          raw="$(sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' \
-            production/latest/sssp_config.xml | head -1 || true)"
-
-          # latest/ currently advertises <ver>1.0.7</ver>, the legacy format this
-          # pipeline replaces. There is nothing to compare and nothing to
-          # protect: every <ver> this pipeline emits is at least 10000, which is
-          # an increase whether a display reads the old string as an integer (1)
-          # or compares it as text ("10010" > "1.0.7"). Blocking here would mean
-          # the first rollout could not be done the way BUILD.md documents it,
-          # and would need the force flag — which also unlocks overwriting a
-          # released version, an unrelated protection that should stay on.
-          if ! [[ "$raw" =~ ^[0-9]+$ ]]; then
-            if [ -z "$raw" ]; then
-              echo "::warning::production/latest/sssp_config.xml has no <ver> element at"
-              echo "::warning::all — an empty or half-written descriptor, not the legacy"
-              echo "::warning::format. Publishing over it is right either way, but the"
+          case "$baseline" in
+            none)
+              echo "nothing published yet — no version to compare against"
+              exit 0 ;;
+            legacy)
+              # The served descriptors say <ver>1.0.7</ver>, the legacy format
+              # this pipeline replaces. Nothing to compare and nothing to
+              # protect: every <ver> this pipeline emits is at least 10000, an
+              # increase whether a display reads that string as an integer (1)
+              # or compares it as text ("10010" > "1.0.7"). Blocking here would
+              # mean the first rollout needed the force flag, which also
+              # unlocks overwriting a released version — an unrelated
+              # protection that should stay on.
+              echo "::warning::the served descriptors advertise the legacy <ver> format this"
+              echo "::warning::pipeline replaces. <ver>$SSSP_VER is an increase over it under"
+              echo "::warning::every reading of that value, so publishing proceeds — but the"
               echo "::warning::previous publish is worth a look."
-            else
-              echo "::warning::production/latest/ advertises <ver>$raw</ver>, the legacy"
-              echo "::warning::format this pipeline replaces."
-            fi
-            echo "::warning::<ver>$SSSP_VER is an increase over it under every reading of"
-            echo "::warning::that value, so publishing proceeds."
-            exit 0
-          fi
-          published="$raw"
+              exit 0 ;;
+          esac
 
           # The main gate in the build job stops the common case; this stays as
           # the one that cannot be argued with. Displays only re-download when
-          # the number grows, so a lower <ver> in latest/ freezes the whole
-          # fleet on the build it already has, silently and permanently — and a
-          # revert or a force-push on main can lower the baseline too.
-          if [ "$SSSP_VER" -le "$published" ]; then
-            echo "::error::latest/ already advertises <ver>$published and this build is"
+          # the number grows, so a lower <ver> freezes the whole fleet on the
+          # build it already has, silently and permanently — and a revert or a
+          # force-push on main can lower the baseline too.
+          if [ "$SSSP_VER" -le "$baseline" ]; then
+            echo "::error::the fleet is already served <ver>$baseline and this build is"
             echo "::error::<ver>$SSSP_VER. Publishing it would strand every display on"
             echo "::error::the version it already runs. Check which ref you dispatched."
             exit 1
           fi
-          echo "<ver> $published -> $SSSP_VER"
+          echo "<ver> $baseline -> $SSSP_VER"
 
       - name: Place the package
         env:
@@ -476,8 +511,17 @@ jobs:
           # The built package, not the committed copy: this run is what put the
           # committed copy there, and comparing it against itself would prove
           # only that cp works.
-          built="$(find .build/out -maxdepth 1 -name '*.wgt' | head -1 || true)"
-          [ -n "$built" ] || { echo "::error::no built .wgt to compare against"; exit 1; }
+          #
+          # Counted rather than `head -1`: two .wgt files in the artifact means
+          # the one that was published and the one being checked here may be
+          # different files, and picking the first silently is how that becomes
+          # invisible.
+          count="$(find .build/out -maxdepth 1 -name '*.wgt' | wc -l | tr -d ' ')"
+          if [ "$count" != 1 ]; then
+            echo "::error::expected exactly one .wgt in the artifact, found $count"
+            exit 1
+          fi
+          built="$(find .build/out -maxdepth 1 -name '*.wgt')"
 
           # $dirs unquoted on purpose: it is a word list of directories.
           scripts/check-served.sh "$BASE" "$SSSP_VER" "$WIDGET" "$built" $dirs

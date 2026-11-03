@@ -117,7 +117,8 @@ fi
 # someone can compare it against the previous release. The certificate hash is
 # printed beside it because that is what names one particular certificate, and
 # because the two move independently: a renewal is a new certificate over the
-# same key, and only the key decides whether the estate keeps updating.
+# same key. Which of the two a display actually binds on is argued, with
+# sources, at the top of scripts/author-identity.sh.
 if [ -f "$WORK/pkg/author-signature.xml" ]; then
     # Written out rather than piped so the expiry check below can read the same
     # bytes without extracting them a second time.
@@ -136,11 +137,20 @@ PY
     if [ -f "$WORK/author.der" ]; then
         # The same two numbers scripts/author-identity.sh prints, and the same
         # way round: the key is the identity, the certificate is the label.
-        key_sha="$(openssl x509 -inform DER -in "$WORK/author.der" -pubkey -noout \
-            | openssl pkey -pubin -outform DER | openssl dgst -sha256 -r | cut -d' ' -f1)"
-        cert_sha="$(openssl dgst -sha256 -r "$WORK/author.der" | cut -d' ' -f1)"
-        printf '  info  signing key  sha256:%s\n' "${key_sha:0:24}"
-        printf '  info  certificate  sha256:%s\n' "${cert_sha:0:24}"
+        # `|| true` on both: a present but unparseable certificate is a
+        # finding, not a reason to abandon the run. Without it, pipefail inside
+        # a command substitution takes the script down with a raw openssl error
+        # and the summary below never prints.
+        key_sha="$(openssl x509 -inform DER -in "$WORK/author.der" -pubkey -noout 2>/dev/null \
+            | openssl pkey -pubin -outform DER 2>/dev/null \
+            | openssl dgst -sha256 -r 2>/dev/null | cut -d' ' -f1 || true)"
+        cert_sha="$(openssl dgst -sha256 -r "$WORK/author.der" 2>/dev/null | cut -d' ' -f1 || true)"
+        if [ -n "$key_sha" ] && [ -n "$cert_sha" ]; then
+            printf '  info  signing key  sha256:%s\n' "${key_sha:0:24}"
+            printf '  info  certificate  sha256:%s\n' "${cert_sha:0:24}"
+        else
+            bad "the package carries an author signature whose certificate openssl cannot read"
+        fi
 
         openssl x509 -inform DER -in "$WORK/author.der" -noout -subject -issuer -enddate \
             2>/dev/null | sed 's/^/          /' || true
@@ -151,10 +161,12 @@ PY
         # opens with a password that has no reset. Miss the window and the next
         # release is signed by a new key, which a display refuses as a
         # different author — a site visit per screen.
+        # -checkend is also true for a certificate that lapsed long ago, so
+        # say both rather than promising it is still valid today.
         for days in 30 90; do
             if ! openssl x509 -inform DER -in "$WORK/author.der" \
                  -checkend $(( days * 86400 )) -noout >/dev/null 2>&1; then
-                warn "the author certificate expires within $days days — renew it from the existing key (Certificate Manager: 'Use an existing author certificate'), which keeps the estate updatable; a new key means a manual reinstall on every installed screen"
+                warn "the author certificate expires within $days days, or already has — renew it from the existing key (Certificate Manager: 'Use an existing author certificate'); a renewal over a new key is a different author, which means a manual reinstall on every installed screen"
                 break
             fi
         done
