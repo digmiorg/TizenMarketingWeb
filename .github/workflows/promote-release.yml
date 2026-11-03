@@ -127,8 +127,6 @@ jobs:
             exit 1
           fi
 
-          wgt="$(find "$dir" -maxdepth 1 -name '*.wgt' | head -1 || true)"
-          [ -n "$wgt" ] || { echo "::error::$dir holds no .wgt"; exit 1; }
           [ -f "$dir/sssp_config.xml" ] || { echo "::error::$dir holds no sssp_config.xml"; exit 1; }
 
           # `|| true` on each: head closes the pipe and pipefail turns that
@@ -148,6 +146,33 @@ jobs:
               echo "::error::<widgetname> in $dir/sssp_config.xml is not a plain file name"
               exit 1 ;;
           esac
+
+          # The package is chosen by the name the descriptor advertises, not by
+          # whatever `find | head -1` reaches first, and the directory must hold
+          # that one and nothing else that looks like one. Both halves matter,
+          # and neither is caught before the fleet already has the result:
+          #   * a second .wgt would be copied into both served directories by
+          #     the place step below — it copies $DIR/*.wgt — while only the one
+          #     reached first was verified and identity-checked;
+          #   * a single .wgt under some other name would leave $widget.wgt in
+          #     the served directories holding the PREVIOUS release's bytes,
+          #     under a descriptor advertising these ones and their <size>.
+          # verify-wgt.sh compares <widgetname> against the <name> INSIDE the
+          # package, which both states satisfy, so the live check after the
+          # deployment is the only thing that would notice.
+          found="$(find "$dir" -maxdepth 1 -name '*.wgt' | wc -l | tr -d ' ')"
+          if [ "$found" != 1 ]; then
+            echo "::error::$dir holds $found paths matching *.wgt; it must hold exactly one"
+            exit 1
+          fi
+
+          wgt="$dir/$widget.wgt"
+          if [ ! -f "$wgt" ] || [ -L "$wgt" ]; then
+            echo "::error::$dir/sssp_config.xml advertises <widgetname>$widget, so a display"
+            echo "::error::fetches $widget.wgt — and $dir holds no such regular file. Fix the"
+            echo "::error::directory rather than rolling it out."
+            exit 1
+          fi
 
           # The digest is printed so it can be read against what the release
           # run's live check printed for the same directory. Nothing here can
