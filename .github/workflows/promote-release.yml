@@ -254,9 +254,13 @@ jobs:
             for dest in production/latest production; do
               cfg="$dest/sssp_config.xml"
               [ -f "$cfg" ] || continue
-              dest_ver="$(sed -n 's|.*<ver>\([0-9]*\)</ver>.*|\1|p' "$cfg" | head -1 || true)"
+              # The raw value, not digits only: a legacy descriptor says
+              # 1.0.7, and reporting that as "nothing" would be untrue. A
+              # string comparison is right either way — equality is what
+              # matters here, and both sides are integers when it holds.
+              dest_ver="$(sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' "$cfg" | head -1 || true)"
               if [ "$dest_ver" != "$SSSP_VER" ]; then
-                echo "$dest advertises <ver>${dest_ver:-nothing}, behind <ver>$SSSP_VER — bringing it forward"
+                echo "$dest advertises <ver>${dest_ver:-nothing at all}, not <ver>$SSSP_VER — bringing it forward"
                 continue
               fi
               name="$(sed -n 's|.*<widgetname>\([^<]*\)</widgetname>.*|\1|p' \

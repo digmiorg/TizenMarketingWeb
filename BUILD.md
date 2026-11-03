@@ -179,8 +179,19 @@ case where that is a considered decision. `publish_latest` on its own fails the
 run immediately, because the publish job would not run at all and the rollout
 would finish green having changed nothing.
 
-One failure worth recognising before it happens: **`src/` or `scripts/` has
-changed on main since this build started.** The build job builds from the
+Two failures worth recognising before they happen.
+
+**The served state is broken, so the identity question cannot be answered.**
+If a descriptor advertises a `<widgetname>` whose `.wgt` is not beside it, the
+identity gate stops the run — including a build-only run with both inputs off,
+which is otherwise the one run that cannot fail for anything outside the build.
+It is deliberate: a display in that situation reads `<ver>`, decides to
+upgrade, fetches the package and gets a 404, and there is no way to say what
+the fleet is running or whether it would accept this build. Fix the served
+directory first. An empty one is fine — it is the descriptor that makes a
+directory served, not the files beside it.
+
+**`src/` or `scripts/` has changed on main since this build started.** The build job builds from the
 commit you dispatched; the publish job commits onto the tip of `main`, so that
 its commit is a fast-forward and cannot undo a push that landed meanwhile. If
 someone pushes to the source while a release is building, those two are no

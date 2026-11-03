@@ -21,6 +21,20 @@
 # candidate's name instead would report "nothing published yet" after a rename
 # and skip the comparison entirely.
 #
+# THE DESCRIPTOR IS WHAT MAKES A DIRECTORY SERVED, whatever files sit beside
+# it. That single rule settles the three awkward states, and it settles them
+# the way a display behaves:
+#   * no descriptor anywhere — a display cannot read <ver>, so nothing is
+#     running anything from a served directory and there is no installed
+#     identity to compare against. Fine, and the only answer that lets a first
+#     release happen at all.
+#   * a package with no descriptor beside it — a display 404s on the descriptor
+#     and keeps running what it has. Nothing can install, so nothing to check.
+#   * a descriptor naming a package that is not there — a display reads <ver>,
+#     decides to upgrade, fetches the .wgt and 404s. That is a fault already in
+#     progress, and it makes "will the fleet accept this?" unanswerable,
+#     because what the fleet runs cannot be established. Fatal.
+#
 # Exit codes, so that each workflow can apply its own policy:
 #   0  the same author — safe to publish (a renewal prints a ::warning::)
 #   2  a different signing KEY — the installed estate will not update
@@ -32,17 +46,38 @@ set -euo pipefail
 
 CANDIDATE="${1:?usage: author-identity-gate.sh <candidate.wgt> [served-dir...]}"
 shift
+# Not the bare relative path: this has to work from somewhere other than the
+# repository root, the way its two sibling scripts already do.
+IDENTITY="$(cd "$(dirname "$0")" && pwd)/author-identity.sh"
 dirs=("$@")
 [ "${#dirs[@]}" -gt 0 ] || dirs=(production/latest production)
 
 [ -f "$CANDIDATE" ] || { echo "::error::$CANDIDATE does not exist"; exit 1; }
 
-now_key="$(scripts/author-identity.sh "$CANDIDATE")"
+# `||` on every call: this script's exit codes are a verdict (2 means "a
+# different signing key", which a workflow may be told to accept), while
+# author-identity.sh's 2 means it was called wrongly. Letting that propagate
+# would turn "I could not read this" into "a different author, go ahead".
+# The message goes to stderr: every call site is a command substitution, so
+# anything written to stdout is captured into a variable instead of reaching
+# the log. `exit` here ends that subshell, and under `set -e` the failed
+# assignment then ends the script.
+read_identity() {
+    "$IDENTITY" "$1" ${2+"$2"} || {
+        echo "::error::could not read the author ${2:-key} of $1" >&2
+        exit 1
+    }
+}
+
+now_key="$(read_identity "$CANDIDATE")"
 if [ "$now_key" = none ]; then
     echo "::error::$CANDIDATE carries no author signature at all"
     exit 1
 fi
 echo "this key: $now_key"
+
+# Once, not once per served directory.
+now_cert="$(read_identity "$CANDIDATE" cert)"
 
 seen=0
 differs=0
@@ -71,7 +106,7 @@ for dir in "${dirs[@]}"; do
     fi
 
     seen=1
-    was_key="$(scripts/author-identity.sh "$live")"
+    was_key="$(read_identity "$live")"
     echo "$live key: $was_key"
 
     if [ "$was_key" != "$now_key" ]; then
@@ -79,8 +114,7 @@ for dir in "${dirs[@]}"; do
         continue
     fi
 
-    was_cert="$(scripts/author-identity.sh "$live" cert)"
-    now_cert="$(scripts/author-identity.sh "$CANDIDATE" cert)"
+    was_cert="$(read_identity "$live" cert)"
     if [ "$was_cert" != "$now_cert" ]; then
         renewed=1
         echo "::warning::$live: same signing key, a different certificate. That is what"
