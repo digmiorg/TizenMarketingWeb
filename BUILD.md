@@ -102,6 +102,12 @@ verified, and if the answer is "nothing", the fleet's own `production/latest/`
    depends on it.
 4. Only then the first **Release widget** run.
 
+After the cutover the meaning of a skipped `Deploy site` run inverts. Before it,
+skipping is correct — GitHub's own builder is doing the work. After it, a
+skipped run means Pages has been switched back to the branch, and **nothing**
+pushed to `main` is reaching displays, a revert included. The run writes that
+to its summary page in as many words. Treat it as an outage, not a no-op.
+
 The signing secrets are repository-wide on purpose, so that a build-only run
 works from a feature branch. An Environment restricted to `main` would keep a
 dispatch from any other ref away from the certificates entirely, at the cost of

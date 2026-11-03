@@ -24,25 +24,21 @@ permissions:
   pages: write
   id-token: write
 
-# Shared with the release workflow's publish job so that the two cannot deploy
-# over each other. `cancel-in-progress: false` in BOTH places or neither: with
-# `true`, a push by a person would cancel a release's publish job after it had
-# already committed and pushed, which is worse than the race it prevents.
-concurrency:
-  group: pages-deploy
-  cancel-in-progress: false
-
 jobs:
-  deploy:
+  # Split from the deploy on purpose. With the check and the deploy in one job,
+  # the job runs either way, so during the cutover every push to main would
+  # produce a green job that deployed nothing, engage the github-pages
+  # environment, and add a deployment with no URL. Split, the deploy below is
+  # genuinely skipped — grey, not green — and nobody can read a tick as a
+  # release.
+  gate:
     # The environment's branch policy also restricts this, but that lives in a
     # settings page. Say it here too, so the repository states its own rule.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.pages.outputs.mode }}
     steps:
       - name: Check how Pages is built
         id: pages
@@ -50,32 +46,77 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # While the site is still built from the branch, GitHub's own builder
-          # is deploying every push and this workflow has nothing to do.
+
+          # Read it or fail. Treating an unreadable answer as "still built from
+          # the branch" would turn any transient 5xx, rate limit or token
+          # glitch into a green run that deployed nothing while warning that
+          # nothing needed deploying — and this workflow is the rollback path,
+          # so that silence would land on a revert nobody could see had failed.
+          if ! mode="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type)"; then
+            echo "::error::Could not read repos/$GITHUB_REPOSITORY/pages. Refusing to"
+            echo "::error::guess whether this workflow owns deployment. Nothing was"
+            echo "::error::deployed; the error from gh is above."
+            exit 1
+          fi
+          if [ -z "$mode" ] || [ "$mode" = null ]; then
+            echo "::error::Pages reports no build_type at all. Refusing to guess."
+            exit 1
+          fi
+
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Pages build_type: $mode"
+
           # Skipping rather than failing matters during the cutover: merged
           # before the setting is flipped, a failing job would make every push
           # to main red, and a main where every push is red is a main where the
-          # next real failure goes unnoticed.
-          mode="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type 2>/dev/null || echo unknown)"
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          # next real failure goes unnoticed. Afterwards it means the opposite
+          # — see BUILD.md — so put it where someone will actually see it.
           if [ "$mode" != "workflow" ]; then
-            echo "::warning::Pages build_type is '$mode', so the site is still built"
-            echo "::warning::from the branch and this workflow has nothing to deploy."
-            echo "::warning::Set Settings > Pages > Source to 'GitHub Actions' to hand"
-            echo "::warning::deployment to this workflow, then run it once by hand."
+            echo "::warning::Pages build_type is '$mode', so GitHub still builds the site from the branch and this workflow has nothing to deploy."
+            {
+              echo "### Site not deployed"
+              echo
+              echo "Pages \`build_type\` is \`$mode\`, so GitHub builds the site from the"
+              echo "branch and this workflow skipped itself."
+              echo
+              echo "**Before the cutover** that is expected. **After it**, it means Pages"
+              echo "has been switched back and nothing pushed to \`main\` — a revert"
+              echo "included — is reaching displays. Treat it as an outage."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
+  deploy:
+    needs: gate
+    if: needs.gate.outputs.mode == 'workflow'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Shared with the release workflow's publish job so the two cannot deploy
+    # over each other. `queue: max` so an unrelated push cannot evict a queued
+    # release from the group, and `cancel-in-progress: false` in both places —
+    # with `true`, a push by a person would cancel a release's publish job
+    # after it had already committed and pushed.
+    concurrency:
+      group: pages-deploy
+      queue: max
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        if: steps.pages.outputs.mode == 'workflow'
         with:
           # main as it stands when this job runs, not the commit that triggered
           # it. A run held behind a release in the concurrency group would
           # otherwise deploy the older tree it was queued for and undo the
           # release it just waited for.
+          #
+          # The cost: GitHub records the deployment against GITHUB_SHA, the
+          # triggering commit, which may not be the tree deployed. Do not read
+          # a Pages deployment's SHA as the content it published.
           ref: main
 
       - name: Assemble the site exactly as the branch would have served it
-        if: steps.pages.outputs.mode == 'workflow'
         run: |
           set -euo pipefail
           rm -rf _site && mkdir _site
@@ -86,11 +127,9 @@ jobs:
           rm -rf _site/.github
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        if: steps.pages.outputs.mode == 'workflow'
         with:
           path: _site
 
       - name: Deploy to Pages
         id: deploy
-        if: steps.pages.outputs.mode == 'workflow'
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

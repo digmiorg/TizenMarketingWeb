@@ -264,6 +264,10 @@ jobs:
     # and pushed, which is worse than the race.
     concurrency:
       group: pages-deploy
+      # Without this the group holds one pending entry, and an unrelated push
+      # would evict this job from the queue after the build had already signed
+      # a package.
+      queue: max
       cancel-in-progress: false
     # Required by actions/deploy-pages, and it puts the release in the
     # repository's deployment history where it can be seen and rolled back.
