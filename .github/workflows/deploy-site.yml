@@ -19,11 +19,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
 jobs:
   # Split from the deploy on purpose. With the check and the deploy in one job,
   # the job runs either way, so during the cutover every push to main would
@@ -37,6 +32,10 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # Reads one setting and checks out nothing. The deploy job below is where
+    # write is needed.
+    permissions:
+      pages: read
     outputs:
       mode: ${{ steps.pages.outputs.mode }}
     steps:
@@ -52,10 +51,30 @@ jobs:
           # glitch into a green run that deployed nothing while warning that
           # nothing needed deploying — and this workflow is the rollback path,
           # so that silence would land on a revert nobody could see had failed.
-          if ! mode="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type)"; then
-            echo "::error::Could not read repos/$GITHUB_REPOSITORY/pages. Refusing to"
-            echo "::error::guess whether this workflow owns deployment. Nothing was"
-            echo "::error::deployed; the error from gh is above."
+          # stderr to a file rather than 2>&1: merged into the substitution, a
+          # warning from gh on an otherwise successful call would end up inside
+          # $mode, which is the hole this whole step exists to close.
+          if ! mode="$(gh api "repos/$GITHUB_REPOSITORY/pages" \
+               --jq .build_type 2>"$RUNNER_TEMP/gh.err")"; then
+            err="$(cat "$RUNNER_TEMP/gh.err" || true)"
+            # One message for three unrelated situations would send someone to
+            # the wrong place: 404 is an outage, 403 is a setting, 5xx is a
+            # retry.
+            case "$err" in
+              *404*)
+                echo "::error::GitHub Pages is not enabled for this repository, so"
+                echo "::error::nothing is served at all — production/latest/ included."
+                echo "::error::This is an outage, not a configuration preference." ;;
+              *403*)
+                echo "::error::This job's token cannot read the Pages configuration."
+                echo "::error::Check its 'pages' permission and any organisation policy"
+                echo "::error::that reduces GITHUB_TOKEN." ;;
+              *)
+                echo "::error::Could not read the Pages configuration. Refusing to guess"
+                echo "::error::whether this workflow owns deployment; nothing was"
+                echo "::error::deployed." ;;
+            esac
+            echo "::error::gh said: $err"
             exit 1
           fi
           if [ -z "$mode" ] || [ "$mode" = null ]; then
@@ -90,6 +109,10 @@ jobs:
     if: needs.gate.outputs.mode == 'workflow'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     # Shared with the release workflow's publish job so the two cannot deploy
     # over each other. `queue: max` so an unrelated push cannot evict a queued
     # release from the group, and `cancel-in-progress: false` in both places —

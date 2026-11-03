@@ -168,6 +168,11 @@ live check calls for a decision, not a retry. The recovery is a revert on
 `<ver>` higher than the bad one is published, so a revert alone will not pull a
 build off screens that already took it.
 
+A release that appears to hang may simply be waiting: the publish job and
+`Deploy site` share one concurrency group, so a release queued behind one or
+more site deployments sits there, and its own 30-minute timeout does not start
+counting until the job starts. Look at the queue before cancelling anything.
+
 `Deploy site` reports success when the deployment is accepted and verifies
 nothing beyond that — the byte-level check belongs to the release path. After a
 revert, fetch the descriptor yourself before believing it:
