@@ -17,7 +17,7 @@ on:
         type: boolean
         default: false
       publish_latest:
-        description: 'Also update production/latest/ — this rolls out to the fleet'
+        description: 'Also update production/latest/ — this rolls out THIS build to the fleet, untested'
         type: boolean
         default: false
       force:
@@ -25,7 +25,7 @@ on:
         type: boolean
         default: false
       accept_new_author_certificate:
-        description: 'Allow a different signing identity — the installed estate will stop updating'
+        description: 'Allow a different signing KEY — the installed estate will stop updating'
         type: boolean
         default: false
 
@@ -39,6 +39,12 @@ permissions:
 concurrency:
   group: release-widget
   cancel-in-progress: false
+  # `queue: max`, not the default `single`: GitHub cancels and replaces any
+  # pending run in a group when a new one is queued, and this group now holds
+  # two workflows. A Release widget dispatch would silently evict a Promote
+  # release that was waiting behind it — losing a rollout of an already-proven
+  # package, with a grey run as the only trace.
+  queue: max
 
 env:
   # Pinned deliberately: Samsung re-spins installers under the same URL, so the
@@ -57,6 +63,8 @@ jobs:
     timeout-minutes: 30
     outputs:
       version: ${{ steps.build.outputs.version }}
+      src_tree: ${{ steps.trees.outputs.src_tree }}
+      scripts_tree: ${{ steps.trees.outputs.scripts_tree }}
       sssp_ver: ${{ steps.build.outputs.sssp_ver }}
       size: ${{ steps.build.outputs.size }}
       widget_name: ${{ steps.build.outputs.widget_name }}
@@ -64,8 +72,19 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
+      - name: Refuse a rollout that publishes nothing
+        if: ${{ inputs.publish_latest && !inputs.publish }}
+        run: |
+          echo "::error::publish_latest is set and publish is not. The publish job"
+          echo "::error::only runs when publish is set, so this run would finish green"
+          echo "::error::having changed nothing at all — the one outcome a rollout must"
+          echo "::error::never have. Either set publish as well, to build this version"
+          echo "::error::and roll it out in one go, or use the Promote release workflow"
+          echo "::error::to roll out a version that is already published and proven."
+          exit 1
+
       - name: Refuse to publish from anywhere but main
-        if: inputs.publish
+        if: ${{ inputs.publish || inputs.publish_latest }}
         run: |
           # Both publish gates measure this build against production/latest/ as
           # it exists in the CHECKED-OUT tree, and workflow_dispatch accepts any
@@ -77,6 +96,18 @@ jobs:
             echo "::error::Build-only runs are fine from any ref; publishing is not."
             exit 1
           fi
+
+      # Git tree object ids, not the commit: they can be compared from a
+      # shallow clone with no history in common, which is what the publish job
+      # has. See the step that reads them there.
+      - name: Record the source tree this build comes from
+        id: trees
+        run: |
+          set -euo pipefail
+          {
+            echo "src_tree=$(git rev-parse HEAD:src)"
+            echo "scripts_tree=$(git rev-parse HEAD:scripts)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check the signing inputs are present
         env:
@@ -183,34 +214,38 @@ jobs:
                  "$TIZEN_HOME/tools/certificate-generator" \
                  "$HOME/tizen-studio-data/profile" || true
 
-      - name: Compare the signing identity against the published build
+      - name: Compare the signing identity against what is served
         env:
           WIDGET: ${{ steps.build.outputs.widget_name }}
         run: |
           set -euo pipefail
-          # Without this, an empty WIDGET makes $published a path that cannot
-          # exist, and the step reports "nothing published yet" and waves a
-          # changed signing identity through on a publishing run.
+          # An empty WIDGET is a bug in the build, and this is one of the places
+          # it would otherwise pass unnoticed.
           [ -n "$WIDGET" ] || { echo "::error::no widget name from the build"; exit 1; }
 
-          published="production/latest/$WIDGET.wgt"
-          if [ ! -f "$published" ]; then
-            echo "nothing published yet — no identity to compare against"
-            exit 0
+          # Counted rather than `head -1`: two .wgt files in the output
+          # directory means the one published and the one compared here may be
+          # different files, and picking the first silently is how that becomes
+          # invisible.
+          count="$(find .build/out -maxdepth 1 -name '*.wgt' | wc -l | tr -d ' ')"
+          if [ "$count" != 1 ]; then
+            echo "::error::expected exactly one .wgt from the build, found $count"
+            exit 1
           fi
+          echo "CANDIDATE=$(find .build/out -maxdepth 1 -name '*.wgt')" >> "$GITHUB_ENV"
 
-          built="$(find .build/out -maxdepth 1 -name '*.wgt' | head -1 || true)"
-          [ -n "$built" ] || { echo "::error::no built .wgt to compare"; exit 1; }
-
-          was="$(scripts/author-identity.sh "$published")"
-          now="$(scripts/author-identity.sh "$built")"
-          echo "published: $was"
-          echo "built:     $now"
-
-          if [ "$was" = "$now" ]; then
-            echo "same signing identity as the published build"
-            exit 0
-          fi
+      # $CANDIDATE comes from the step above, through GITHUB_ENV.
+      - name: Refuse a signing identity the estate will not accept
+        run: |
+          # The mechanism lives in scripts/author-identity-gate.sh, shared with
+          # the other publishing workflow and tested on its own. What stays
+          # here is the policy: who may overrule it, and when.
+          #   0 = same author, 2 = different signing key, 1 = broken state
+          # No `set -e`: a non-zero exit is the answer, not a crash.
+          set -uo pipefail
+          rc=0
+          scripts/author-identity-gate.sh "$CANDIDATE" || rc=$?
+          [ "$rc" = 2 ] || exit "$rc"
 
           # A build-only run has no publication to protect, and today it cannot
           # match even in principle: the live package is signed by a key nobody
@@ -218,21 +253,27 @@ jobs:
           # both inputs off, read the output — impossible to perform, and the
           # flag that silences it is one nobody should tick for a smoke test.
           if [ "${{ inputs.publish }}" != "true" ]; then
-            echo "::notice::Different author identity than the published build. Expected"
-            echo "::notice::until the installed estate is reinstalled, and harmless in a"
-            echo "::notice::run that publishes nothing — accept_new_author_certificate is"
+            echo "::notice::Different signing key than what is served. Expected until"
+            echo "::notice::the installed estate is reinstalled, and harmless in a run"
+            echo "::notice::that publishes nothing — accept_new_author_certificate is"
             echo "::notice::not needed here."
             exit 0
           fi
 
-          echo "::error::This build is signed by a different author certificate than"
-          echo "::error::the one the installed estate carries. A display refuses an"
-          echo "::error::update signed by a different author identity, so publishing"
-          echo "::error::this means every screen already in the field needs the app"
-          echo "::error::uninstalled and reinstalled by hand. If that migration is the"
-          echo "::error::intent, re-run with accept_new_author_certificate."
-          [ "${{ inputs.accept_new_author_certificate }}" = "true" ] || exit 1
-          echo "::warning::new author identity accepted — the installed estate will not update"
+          # The flag is checked BEFORE the explanation is printed. A run that
+          # ends green after printing six ::error:: lines is how people learn to
+          # ignore annotations.
+          if [ "${{ inputs.accept_new_author_certificate }}" != "true" ]; then
+            echo "::error::This build is signed by a different KEY than the one the"
+            echo "::error::installed estate carries — not a renewed certificate over the"
+            echo "::error::same key, which this gate treats as the same author, but a"
+            echo "::error::different one. A display refuses that update, so publishing it"
+            echo "::error::means every screen already in the field needs the app"
+            echo "::error::uninstalled and reinstalled by hand. If that migration is the"
+            echo "::error::intent, re-run with accept_new_author_certificate."
+            exit 1
+          fi
+          echo "::warning::new signing key accepted — the installed estate will not update"
 
       # Keep the package even when a later gate rejects it. The identity
       # comparison above is precisely the failure where someone has to look
@@ -276,7 +317,14 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
 
     steps:
+      # `ref: main`, not the dispatched commit: this job may have waited in the
+      # pages-deploy queue, and it both pushes a commit and deploys the whole
+      # tree. From the dispatch-time commit the push is a non-fast-forward, and
+      # on the branch where nothing changed there is no push to fail — it would
+      # just deploy an older tree and quietly undo whatever landed meanwhile.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: main
 
       - name: Check Pages is built by this workflow, not from the branch
         env:
@@ -294,6 +342,36 @@ jobs:
             exit 1
           fi
 
+      - name: Refuse to publish a build of a different source tree
+        env:
+          SRC_TREE: ${{ needs.build.outputs.src_tree }}
+          SCRIPTS_TREE: ${{ needs.build.outputs.scripts_tree }}
+        run: |
+          set -euo pipefail
+          # This job checks out the tip of main so that its commit is a
+          # fast-forward (see the checkout above), while the artifact was built
+          # from main as it stood at dispatch. If someone pushed to src/ or
+          # scripts/ in between, the package about to be committed is not a
+          # build of the commit that publishes it — and if the version string
+          # did not change, nothing else would ever notice.
+          #
+          # Tree object ids rather than commits: `git diff` between two commits
+          # needs both in the clone, and this one is shallow.
+          for pair in "src:$SRC_TREE" "scripts:$SCRIPTS_TREE"; do
+            path="${pair%%:*}"
+            was="${pair#*:}"
+            [ -n "$was" ] || { echo "::error::the build job recorded no tree for $path"; exit 1; }
+            now="$(git rev-parse "HEAD:$path")"
+            if [ "$was" != "$now" ]; then
+              echo "::error::$path/ has changed on main since this build started."
+              echo "::error::built from $was, main now has $now. The package would be"
+              echo "::error::committed by a commit it is not a build of. Dispatch the"
+              echo "::error::workflow again so the build sees the current tree."
+              exit 1
+            fi
+          done
+          echo "src/ and scripts/ unchanged since the build started"
+
       - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: widget-${{ needs.build.outputs.version }}
@@ -306,11 +384,11 @@ jobs:
           set -euo pipefail
           if [ -d "production/$VERSION" ] && [ "${{ inputs.force }}" != "true" ]; then
             echo "::error::production/$VERSION already exists. A rebuild of the same"
-            echo "::error::version produces a different .wgt (fresh signature timestamps)"
-            echo "::error::and therefore a different <size>, while <ver> stays put — so"
-            echo "::error::displays never re-download it and latest/ would advertise a"
-            echo "::error::package the fleet does not have. Bump the version, or re-run"
-            echo "::error::with force if you know the old one was never distributed."
+            echo "::error::version produces a different .wgt — fresh signature timestamps"
+            echo "::error::at least — while <ver> stays put, so displays never re-download"
+            echo "::error::it and latest/ would advertise bytes the fleet does not have."
+            echo "::error::Bump the version, or re-run with force if you know the old one"
+            echo "::error::was never distributed."
             exit 1
           fi
 
@@ -320,52 +398,43 @@ jobs:
           SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
         run: |
           set -euo pipefail
-          if [ ! -f production/latest/sssp_config.xml ]; then
-            echo "nothing published yet — no version to compare against"
-            exit 0
-          fi
+          # Across BOTH served directories, not just latest/: they are written
+          # together and nothing enforces that they agree, so the number to
+          # beat is the higher of the two.
+          baseline="$(scripts/served-baseline.sh)"
 
-          # `|| true`: under pipefail a failed sed in a command substitution
-          # takes the whole step down before the checks below can report why.
-          raw="$(sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' \
-            production/latest/sssp_config.xml | head -1 || true)"
-
-          # latest/ currently advertises <ver>1.0.7</ver>, the legacy format this
-          # pipeline replaces. There is nothing to compare and nothing to
-          # protect: every <ver> this pipeline emits is at least 10000, which is
-          # an increase whether a display reads the old string as an integer (1)
-          # or compares it as text ("10010" > "1.0.7"). Blocking here would mean
-          # the first rollout could not be done the way BUILD.md documents it,
-          # and would need the force flag — which also unlocks overwriting a
-          # released version, an unrelated protection that should stay on.
-          if ! [[ "$raw" =~ ^[0-9]+$ ]]; then
-            if [ -z "$raw" ]; then
-              echo "::warning::production/latest/sssp_config.xml has no <ver> element at"
-              echo "::warning::all — an empty or half-written descriptor, not the legacy"
-              echo "::warning::format. Publishing over it is right either way, but the"
+          case "$baseline" in
+            none)
+              echo "nothing published yet — no version to compare against"
+              exit 0 ;;
+            legacy)
+              # The served descriptors say <ver>1.0.7</ver>, the legacy format
+              # this pipeline replaces. Nothing to compare and nothing to
+              # protect: every <ver> this pipeline emits is at least 10000, an
+              # increase whether a display reads that string as an integer (1)
+              # or compares it as text ("10010" > "1.0.7"). Blocking here would
+              # mean the first rollout needed the force flag, which also
+              # unlocks overwriting a released version — an unrelated
+              # protection that should stay on.
+              echo "::warning::the served descriptors advertise the legacy <ver> format this"
+              echo "::warning::pipeline replaces. <ver>$SSSP_VER is an increase over it under"
+              echo "::warning::every reading of that value, so publishing proceeds — but the"
               echo "::warning::previous publish is worth a look."
-            else
-              echo "::warning::production/latest/ advertises <ver>$raw</ver>, the legacy"
-              echo "::warning::format this pipeline replaces."
-            fi
-            echo "::warning::<ver>$SSSP_VER is an increase over it under every reading of"
-            echo "::warning::that value, so publishing proceeds."
-            exit 0
-          fi
-          published="$raw"
+              exit 0 ;;
+          esac
 
           # The main gate in the build job stops the common case; this stays as
           # the one that cannot be argued with. Displays only re-download when
-          # the number grows, so a lower <ver> in latest/ freezes the whole
-          # fleet on the build it already has, silently and permanently — and a
-          # revert or a force-push on main can lower the baseline too.
-          if [ "$SSSP_VER" -le "$published" ]; then
-            echo "::error::latest/ already advertises <ver>$published and this build is"
+          # the number grows, so a lower <ver> freezes the whole fleet on the
+          # build it already has, silently and permanently — and a revert or a
+          # force-push on main can lower the baseline too.
+          if [ "$SSSP_VER" -le "$baseline" ]; then
+            echo "::error::the fleet is already served <ver>$baseline and this build is"
             echo "::error::<ver>$SSSP_VER. Publishing it would strand every display on"
             echo "::error::the version it already runs. Check which ref you dispatched."
             exit 1
           fi
-          echo "<ver> $published -> $SSSP_VER"
+          echo "<ver> $baseline -> $SSSP_VER"
 
       - name: Place the package
         env:
@@ -444,15 +513,6 @@ jobs:
           PUBLISH_LATEST: ${{ inputs.publish_latest }}
         run: |
           set -euo pipefail
-          # The deployment's page_url carries a trailing slash today, but the
-          # action's own test fixtures do not, so do not depend on either.
-          BASE="${BASE%/}/"
-
-          # Deploying is not serving, and a descriptor alone proves nothing. A
-          # display reads <ver>, then fetches the .wgt and checks it against
-          # <size>; a fresh descriptor served beside a stale package is the
-          # failure that looks exactly like success. So check by bytes.
-          #
           # production/<version>/ is checked even when latest/ is left alone,
           # because that is the directory a panel gets pointed at by hand to
           # prove a release before the fleet is allowed to follow it. Sending
@@ -463,71 +523,20 @@ jobs:
             dirs="$dirs production/latest production"
           fi
 
-          built_sha="$(sha256sum .build/out/*.wgt | cut -d' ' -f1)"
-          echo "built sha256:$built_sha"
+          # The built package, not the committed copy: this run is what put the
+          # committed copy there, and comparing it against itself would prove
+          # only that cp works.
+          #
+          # Counted rather than `head -1`: two .wgt files in the artifact means
+          # the one that was published and the one being checked here may be
+          # different files, and picking the first silently is how that becomes
+          # invisible.
+          count="$(find .build/out -maxdepth 1 -name '*.wgt' | wc -l | tr -d ' ')"
+          if [ "$count" != 1 ]; then
+            echo "::error::expected exactly one .wgt in the artifact, found $count"
+            exit 1
+          fi
+          built="$(find .build/out -maxdepth 1 -name '*.wgt')"
 
-          # 15 tries 10s apart: 2m20s of sleeping per directory, and with
-          # curl's own --max-time 20 a worst case of 5m20s per directory — up
-          # to three directories, inside a 30-minute job that deploy-pages may
-          # already have spent ten minutes of. No sleep after the last try.
-          attempts=15
-
-          for dir in $dirs; do
-            url="$BASE$dir/sssp_config.xml"
-            served_ver=''
-            fetched=0
-            ok=0
-
-            for n in $(seq 1 "$attempts"); do
-              if body="$(curl -fsS --max-time 20 "$url" 2>/dev/null)"; then
-                fetched=1
-                served_ver="$(printf '%s' "$body" \
-                  | sed -n 's|.*<ver>\([0-9]*\)</ver>.*|\1|p' | head -1 || true)"
-                if [ "$served_ver" = "$SSSP_VER" ]; then
-                  ok=1
-                  break
-                fi
-                echo "$dir try $n/$attempts: serving <ver> '${served_ver:-absent or non-integer}', waiting for $SSSP_VER"
-              else
-                # Kept apart from the stale case on purpose: a 404 and a
-                # not-yet-propagated file both read as nothing, and they call
-                # for completely different things to be looked at.
-                echo "$dir try $n/$attempts: $url does not answer yet"
-              fi
-              if [ "$n" -lt "$attempts" ]; then
-                sleep 10
-              fi
-            done
-
-            if [ "$ok" != 1 ]; then
-              if [ "$fetched" = 0 ]; then
-                echo "::error::$url never answered. The commit landed and the"
-                echo "::error::deployment reported success, so the file is missing from"
-                echo "::error::what was deployed — check what git archive HEAD contained."
-              else
-                echo "::error::$url serves <ver> '${served_ver:-absent or non-integer}'"
-                echo "::error::instead of $SSSP_VER. The file is there but it is not this"
-                echo "::error::build, so an older tree was deployed."
-              fi
-              exit 1
-            fi
-
-            if ! curl -fsS --max-time 180 -o served.wgt "$BASE$dir/$WIDGET.wgt"; then
-              echo "::error::$BASE$dir/$WIDGET.wgt could not be fetched, while the"
-              echo "::error::descriptor beside it is this build's. A display would read"
-              echo "::error::<ver>$SSSP_VER, try the package and get nothing. Check that"
-              echo "::error::the .wgt was committed under the name the descriptor gives."
-              exit 1
-            fi
-            served_sha="$(sha256sum served.wgt | cut -d' ' -f1)"
-            if [ "$served_sha" != "$built_sha" ]; then
-              echo "::error::$BASE$dir/$WIDGET.wgt is not the package this run built."
-              echo "::error::served sha256:$served_sha"
-              echo "::error::The descriptor advertises <ver>$SSSP_VER and a <size> taken"
-              echo "::error::from a different file, so every display will fetch the"
-              echo "::error::descriptor and then decline the download without saying why."
-              exit 1
-            fi
-
-            echo "$dir: serving <ver>$SSSP_VER and the exact package we built"
-          done
+          # $dirs unquoted on purpose: it is a word list of directories.
+          scripts/check-served.sh "$BASE" "$SSSP_VER" "$WIDGET" "$built" $dirs

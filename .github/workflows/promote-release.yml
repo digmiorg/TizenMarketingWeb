@@ -1,0 +1,357 @@
+name: Promote release
+
+# Roll out a build that is already published and already proven on a panel.
+#
+# Release widget builds, signs and publishes `production/<version>/`. What it
+# cannot do is roll that same package out later: running it again rebuilds, and
+# a rebuild of one version is a different .wgt — fresh signature timestamps at
+# least — carrying the same `<ver>`. Promoting the rebuild would hand the
+# fleet a package nobody ever tested, which is the exact failure this pipeline
+# exists to prevent. Without this workflow the documented order — publish,
+# prove it on one panel, then roll out — had no last step.
+#
+# So promotion copies bytes. It never builds and never signs, and it needs no
+# certificates at all.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published version to roll out to the fleet, e.g. 1.0.10'
+        type: string
+        required: true
+      accept_new_author_certificate:
+        description: 'Allow a different signing KEY than the live build — the installed estate will stop updating'
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Shared with Release widget. Both commit to main, and the second to push would
+# fail on a non-fast-forward — after the first had already gone live. One at a
+# time instead.
+concurrency:
+  group: release-widget
+  cancel-in-progress: false
+  # `queue: max`, not the default `single`: GitHub cancels and replaces any
+  # pending run in a group when a new one is queued, and this group now holds
+  # two workflows. A Release widget dispatch would silently evict a Promote
+  # release that was waiting behind it — losing a rollout of an already-proven
+  # package, with a grey run as the only trace.
+  queue: max
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    # The live check waits on a CDN; without a ceiling a stuck fetch holds a
+    # runner for the default six hours.
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    # Shared with Release widget and Deploy site, for the reason spelled out in
+    # release-widget.yml: without it the three can deploy over each other.
+    concurrency:
+      group: pages-deploy
+      queue: max
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      # `ref: main`, not the dispatched commit: this job may have waited in the
+      # pages-deploy queue, and it both pushes a commit and deploys the whole
+      # tree. From the dispatch-time commit the push is a non-fast-forward, and
+      # on the branch where nothing changed there is no push to fail — it would
+      # just deploy an older tree and quietly undo whatever landed meanwhile.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: main
+
+      - name: Refuse to promote from anywhere but main
+        run: |
+          # Every gate below measures the package against production/latest/ as
+          # it exists in the CHECKED-OUT tree, and workflow_dispatch accepts any
+          # ref. From an older branch the baseline is whatever that branch
+          # carries, so a promotion can clear the backwards gate and still
+          # strand the fleet on the version it has.
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::dispatched from '$GITHUB_REF', not refs/heads/main."
+            exit 1
+          fi
+
+      - name: Check Pages is built by this workflow, not from the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mode="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type)"
+          if [ "$mode" != "workflow" ]; then
+            echo "::error::Pages build_type is '$mode'. While the site is built from the"
+            echo "::error::branch, this commit goes live on GitHub's schedule rather than"
+            echo "::error::ours: a run that fails its live check still leaves latest/ on"
+            echo "::error::main, and the next unrelated push rolls it out to every screen"
+            echo "::error::with nobody watching. Set Settings > Pages > Source to"
+            echo "::error::'GitHub Actions' and re-run."
+            exit 1
+          fi
+
+      - name: Read the published package
+        id: pkg
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # A version here is a directory name and nothing else. The value is
+          # typed into a dispatch form and then interpolated into paths, so
+          # refuse anything that is not digits and dots before it gets near
+          # one.
+          case "$VERSION" in
+            ''|*[!0-9.]*|.*|*.|*..*)
+              # Printed through tr/cut: a workflow command is line-oriented, so
+              # a rejected value containing a newline could otherwise write an
+              # annotation of its own choosing.
+              printf '::error::%s is not a version number\n' \
+                "$(printf '%s' "${VERSION:-(empty)}" | tr -d '\n\r' | cut -c1-40)"
+              exit 1 ;;
+          esac
+
+          dir="production/$VERSION"
+          if [ ! -d "$dir" ]; then
+            echo "::error::$dir does not exist. Published versions:"
+            find production -maxdepth 1 -mindepth 1 -type d -not -name latest \
+              -exec basename {} \; | sort | sed 's/^/::error::  /'
+            echo "::error::Promotion rolls out what Release widget already published;"
+            echo "::error::it does not build. Publish the version first."
+            exit 1
+          fi
+
+          wgt="$(find "$dir" -maxdepth 1 -name '*.wgt' | head -1 || true)"
+          [ -n "$wgt" ] || { echo "::error::$dir holds no .wgt"; exit 1; }
+          [ -f "$dir/sssp_config.xml" ] || { echo "::error::$dir holds no sssp_config.xml"; exit 1; }
+
+          # `|| true` on each: head closes the pipe and pipefail turns that
+          # SIGPIPE into a failed step before the emptiness check can say what
+          # is actually wrong.
+          ver="$(sed -n 's|.*<ver>\([0-9]*\)</ver>.*|\1|p' "$dir/sssp_config.xml" | head -1 || true)"
+          widget="$(sed -n 's|.*<widgetname>\([^<]*\)</widgetname>.*|\1|p' \
+            "$dir/sssp_config.xml" | head -1 || true)"
+          [ -n "$ver" ] || { echo "::error::$dir/sssp_config.xml has no integer <ver>"; exit 1; }
+          [ -n "$widget" ] || { echo "::error::$dir/sssp_config.xml has no <widgetname>"; exit 1; }
+
+          # The same guard build-wgt.sh applies to the name it writes. This one
+          # comes out of a committed descriptor and becomes a filename, a path
+          # and a URL component, and this workflow is the one driven by a form.
+          case "$widget" in
+            *[!A-Za-z0-9._-]* | .* )
+              echo "::error::<widgetname> in $dir/sssp_config.xml is not a plain file name"
+              exit 1 ;;
+          esac
+
+          # The digest is printed so it can be read against what the release
+          # run's live check printed for the same directory. Nothing here can
+          # prove these are the bytes that were proven on a panel — a forced
+          # republish of the same version would have replaced them — and this
+          # is what makes that visible rather than assumed.
+          echo "promoting $dir: <ver>$ver, widget $widget, $(basename "$wgt")"
+          sha256sum "$wgt"
+          {
+            echo "dir=$dir"
+            echo "wgt=$wgt"
+            echo "ver=$ver"
+            echo "widget=$widget"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify the published package
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: |
+          # The same check the build ran, against the bytes actually committed.
+          # It is not a formality: a hand-built directory from before this
+          # pipeline fails it — no <size>, a non-integer <ver>, IDE leftovers
+          # inside the package — and those are exactly the directories nobody
+          # should be able to roll out to the fleet by typing their name into a
+          # form.
+          scripts/verify-wgt.sh "$DIR"
+
+      - name: Refuse a signing identity the estate will not accept
+        env:
+          CANDIDATE: ${{ steps.pkg.outputs.wgt }}
+        run: |
+          # The mechanism lives in scripts/author-identity-gate.sh, shared with
+          # the other publishing workflow and tested on its own. What stays
+          # here is the policy: who may overrule it, and when.
+          #   0 = same author, 2 = different signing key, 1 = broken state
+          # No `set -e`: a non-zero exit is the answer, not a crash.
+          set -uo pipefail
+          rc=0
+          scripts/author-identity-gate.sh "$CANDIDATE" || rc=$?
+          [ "$rc" = 2 ] || exit "$rc"
+
+          # The flag is checked BEFORE the explanation is printed. A run that
+          # ends green after printing six ::error:: lines is how people learn to
+          # ignore annotations.
+          if [ "${{ inputs.accept_new_author_certificate }}" != "true" ]; then
+            echo "::error::This package is signed by a different KEY than the one the"
+            echo "::error::installed estate carries — not a renewed certificate over the"
+            echo "::error::same key, which this gate treats as the same author, but a"
+            echo "::error::different one. A display refuses that update, so rolling it out"
+            echo "::error::means every screen already in the field needs the app"
+            echo "::error::uninstalled and reinstalled by hand. If that migration is the"
+            echo "::error::intent, re-run with accept_new_author_certificate."
+            exit 1
+          fi
+          echo "::warning::new signing key accepted — the installed estate will not update"
+
+      - name: Refuse to go backwards
+        env:
+          SSSP_VER: ${{ steps.pkg.outputs.ver }}
+          WGT: ${{ steps.pkg.outputs.wgt }}
+          WIDGET: ${{ steps.pkg.outputs.widget }}
+        run: |
+          set -euo pipefail
+          # Across BOTH served directories, not just latest/: they are written
+          # together and nothing enforces that they agree, so the number to
+          # beat is the higher of the two.
+          baseline="$(scripts/served-baseline.sh)"
+
+          case "$baseline" in
+            none)
+              echo "nothing published yet — no version to compare against"
+              exit 0 ;;
+            legacy)
+              # Every <ver> this pipeline emits is at least 10000, an increase
+              # over the legacy "1.0.7" whether a display reads that string as
+              # an integer (1) or compares it as text.
+              echo "::warning::the served descriptors advertise the legacy <ver> format this"
+              echo "::warning::pipeline replaces. <ver>$SSSP_VER is an increase over it under"
+              echo "::warning::every reading of that value, so the promotion proceeds."
+              exit 0 ;;
+          esac
+
+          if [ "$SSSP_VER" -lt "$baseline" ]; then
+            echo "::error::the fleet is already served <ver>$baseline and this package is"
+            echo "::error::<ver>$SSSP_VER. Displays only re-download when the number grows,"
+            echo "::error::so publishing it would strand every screen on the version it"
+            echo "::error::already runs."
+            exit 1
+          fi
+
+          if [ "$SSSP_VER" = "$baseline" ]; then
+            # Equal is either a harmless re-run or the worst case there is: the
+            # same <ver> over different bytes means no display ever fetches the
+            # new package, and the descriptor's <size> no longer matches what
+            # the ones that do fetch it receive.
+            #
+            # Only a directory ALREADY CLAIMING this <ver> can be in that
+            # state. One sitting on a lower number is merely behind — exactly
+            # the drift the baseline is measured across two directories to
+            # catch — and this promotion is what brings it forward. Comparing
+            # the candidate against a package that was never meant to match it
+            # would refuse the one run that repairs the drift, and say
+            # something untrue about what that directory advertises.
+            for dest in production/latest production; do
+              cfg="$dest/sssp_config.xml"
+              [ -f "$cfg" ] || continue
+              # The raw value, not digits only: a legacy descriptor says
+              # 1.0.7, and reporting that as "nothing" would be untrue. A
+              # string comparison is right either way — equality is what
+              # matters here, and both sides are integers when it holds.
+              dest_ver="$(sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' "$cfg" | head -1 || true)"
+              if [ "$dest_ver" != "$SSSP_VER" ]; then
+                echo "$dest advertises <ver>${dest_ver:-nothing at all}, not <ver>$SSSP_VER — bringing it forward"
+                continue
+              fi
+              name="$(sed -n 's|.*<widgetname>\([^<]*\)</widgetname>.*|\1|p' \
+                "$cfg" | head -1 || true)"
+              [ -n "$name" ] && [ -f "$dest/$name.wgt" ] || continue
+              if ! cmp -s "$WGT" "$dest/$name.wgt"; then
+                echo "::error::$dest already advertises <ver>$SSSP_VER and serves a"
+                echo "::error::different package. A display compares only <ver>, so it"
+                echo "::error::would never download this one; anything that did would get"
+                echo "::error::bytes whose size disagrees with the descriptor. Build and"
+                echo "::error::publish a new version instead."
+                exit 1
+              fi
+            done
+            echo "nothing served is ahead of <ver>$SSSP_VER and nothing claiming it differs — redeploying"
+            exit 0
+          fi
+          echo "<ver> $baseline -> $SSSP_VER"
+
+      - name: Place the package
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: |
+          set -euo pipefail
+          # TWO directories are served to displays, not one. production/latest/
+          # and production/ each carry a descriptor and a .wgt, and a given
+          # screen's configured URL may be either. Updating only latest/ leaves
+          # every screen pointed at production/ where it was, permanently and
+          # invisibly.
+          for dest in production/latest production; do
+            mkdir -p "$dest"
+            cp "$DIR"/*.wgt "$DIR/sssp_config.xml" "$dest/"
+          done
+          echo "::warning::production/ and production/latest/ updated — the fleet follows these"
+
+          # staging/ is a third served directory, carries its own widget name
+          # (DigmiMarketingStaging) and is touched by neither workflow. Say so
+          # rather than leaving it to be discovered on a screen.
+          staging_ver="$(sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' \
+            staging/sssp_config.xml | head -1 || true)"
+          echo "::notice::staging/ still advertises <ver>$staging_ver and is not maintained by either workflow"
+
+      - name: Commit
+        env:
+          VERSION: ${{ inputs.version }}
+          SSSP_VER: ${{ steps.pkg.outputs.ver }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add production
+          if git diff --cached --quiet; then
+            echo 'nothing changed — latest/ already held these bytes'
+          else
+            git commit -m "build(widget): roll out $VERSION to the fleet (sssp ver $SSSP_VER)
+
+          Promoted from production/$VERSION/ by the Promote release workflow,
+          run ${{ github.run_number }}. Nothing was rebuilt or re-signed."
+            git push
+          fi
+
+      - name: Assemble the site exactly as the branch would have served it
+        run: |
+          set -euo pipefail
+          rm -rf _site && mkdir _site
+          # git archive, not a copy of the working tree: only tracked files at
+          # the commit just made, so no untracked stray can ride along into what
+          # the fleet fetches.
+          git archive HEAD | tar -x -C _site
+          rm -rf _site/.github
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      - name: Confirm the fleet is actually being served this build
+        env:
+          SSSP_VER: ${{ steps.pkg.outputs.ver }}
+          WIDGET: ${{ steps.pkg.outputs.widget }}
+          WGT: ${{ steps.pkg.outputs.wgt }}
+          VERSION: ${{ inputs.version }}
+          BASE: ${{ steps.deploy.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          # production/<version>/ is checked too, not just the two the fleet
+          # follows. It was published by an earlier run and should already be
+          # live; if it is not, the panel this release was proven on was reached
+          # some other way and the proof does not mean what it is taken to mean.
+          scripts/check-served.sh "$BASE" "$SSSP_VER" "$WIDGET" "$WGT" \
+            "production/$VERSION" production/latest production

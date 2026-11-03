@@ -3,10 +3,13 @@
 The widget's source lives in `src/`. Everything under `production/` and
 `staging/` is build output.
 
-Releases go through the **Release widget** workflow, not a laptop. Before it
-existed the package was built by hand in Tizen Studio, which is how
-`production/latest/` came to serve 1.0.7 while 1.0.9 sat unreleased beside it —
-the fleet follows `latest/`, so no screen ever saw it.
+Releases go through two workflows, not a laptop. **Release widget** builds,
+signs and publishes `production/<version>/`. **Promote release** copies an
+already-published version into the two directories the fleet follows, and never
+builds or signs anything. Before they existed the package was built by hand in
+Tizen Studio, which is how `production/latest/` came to serve 1.0.7 while 1.0.9
+sat unreleased beside it — the fleet follows `latest/`, so no screen ever saw
+it.
 
 ## How a display actually gets a new build
 
@@ -99,12 +102,11 @@ verified, and if the answer is "nothing", the fleet's own `production/latest/`
 2. Settings → Pages → Source → **GitHub Actions**.
 3. Run **Deploy site** by hand from `main` straight away. That establishes the
    first workflow-built deployment and proves the path before any release
-   depends on it. This dispatch is also the only test of one thing that could
-   not be verified in advance: whether `permissions: { pages: read }` is enough
-   for `GET /repos/{owner}/{repo}/pages`. GitHub's API description gives no
-   fine-grained permission for that endpoint, only the classic `repo` scope. If
-   the `gate` job fails here with 403, that is what it is — widen it to
-   `{ contents: read, pages: read }`. The job says so itself when it happens.
+   depends on it. (`permissions: { pages: read }` is enough for `GET
+   /repos/{owner}/{repo}/pages` — observed on the merge run of 2026-11-03,
+   where the `gate` job read `build_type: legacy` with no 403. GitHub's API
+   description still lists no fine-grained permission for that endpoint, so the
+   job keeps its 403 arm.)
 4. Only then the first **Release widget** run.
 
 After the cutover the meaning of a skipped `Deploy site` run inverts. Before it,
@@ -152,20 +154,64 @@ Actions → **Release widget** → Run workflow.
    describes — a one-time manual reinstall on every screen in the field. Tick
    it once, knowing that, and not before. From the release after that the
    identities match and the flag stays off.
-4. Prove that build on **one panel, through the SSSP path** — put the `.wgt`
-   and `sssp_config.xml` on a URL, point the panel's Custom App at that
-   directory, reboot, and watch it come up on its own.
-5. Only then run with **publish_latest** on. That is the step the fleet follows.
+4. Prove that build on **one panel, through the SSSP path**. It is already
+   served at its own URL — `…/production/<version>/` — so point the panel's
+   Custom App at that directory, reboot, and watch it come up on its own.
+5. Only then roll it out, with the **Promote release** workflow: Actions →
+   Promote release → Run workflow, and type the version you just proved.
+
+Step 5 is a separate workflow for one reason, and it is the reason this
+pipeline exists. Running Release widget a second time **rebuilds**, and a
+rebuild of one version is a different `.wgt` — fresh signature timestamps at
+least — carrying the same `<ver>`. Rolling that out would hand the fleet a
+package nobody tested, and displays that already have the version would never
+re-download it anyway. Promote release copies the bytes that were proven. It
+needs no certificates at all, and it re-runs the full verification against the
+committed package before it moves anything, so a hand-built directory from
+before this pipeline cannot be rolled out by typing its name into the form — it
+fails the first check that reads its descriptor — `<ver>` is not an integer —
+as `production/1.0.5` and `production/1.0.9` both do.
+
+There is a shortcut: **publish** and **publish_latest** in the same Release
+widget run. It builds, publishes and rolls out in one go, and what it skips is
+step 4 — the fleet gets a package that was never on a screen. It exists for the
+case where that is a considered decision. `publish_latest` on its own fails the
+run immediately, because the publish job would not run at all and the rollout
+would finish green having changed nothing.
+
+Two failures worth recognising before they happen.
+
+**The served state is broken, so the identity question cannot be answered.**
+If a descriptor advertises a `<widgetname>` whose `.wgt` is not beside it, the
+identity gate stops the run — including a build-only run with both inputs off,
+which is otherwise the one run that cannot fail for anything outside the build.
+It is deliberate: a display in that situation reads `<ver>`, decides to
+upgrade, fetches the package and gets a 404, and there is no way to say what
+the fleet is running or whether it would accept this build. Fix the served
+directory first. An empty one is fine — it is the descriptor that makes a
+directory served, not the files beside it.
+
+**`src/` or `scripts/` has changed on main since this build started.** The build job builds from the
+commit you dispatched; the publish job commits onto the tip of `main`, so that
+its commit is a fast-forward and cannot undo a push that landed meanwhile. If
+someone pushes to the source while a release is building, those two are no
+longer the same tree — the package would be committed by a commit it is not a
+build of, and if the version string did not change, nothing else would ever
+notice. The publish job compares the two git tree ids and stops. Dispatch
+again; nothing was committed.
 
 `force` has one job: overwriting a `production/<version>/` that already exists.
-It is not needed for the first rollout. The published descriptor says
-`<ver>1.0.7`, which is not a number, and the backwards gate treats that as a
-warning rather than a block — every `<ver>` this pipeline emits is at least
+Neither the first rollout nor a promotion needs it. The published descriptor
+says `<ver>1.0.7`, which is not a number, and the backwards gate treats that as
+a warning rather than a block — every `<ver>` this pipeline emits is at least
 10000, which is an increase whether a display reads the old string as an
 integer or compares it as text.
 
-**The live check is an alarm, not a gate.** The order is commit, push, deploy,
-then verify, so by the time it reports a problem the release is already live.
+**The live check is an alarm, not a gate.** Both publishing workflows end with
+it: `scripts/check-served.sh` fetches every directory they wrote, compares the
+served `<ver>`, and then compares the served package against the local one byte
+for byte. But the order is commit, push, deploy, then verify, so by the time it
+reports a problem the release is already live.
 That is the best available arrangement — the alternative, a branch-built site,
 publishes on GitHub's schedule with nobody watching at all — but it means a red
 live check calls for a decision, not a retry. The recovery is a revert on
@@ -173,18 +219,33 @@ live check calls for a decision, not a retry. The recovery is a revert on
 `<ver>` higher than the bad one is published, so a revert alone will not pull a
 build off screens that already took it.
 
-A release that appears to hang may simply be waiting: the publish job and
-`Deploy site` share one concurrency group, so a release queued behind one or
-more site deployments sits there, and its own 30-minute timeout does not start
-counting until the job starts. Look at the queue before cancelling anything.
+A release that appears to hang may simply be waiting. All three workflows
+share the `pages-deploy` group, and the two publishing ones also share a
+workflow-level group, so a release or a promotion queued behind site
+deployments sits there — and its own 30-minute timeout does not start counting
+until the job starts. Both groups are `queue: max` rather than the default
+`single`, which is deliberate: the default cancels whatever is already pending
+when something new is queued, and that would let a dispatch silently throw away
+a rollout waiting its turn. Look at the queue before cancelling anything.
 
 `Deploy site` reports success when the deployment is accepted and verifies
-nothing beyond that — the byte-level check belongs to the release path. After a
-revert, fetch the descriptor yourself before believing it:
+nothing beyond that — the byte-level check belongs to the publishing
+workflows. After a revert, check what is being served rather than assuming:
 
 ```sh
 curl -s https://digmiorg.github.io/TizenMarketingWeb/production/latest/sssp_config.xml
+
+# or, when you reverted to a CI-built release, the same check the workflows
+# run — by bytes, against both served directories:
+scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ \
+  <ver> DigmiMarketing production/latest/DigmiMarketing.wgt \
+  production/latest production
 ```
+
+The script compares integers, so it cannot confirm a revert all the way back to
+the legacy `<ver>1.0.7</ver>` — it would report the descriptor as "absent or
+non-integer" and fail while the right tree is in fact being served. For that
+one case, read the `curl` output yourself.
 
 Step 4 is not ceremony, and the method matters. A display refuses an update
 signed by a different author certificate than the one it already carries, and
@@ -227,13 +288,31 @@ certificate costs is narrower and certain — the partner-level privileges
 `config.xml` declares are simply never granted, so `b2bcontrol`, `productinfo`
 and the rest are unreachable however the app calls them.
 
-A Samsung certificate is **valid for one year**. Renewal keeps the installed
-estate updatable only if the same author key is reused: Certificate Manager's
-*Use an existing author certificate* option *"will create a new author
-certificate using the same RSA key"*. The key, and its password, are therefore
-the one artefact that must never be lost — there is no password reset, and
-without it the certificate can never be renewed and every display needs a
-manual reinstall.
+A Samsung certificate is **valid for one year**, and renewal is issued over
+the author key you already have. Samsung's two pages on it, quoted in full
+because the difference between them matters:
+
+> This renewed certificate will be the same as your original RSA key so
+> upgrading your application is guaranteed.
+> — <https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/create.html>
+
+> In this process, Samsung will issue a new author certificate for you using
+> the same RSA key as in existing author certificate. You will be able to
+> update your existing app **on Galaxy store** if your current author
+> certificate is expired already.
+> — <https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/extend.html>
+
+The first is unconditional. The second is about **store** publishing, and we
+sideload over SSSP. That a renewal also keeps a sideloaded signage app
+updatable follows from the first quote and from how the author signature works,
+but it is an inference, nobody here has put a renewed certificate on a panel,
+and elsewhere Samsung says only that *"the update must be signed with the same
+author certificate as the original application"*. The release gates are built
+around that gap rather than over it: see *The signing identity*.
+
+The key, and its password, are therefore the one artefact that must never be
+lost — there is no password reset, and without it the certificate can never be
+renewed and every display needs a manual reinstall.
 
 ### Why a profile lists with every field N/A
 
@@ -280,8 +359,9 @@ this Samsung account, which was previously an open question.
 One wrinkle in that profile: its author certificate has an **empty CN**
 (`CN=, OU=, O=Digmi Sweden AB, L=Jönköping, ST=Jönköping, C=SE`) because the
 wizard's author-name field was left blank while Additional Fields were filled.
-Updates bind on the certificate itself, not on its CN, so this is cosmetic — but
-it makes the profile harder to recognise in a build log than `CN=Digmi` was.
+Updates bind on the author key, not on any name in the certificate, so this is
+cosmetic — but it makes the profile harder to recognise in a build log than
+`CN=Digmi` was.
 
 Note also that the VS Code extension offers **"Add individual DUIDs (up to 10
 device)"**, where Samsung's own documentation for Tizen Studio states 50. Plan
@@ -339,32 +419,55 @@ signature* after the certificate has already been issued.
 
 ## The signing identity
 
-A display refuses an update signed by a different author certificate than the
-one it already carries. The pipeline therefore compares the identity of each
-build against `production/latest/DigmiMarketing.wgt` and refuses to continue
-unless `accept_new_author_certificate` is set.
+A display refuses an update signed by a different author than the one it
+already carries. What the gates compare is the author's **public key**, hashed
+from its DER `SubjectPublicKeyInfo` by `scripts/author-identity.sh`, against
+every package the fleet is served — both directories, each by the
+`<widgetname>` its own descriptor advertises, so a rename cannot make the
+comparison quietly skip itself. `scripts/author-identity-gate.sh` does that
+and answers in three parts; each workflow then decides who may overrule it.
 
-This is not theoretical here. The three published packages in this repository
-carry three different author identities:
+Both readings of *author* fail, in opposite directions, which is why the gate
+reports three outcomes rather than two:
 
-| Release | Author certificate |
+| What changed | What the gate does |
 | --- | --- |
-| 1.0.5 | `7461c1fb…` |
-| 1.0.7 (live) | `e318dc37…`, `CN=Digmi`, Tizen Developers CA, expires **2027-01-01** |
-| 1.0.9 | `35c211a7…` (never distributable: different identity, already expired) |
+| nothing | passes quietly |
+| the certificate, over the same key | passes, with a `::warning::` naming it as a renewal |
+| the key | refuses, unless `accept_new_author_certificate` is set |
 
-The identity changed at every release, which is why the fleet cannot be updated
-from a laptop that happens to have a certificate on it.
+Comparing certificates alone would call every routine renewal a new author and
+send someone to every screen in the field for nothing. Comparing keys alone
+would wave a renewal through, and if a display turns out to bind on the whole
+certificate the fleet would stop updating with no warning anywhere. The middle
+row is the honest answer to a question Samsung's own pages leave open for
+sideloaded apps: it does not block the renewal, and it does not pretend the
+renewal is proven. **Watch the first screen take that update.**
 
-Every build prints this identity and its expiry, and warns at 90 and then 30
-days out, because a certificate that lapses before the next release turns a
-normal update into a manual reinstall on every screen.
+None of this is theoretical here. The three published packages carry three
+different keys, not merely three certificates (measured 2026-11-03 with
+`scripts/author-identity.sh`):
+
+| Release | Signing key | Author certificate |
+| --- | --- | --- |
+| 1.0.5 | `b279b279…` | `7461c1fb…`, `CN=Digmi AB` |
+| 1.0.7 (live) | `c442303c…` | `e318dc37…`, `CN=Digmi`, Tizen Developers CA, expires **2027-01-01** |
+| 1.0.9 | `b31d589c…` | `35c211a7…` (never distributable: different key, already expired) |
+
+The key changed at every release, which is why the fleet cannot be updated from
+a laptop that happens to have a certificate on it.
+
+Every build prints the key, the certificate and the expiry, and warns at 90 and
+then 30 days out — because a certificate that lapses before the next release
+can no longer be renewed from its key, and that is what turns a normal update
+into a manual reinstall on every screen.
 
 Two consequences worth holding on to. The live certificate expires
 **2027-01-01**, and its private key is not in our possession, so the installed
 estate will need a one-time manual reinstall whatever else happens. And the key
 chosen for the next identity becomes permanent: renewal only preserves
-updatability when the same RSA key is reused, and there is no password reset.
+updatability when it is issued over that same RSA key, which means keeping the
+`.p12` and a password that has no reset.
 
 ## Distribution at scale
 

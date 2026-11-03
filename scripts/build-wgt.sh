@@ -59,6 +59,15 @@ fi
 widget_name="$(sed -n 's/.*<name>\([^<]*\)<\/name>.*/\1/p' "$SRC_DIR/config.xml" | head -1)"
 [ -n "$widget_name" ] || die "could not read <name> from $SRC_DIR/config.xml"
 
+# This name becomes a filename, a path, and part of the URL a display fetches,
+# so it has to be a plain file name and nothing cleverer. A leading dot would
+# also make the package a hidden file, which upload-artifact drops by default
+# and nobody would notice until the publish job found no .wgt to copy.
+case "$widget_name" in
+    *[!A-Za-z0-9._-]* | .* )
+        die "<name> is '$widget_name'; it is used as the .wgt filename and in the SSSP URL, so it must be letters, digits, dot, underscore or hyphen, and must not start with a dot" ;;
+esac
+
 # An integer that grows with the semantic version. 1.0.10 becomes 10010, which
 # also clears the "1" that a legacy "1.0.7" descriptor parses down to, so the
 # first CI-built package is seen as an upgrade by screens running the old one.
