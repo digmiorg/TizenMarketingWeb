@@ -7,13 +7,18 @@
 # build is decided here, so the rules it enforces are worth stating:
 #
 #   * The package directory may contain app files only. Tizen signs every file
-#     it finds, and leftover IDE or VCS metadata makes the display reject the
-#     result with "unsigned file found".
+#     it finds, so whatever the IDE or git left behind is signed as part of the
+#     app. Hygiene we control rather than a diagnosed field failure: the 1.0.7
+#     package this repository publishes carries .gitignore, .gitattributes and
+#     a Build/ directory, and it installed anyway.
 #   * `<ver>` in sssp_config.xml must be an INTEGER that increases. The display
 #     compares it against the installed build and will not re-download anything
 #     unless it grew. Ours used to say "1.0.7", which parses as 1.
-#   * `<size>` must be the exact byte count of the .wgt. When it disagrees the
-#     display fetches sssp_config.xml and then silently declines the package.
+#   * `<size>`, when stated, must be the exact byte count of the .wgt — the
+#     display checks the download against it and declines a mismatch without
+#     saying so. The descriptors currently served to the fleet omit the element
+#     entirely; whether that is why production/1.0.9 was never picked up is not
+#     established either way. Ours always states it.
 #   * `<widgetname>` must equal `<name>` in config.xml.
 #
 # Usage: scripts/build-wgt.sh <certificate-profile-name>

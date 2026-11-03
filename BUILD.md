@@ -20,7 +20,7 @@ have bitten this repository:
 | Field | Rule | What a mistake looks like |
 | --- | --- | --- |
 | `<ver>` | an **integer**, must increase | nothing happens; the display never re-downloads |
-| `<size>` | the exact byte count of the `.wgt` | the display fetches the descriptor and then declines the package |
+| `<size>` | when stated, the exact byte count of the `.wgt` | the display fetches the descriptor and then declines the package |
 | `<widgetname>` | identical to `<name>` in `config.xml` | install fails |
 
 The package directory should hold **app files only**. The published 1.0.7
@@ -30,11 +30,55 @@ package, fewer signed files, and nothing in the artefact that nobody meant to
 ship. Keep it anyway — a build that packages whatever happens to be in the
 working tree is a build whose contents depend on who ran it.
 
+The descriptors this repository currently serves omit `<size>` altogether. So
+the element is evidently not mandatory, and we do not know whether its absence
+is why `production/1.0.9` was never picked up — the other candidate is that
+1.0.9 declares `required_version="5.0"` where the live 1.0.7 declares `4.0`.
+Neither has been tested on a panel. Builds from this pipeline always state
+`<size>`, which removes the question from any future release.
+
 Pointing a display at a bare web page does not work. `<type>url</type>` in the
 descriptor is silently ignored on current firmware; only a signed `.wgt` is
 accepted.
 
+### Two directories are served, not one
+
+`production/latest/` and `production/` each hold a descriptor and a `.wgt`, and
+today they hold the same package byte for byte. A screen's configured URL may
+be either, and we cannot tell which from here — so the workflow writes both
+whenever `publish_latest` is set. Updating only `latest/` would leave every
+screen pointed at `production/` on `<ver>1.0.7`, permanently and invisibly.
+
+`staging/` is a third served directory with its own widget name,
+`DigmiMarketingStaging`. It is **not** built or updated by this workflow; the
+publish step prints what it still advertises so that it is noticed rather than
+discovered on a screen.
+
 ## Releasing
+
+### Configured once, before the first run
+
+| What | Where | Why |
+| --- | --- | --- |
+| `TIZEN_AUTHOR_P12_BASE64`, `TIZEN_AUTHOR_PASSWORD`, `TIZEN_DISTRIBUTOR_P12_BASE64`, `TIZEN_DISTRIBUTOR_PASSWORD` | repository **secrets** | the runner builds its own certificate profile; it never reads a `.pwd` file |
+| `TIZEN_INSTALLER_URL`, `TIZEN_INSTALLER_SHA256` | repository **variables** | Samsung re-spins installers under one URL; the checksum is the only thing that says we got what we tested |
+| Settings → Pages → Source = **GitHub Actions** | repository setting | see below |
+
+Pages must be built by the workflow, not from the branch. While it is served
+from the branch, a publish goes live on GitHub's schedule rather than ours: a
+run whose live check fails still leaves `latest/` committed on `main`, and the
+next unrelated push rolls it out to every screen with nobody watching. The
+publish job checks this setting and stops before committing anything if it is
+still `legacy`.
+
+The signing secrets are repository-wide on purpose, so that a build-only run
+works from a feature branch. The stricter alternative is an Environment
+restricted to `main`, which makes a dispatch from any other ref unable to reach
+the certificates at all — at the cost of being unable to test-build a branch.
+Worth taking if this repository ever has more than two people with write
+access.
+
+### Running it
 
 Actions → **Release widget** → Run workflow.
 
@@ -220,6 +264,10 @@ carry three different author identities:
 
 The identity changed at every release, which is why the fleet cannot be updated
 from a laptop that happens to have a certificate on it.
+
+Every build prints this identity and its expiry, and warns at 90 and then 30
+days out, because a certificate that lapses before the next release turns a
+normal update into a manual reinstall on every screen.
 
 Two consequences worth holding on to. The live certificate expires
 **2027-01-01**, and its private key is not in our possession, so the installed

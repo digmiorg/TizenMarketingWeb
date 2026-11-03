@@ -32,6 +32,14 @@ on:
 permissions:
   contents: read
 
+# One release at a time. Two runs publishing at once would each clear the
+# backwards gate against the same baseline, and whichever committed last would
+# leave latest/ advertising the lower <ver> — a fleet frozen on an older build
+# with both jobs green.
+concurrency:
+  group: release-widget
+  cancel-in-progress: false
+
 env:
   # Pinned deliberately: Samsung re-spins installers under the same URL, so the
   # checksum is the only thing that says we got what we tested against. Both
@@ -55,6 +63,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Refuse to publish from anywhere but main
+        if: inputs.publish
+        run: |
+          # Both publish gates measure this build against production/latest/ as
+          # it exists in the CHECKED-OUT tree, and workflow_dispatch accepts any
+          # ref. Dispatched from an older branch the baseline is whatever that
+          # branch happens to carry, so a build can clear "refuse to go
+          # backwards" and still strand the fleet on the version it has.
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::dispatched from '$GITHUB_REF', not refs/heads/main."
+            echo "::error::Build-only runs are fine from any ref; publishing is not."
+            exit 1
+          fi
 
       - name: Check the signing inputs are present
         env:
@@ -181,7 +203,11 @@ jobs:
             echo "::warning::new author identity accepted — the installed estate will not update"
           fi
 
+      # Keep the package even when a later gate rejects it. The identity
+      # comparison above is precisely the failure where someone has to look
+      # inside the .wgt before deciding what to do.
       - uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         with:
           name: widget-${{ steps.build.outputs.version }}
           path: .build/out/
@@ -192,11 +218,37 @@ jobs:
     needs: build
     if: inputs.publish
     runs-on: ubuntu-24.04
+    # The live check below waits on a CDN; without a ceiling a stuck fetch holds
+    # a runner for the default six hours.
+    timeout-minutes: 30
     permissions:
       contents: write
+      pages: write
+      id-token: write
+    # Required by actions/deploy-pages, and it puts the release in the
+    # repository's deployment history where it can be seen and rolled back.
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Check Pages is built by this workflow, not from the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mode="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type)"
+          if [ "$mode" != "workflow" ]; then
+            echo "::error::Pages build_type is '$mode'. While the site is built from the"
+            echo "::error::branch, this commit goes live on GitHub's schedule rather than"
+            echo "::error::ours: a run that fails its live check still leaves latest/ on"
+            echo "::error::main, and the next unrelated push rolls it out to every screen"
+            echo "::error::with nobody watching. Set Settings > Pages > Source to"
+            echo "::error::'GitHub Actions' and re-run."
+            exit 1
+          fi
 
       - uses: actions/download-artifact@v6
         with:
@@ -251,10 +303,11 @@ jobs:
           fi
           published="$raw"
 
-          # workflow_dispatch accepts any ref, so a run from an older branch can
-          # publish a lower <ver> to latest/. Displays only re-download when the
-          # number grows, so that would freeze the whole fleet on the build it
-          # already has, silently and permanently.
+          # The main gate in the build job stops the common case; this stays as
+          # the one that cannot be argued with. Displays only re-download when
+          # the number grows, so a lower <ver> in latest/ freezes the whole
+          # fleet on the build it already has, silently and permanently — and a
+          # revert or a force-push on main can lower the baseline too.
           if [ "$SSSP_VER" -le "$published" ]; then
             echo "::error::latest/ already advertises <ver>$published and this build is"
             echo "::error::<ver>$SSSP_VER. Publishing it would strand every display on"
@@ -271,13 +324,28 @@ jobs:
           mkdir -p "production/$VERSION"
           cp .build/out/*.wgt .build/out/sssp_config.xml "production/$VERSION/"
 
-          if [ "${{ inputs.publish_latest }}" = "true" ]; then
-            mkdir -p production/latest
-            cp .build/out/*.wgt .build/out/sssp_config.xml production/latest/
-            echo "::warning::production/latest/ updated — the fleet follows this directory"
-          else
+          if [ "${{ inputs.publish_latest }}" != "true" ]; then
             echo "production/latest/ left alone; prove it on one panel through SSSP first"
+            exit 0
           fi
+
+          # TWO directories are served to displays, not one. production/latest/
+          # and production/ each carry a descriptor and a .wgt, they hold the
+          # same package byte for byte today, and a given screen's configured
+          # URL may be either. Updating only latest/ leaves every screen pointed
+          # at production/ on <ver>1.0.7 forever — which is how production/1.0.9
+          # came to exist in this repository without a display ever fetching it.
+          for dir in production/latest production; do
+            mkdir -p "$dir"
+            cp .build/out/*.wgt .build/out/sssp_config.xml "$dir/"
+          done
+          echo "::warning::production/ and production/latest/ updated — the fleet follows these"
+
+          # staging/ is a third served directory, carries its own widget name
+          # (DigmiMarketingStaging) and is not built here. Say so rather than
+          # leaving it to be discovered on a screen.
+          staging_ver="$(sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' staging/sssp_config.xml | head -1)"
+          echo "::notice::staging/ still advertises <ver>$staging_ver and is not maintained by this workflow"
 
       - name: Commit
         env:
@@ -295,32 +363,69 @@ jobs:
           production/latest/ updated: ${{ inputs.publish_latest }}"
           git push
 
-      - name: Confirm the published descriptor is actually being served
+      - name: Assemble the site exactly as the branch would have served it
+        run: |
+          set -euo pipefail
+          rm -rf _site && mkdir _site
+          # git archive, not a copy of the working tree: only tracked files at
+          # the commit just made, so .build/ and any untracked stray cannot ride
+          # along into what the fleet fetches.
+          git archive HEAD | tar -x -C _site
+          rm -rf _site/.github
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@v5
+
+      - name: Confirm the fleet is actually being served this build
         if: inputs.publish_latest
         env:
           SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
-          PAGES_URL: https://digmiorg.github.io/TizenMarketingWeb/production/latest/sssp_config.xml
+          WIDGET: ${{ needs.build.outputs.widget_name }}
+          BASE: ${{ steps.deploy.outputs.page_url }}
         run: |
           set -euo pipefail
-          # Committing is not publishing. This directory is served by GitHub
-          # Pages, and a push made with GITHUB_TOKEN does not trigger a Pages
-          # build — so the job can go green while displays keep being served the
-          # previous descriptor, which is precisely the silent failure this
-          # pipeline exists to end. Check what is actually on the wire.
-          for attempt in $(seq 1 20); do
-            served="$(curl -fsS --max-time 20 "$PAGES_URL" 2>/dev/null \
-              | sed -n 's|.*<ver>\([0-9]*\)</ver>.*|\1|p' | head -1 || true)"
-            if [ "$served" = "$SSSP_VER" ]; then
-              echo "serving <ver>$served — the fleet can see this build"
-              exit 0
-            fi
-            echo "attempt $attempt: serving '${served:-nothing}', waiting for $SSSP_VER"
-            sleep 30
-          done
+          # Deploying is not serving, and a descriptor alone proves nothing. A
+          # display reads <ver>, then fetches the .wgt and checks it against
+          # <size>; a fresh descriptor sitting next to a stale package is the
+          # failure that looks exactly like success. So check both directories,
+          # by bytes, against what this run actually built.
+          built_sha="$(sha256sum .build/out/*.wgt | cut -d' ' -f1)"
+          echo "built sha256:$built_sha"
 
-          echo "::error::After ten minutes $PAGES_URL still serves '${served:-nothing}'"
-          echo "::error::instead of $SSSP_VER. The commit landed but the site was not"
-          echo "::error::rebuilt, so no display will see this release. Publishing from"
-          echo "::error::Actions needs a token that triggers Pages, or the site needs to"
-          echo "::error::be built by a workflow rather than from the branch."
-          exit 1
+          for dir in production production/latest; do
+            served_ver=''
+            ok=0
+            for attempt in $(seq 1 20); do
+              served_ver="$(curl -fsS --max-time 20 "$BASE$dir/sssp_config.xml" 2>/dev/null \
+                | sed -n 's|.*<ver>\([0-9]*\)</ver>.*|\1|p' | head -1 || true)"
+              if [ "$served_ver" = "$SSSP_VER" ]; then ok=1; break; fi
+              echo "$dir attempt $attempt: <ver> '${served_ver:-nothing}', waiting for $SSSP_VER"
+              sleep 15
+            done
+
+            if [ "$ok" != 1 ]; then
+              echo "::error::$BASE$dir/sssp_config.xml still serves"
+              echo "::error::'${served_ver:-nothing}' instead of $SSSP_VER after five minutes."
+              echo "::error::The deployment reported success, so this is the CDN or the"
+              echo "::error::artifact — not the commit. No display will see this release."
+              exit 1
+            fi
+
+            curl -fsS --max-time 180 -o served.wgt "$BASE$dir/$WIDGET.wgt"
+            served_sha="$(sha256sum served.wgt | cut -d' ' -f1)"
+            if [ "$served_sha" != "$built_sha" ]; then
+              echo "::error::$BASE$dir/$WIDGET.wgt is not the package this run built."
+              echo "::error::served sha256:$served_sha"
+              echo "::error::The descriptor advertises <ver>$SSSP_VER and a <size> taken"
+              echo "::error::from a different file, so every display will fetch the"
+              echo "::error::descriptor and then decline the download without saying why."
+              exit 1
+            fi
+
+            echo "$dir: serving <ver>$SSSP_VER and the exact package we built"
+          done
