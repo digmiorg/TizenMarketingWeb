@@ -93,7 +93,11 @@ cp -R "$SRC_DIR"/. "$STAGE_DIR"/
 find "$STAGE_DIR" -mindepth 1 \( -name '.*' -o -name Build -o -name Debug \) \
     -prune -exec rm -rf {} +
 
-rm -f "$STAGE_DIR"/*.wgt "$STAGE_DIR/author-signature.xml" "$STAGE_DIR/signature1.xml"
+# At any depth, not just the top level: the published 1.0.7 package carries a
+# nested tizen5.wgt, so a stray package inside the source tree is not
+# hypothetical here. A .wgt inside a .wgt is dead weight that gets signed.
+find "$STAGE_DIR" -name '*.wgt' -delete
+rm -f "$STAGE_DIR/author-signature.xml" "$STAGE_DIR/signature1.xml"
 
 [ -f "$STAGE_DIR/config.xml" ] || die "config.xml missing from the staged package"
 [ -f "$STAGE_DIR/index.html" ] || die "index.html missing from the staged package"
@@ -113,7 +117,7 @@ stage_abs="$(cd "$STAGE_DIR" && pwd)"
 say "packaging and signing with profile '$PROFILE'"
 "$TIZEN" package -t wgt -s "$PROFILE" -- "$stage_abs"
 
-wgt="$(find "$STAGE_DIR" -maxdepth 1 -name '*.wgt' | head -1)"
+wgt="$(find "$STAGE_DIR" -maxdepth 1 -name '*.wgt' | head -1 || true)"
 [ -n "$wgt" ] || die "tizen package produced no .wgt"
 
 mv "$wgt" "$OUT_DIR/${widget_name}.wgt"

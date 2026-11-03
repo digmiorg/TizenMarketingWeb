@@ -1,0 +1,61 @@
+name: Deploy site
+
+# Everything that is served to displays lives in this repository, and once Pages
+# is built by a workflow rather than from the branch, nothing reaches the web
+# unless a workflow puts it there. The release workflow deploys the commit it
+# makes itself, which covers a release — and nothing else:
+#
+#   * a hand edit to a descriptor
+#   * a change under staging/, which the release workflow deliberately does not
+#     build
+#   * a revert of a bad production/latest/ — the rollback path
+#   * anything under src/
+#
+# Without this workflow all of those would land on main and never be served,
+# which is strictly worse than the branch-built site it replaces. So: every
+# push to main redeploys the site exactly as the branch would have served it.
+#
+# A push made by the release workflow uses GITHUB_TOKEN and therefore does not
+# trigger this workflow, which is why the two cannot race over one deployment.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Assemble the site exactly as the branch would have served it
+        run: |
+          set -euo pipefail
+          rm -rf _site && mkdir _site
+          # git archive, not a copy of the working tree: tracked files only, at
+          # this commit, so nothing untracked can ride along into what the
+          # fleet fetches.
+          git archive HEAD | tar -x -C _site
+          rm -rf _site/.github
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

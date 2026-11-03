@@ -71,12 +71,29 @@ next unrelated push rolls it out to every screen with nobody watching. The
 publish job checks this setting and stops before committing anything if it is
 still `legacy`.
 
+Flipping that switch also turns off GitHub's own branch-built deployment, which
+is everything the release workflow does not deploy — a hand edit to a
+descriptor, a change under `staging/`, anything in `src/`, and the rollback
+path: a revert of a bad `production/latest/`. So a second workflow, **Deploy
+site**, redeploys the site on every push to `main`. It has no inputs and does
+nothing but publish the tree as it stands. A push made by the release workflow
+uses `GITHUB_TOKEN` and does not trigger it, so the two never race over one
+deployment.
+
 The signing secrets are repository-wide on purpose, so that a build-only run
-works from a feature branch. The stricter alternative is an Environment
-restricted to `main`, which makes a dispatch from any other ref unable to reach
-the certificates at all — at the cost of being unable to test-build a branch.
-Worth taking if this repository ever has more than two people with write
-access.
+works from a feature branch. An Environment restricted to `main` would keep a
+dispatch from any other ref away from the certificates entirely, at the cost of
+being unable to test-build a branch. The cheaper protection with no such cost
+is branch protection on `main` plus `CODEOWNERS` over `.github/workflows/` and
+`scripts/` — the exposure here is write access to the repository, and anyone
+holding that can add their own workflow regardless of where the secrets live.
+Neither is in place today.
+
+The JDK the runner installs is **not** verified against Tizen Studio 6.1. The
+install step runs `tizen version` immediately afterwards precisely so that a
+mismatch fails there, in one readable line, instead of inside the signing
+block. If that is what breaks, the JDK version in the workflow is the first
+thing to change.
 
 ### Running it
 
@@ -88,12 +105,33 @@ Actions → **Release widget** → Run workflow.
    build nobody can verify on site.
 2. Run with both inputs off first. That builds, signs and verifies without
    touching the repository — use it to read the verification output and the
-   signing identity.
+   signing identity. Expect the identity comparison to report a **different**
+   author certificate than the published build, and expect the run to stay
+   green anyway: the live package is signed by a key nobody here holds, so a
+   run that publishes nothing has nothing to protect. The
+   `accept_new_author_certificate` flag is not needed for this, and should not
+   be ticked for it.
 3. Run with **publish** on to commit `production/<version>/`.
 4. Prove that build on **one panel, through the SSSP path** — put the `.wgt`
    and `sssp_config.xml` on a URL, point the panel's Custom App at that
    directory, reboot, and watch it come up on its own.
 5. Only then run with **publish_latest** on. That is the step the fleet follows.
+
+`force` has one job: overwriting a `production/<version>/` that already exists.
+It is not needed for the first rollout. The published descriptor says
+`<ver>1.0.7`, which is not a number, and the backwards gate treats that as a
+warning rather than a block — every `<ver>` this pipeline emits is at least
+10000, which is an increase whether a display reads the old string as an
+integer or compares it as text.
+
+**The live check is an alarm, not a gate.** The order is commit, push, deploy,
+then verify, so by the time it reports a problem the release is already live.
+That is the best available arrangement — the alternative, a branch-built site,
+publishes on GitHub's schedule with nobody watching at all — but it means a red
+live check calls for a decision, not a retry. The recovery is a revert on
+`main`, which **Deploy site** then publishes; the fleet moves back only once a
+`<ver>` higher than the bad one is published, so a revert alone will not pull a
+build off screens that already took it.
 
 Step 4 is not ceremony, and the method matters. A display refuses an update
 signed by a different author certificate than the one it already carries, and

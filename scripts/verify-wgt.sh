@@ -18,9 +18,17 @@ trap 'rm -rf "$WORK"' EXIT
 fail=0
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=1; }
-warn() { printf '  \033[33mwarn\033[0m  %s\n' "$1"; }
+# On a runner the point of a warning is the run summary, not line 140 of a log
+# nobody opens. That is the whole reason the 90/30-day notice exists.
+warn() {
+    printf '  \033[33mwarn\033[0m  %s\n' "$1"
+    [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::$1"
+    return 0
+}
 
-wgt="$(find "$OUT_DIR" -maxdepth 1 -name '*.wgt' | head -1)"
+# `|| true`: head closes the pipe, and under pipefail that SIGPIPE becomes a
+# failed script before the emptiness check below can report what is wrong.
+wgt="$(find "$OUT_DIR" -maxdepth 1 -name '*.wgt' | head -1 || true)"
 cfg="$OUT_DIR/sssp_config.xml"
 
 [ -n "$wgt" ] || { echo "no .wgt in $OUT_DIR"; exit 1; }
@@ -41,7 +49,8 @@ done
 # field failure: the published 1.0.7 package carries .gitignore and Build/ and
 # installed regardless.
 stowaways="$(cd "$WORK/pkg" && find . \( -name '.git*' -o -name '.project' -o -name '.tproject' \
-    -o -name '.settings' -o -name 'Build' -o -name 'Debug' -o -name '.sign' \) 2>/dev/null || true)"
+    -o -name '.settings' -o -name 'Build' -o -name 'Debug' -o -name '.sign' \
+    -o -name '*.wgt' \) 2>/dev/null || true)"
 if [ -z "$stowaways" ]; then
     ok "no IDE or VCS metadata in the package"
 else
