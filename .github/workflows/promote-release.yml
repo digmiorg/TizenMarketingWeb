@@ -160,25 +160,35 @@ jobs:
           # verify-wgt.sh compares <widgetname> against the <name> INSIDE the
           # package, which both states satisfy, so the live check after the
           # deployment is the only thing that would notice.
-          found="$(find "$dir" -maxdepth 1 -name '*.wgt' | wc -l | tr -d ' ')"
+          # NUL-separated and counted by separator, not by line: a committed
+          # name may contain a newline, and `wc -l` would then report more
+          # paths than there are files — an untrue number printed directly
+          # above a true list of them.
+          found="$(find "$dir" -maxdepth 1 -name '*.wgt' -print0 \
+            | tr -dc '\0' | wc -c | tr -d ' ')"
           if [ "$found" != 1 ]; then
-            echo "::error::$dir holds $found paths matching *.wgt; it must hold exactly one"
+            echo "::error::$dir holds $found files matching *.wgt; it must hold exactly one"
             # Named, because find matches a dot file and the place step's glob
             # does not: a stray .something.wgt is counted here and shows up in
             # no ordinary listing. Folded onto one line through tr — an
-            # annotation is line-oriented, and a committed name containing a
-            # newline would otherwise write a line of its own.
-            echo "::error::  $(find "$dir" -maxdepth 1 -name '*.wgt' | tr '\n\r' '  ')"
+            # annotation is line-oriented, and a name containing a newline
+            # would otherwise write a line of its own. Skipped at zero, where
+            # it would print an empty red line under the real error.
+            if [ "$found" != 0 ]; then
+              echo "::error::  $(find "$dir" -maxdepth 1 -name '*.wgt' | tr '\n\r' '  ')"
+            fi
             exit 1
           fi
 
           wgt="$dir/$widget.wgt"
           # Before -f, which follows the link and would call this a package.
           if [ -L "$wgt" ]; then
-            echo "::error::$widget.wgt in $dir is a symlink rather than the package. What it"
-            echo "::error::resolves to is not this directory's committed bytes, so nothing"
-            echo "::error::here can say what the fleet would end up being served. Commit"
-            echo "::error::the package itself."
+            echo "::error::$widget.wgt in $dir is a symlink rather than the package. It"
+            echo "::error::resolves to bytes this directory does not hold, and the place"
+            echo "::error::step's cp follows the link, so the two served directories would"
+            echo "::error::end up carrying those bytes while $dir keeps only the link."
+            echo "::error::The archive this release is supposed to BE would then disagree"
+            echo "::error::with what the fleet is handed. Commit the package itself."
             exit 1
           fi
           if [ ! -f "$wgt" ]; then
