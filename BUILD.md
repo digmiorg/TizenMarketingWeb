@@ -179,6 +179,16 @@ case where that is a considered decision. `publish_latest` on its own fails the
 run immediately, because the publish job would not run at all and the rollout
 would finish green having changed nothing.
 
+One failure worth recognising before it happens: **`src/` or `scripts/` has
+changed on main since this build started.** The build job builds from the
+commit you dispatched; the publish job commits onto the tip of `main`, so that
+its commit is a fast-forward and cannot undo a push that landed meanwhile. If
+someone pushes to the source while a release is building, those two are no
+longer the same tree — the package would be committed by a commit it is not a
+build of, and if the version string did not change, nothing else would ever
+notice. The publish job compares the two git tree ids and stops. Dispatch
+again; nothing was committed.
+
 `force` has one job: overwriting a `production/<version>/` that already exists.
 Neither the first rollout nor a promotion needs it. The published descriptor
 says `<ver>1.0.7`, which is not a number, and the backwards gate treats that as
@@ -401,8 +411,10 @@ signature* after the certificate has already been issued.
 A display refuses an update signed by a different author than the one it
 already carries. What the gates compare is the author's **public key**, hashed
 from its DER `SubjectPublicKeyInfo` by `scripts/author-identity.sh`, against
-whatever `production/latest/sssp_config.xml` says is live — and they refuse to
-continue unless `accept_new_author_certificate` is set.
+every package the fleet is served — both directories, each by the
+`<widgetname>` its own descriptor advertises, so a rename cannot make the
+comparison quietly skip itself. `scripts/author-identity-gate.sh` does that
+and answers in three parts; each workflow then decides who may overrule it.
 
 Both readings of *author* fail, in opposite directions, which is why the gate
 reports three outcomes rather than two:

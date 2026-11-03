@@ -135,8 +135,10 @@ if certs:
 PY
 
     if [ -f "$WORK/author.der" ]; then
-        # The same two numbers scripts/author-identity.sh prints, and the same
-        # way round: the key is the identity, the certificate is the label.
+        # Both numbers, the same way round as everywhere else: the key is the
+        # identity, the certificate is the label. Computed here rather than
+        # through scripts/author-identity.sh, which answers for one at a time
+        # and would mean unpacking the package twice more.
         # `|| true` on both: a present but unparseable certificate is a
         # finding, not a reason to abandon the run. Without it, pipefail inside
         # a command substitution takes the script down with a raw openssl error
