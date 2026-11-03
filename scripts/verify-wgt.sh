@@ -112,37 +112,49 @@ else
 fi
 
 # --- the signing identity ----------------------------------------------------
-# Printed, not asserted: a change of author certificate is the thing that makes
+# Printed, not asserted: a change of signing KEY is the thing that makes
 # installed screens refuse an update, so it belongs in the build log where
-# someone can compare it against the previous release.
+# someone can compare it against the previous release. The certificate hash is
+# printed beside it because that is what names one particular certificate, and
+# because the two move independently: a renewal is a new certificate over the
+# same key, and only the key decides whether the estate keeps updating.
 if [ -f "$WORK/pkg/author-signature.xml" ]; then
     # Written out rather than piped so the expiry check below can read the same
     # bytes without extracting them a second time.
-    python3 - "$WORK/pkg/author-signature.xml" "$WORK/author.der" <<'PY' || true
-import base64, hashlib, re, sys
+    # -I: the package being verified is untrusted input, and an interpreter
+    # that searches the current directory for its imports is one planted
+    # json.py away from running someone else's code.
+    python3 -I - "$WORK/pkg/author-signature.xml" "$WORK/author.der" <<'PY' || true
+import base64, re, sys
 xml = open(sys.argv[1]).read()
 certs = re.findall(r'<[^>]*X509Certificate>\s*([A-Za-z0-9+/=\s]+?)\s*</[^>]*X509Certificate>', xml)
 if certs:
-    der = base64.b64decode(re.sub(r'\s', '', certs[0]))
     with open(sys.argv[2], 'wb') as f:
-        f.write(der)
-    print('  info  signed by sha256:' + hashlib.sha256(der).hexdigest()[:24])
+        f.write(base64.b64decode(re.sub(r'\s', '', certs[0])))
 PY
 
     if [ -f "$WORK/author.der" ]; then
+        # The same two numbers scripts/author-identity.sh prints, and the same
+        # way round: the key is the identity, the certificate is the label.
+        key_sha="$(openssl x509 -inform DER -in "$WORK/author.der" -pubkey -noout \
+            | openssl pkey -pubin -outform DER | openssl dgst -sha256 -r | cut -d' ' -f1)"
+        cert_sha="$(openssl dgst -sha256 -r "$WORK/author.der" | cut -d' ' -f1)"
+        printf '  info  signing key  sha256:%s\n' "${key_sha:0:24}"
+        printf '  info  certificate  sha256:%s\n' "${cert_sha:0:24}"
+
         openssl x509 -inform DER -in "$WORK/author.der" -noout -subject -issuer -enddate \
             2>/dev/null | sed 's/^/          /' || true
 
         # A warning, not a failure: this build is signable today. What it cannot
-        # do is wait. Re-signing after the certificate lapses means a NEW author
-        # identity, and a Samsung display refuses an update signed by one — so
-        # every screen in the field would need the app removed and reinstalled
-        # by hand. Renewing while the current identity still signs costs
-        # nothing; letting it expire costs a site visit per screen.
+        # do is wait. A renewal reuses the RSA key and keeps the estate
+        # updatable, but it has to be done FROM that key, and the key only
+        # opens with a password that has no reset. Miss the window and the next
+        # release is signed by a new key, which a display refuses as a
+        # different author — a site visit per screen.
         for days in 30 90; do
             if ! openssl x509 -inform DER -in "$WORK/author.der" \
                  -checkend $(( days * 86400 )) -noout >/dev/null 2>&1; then
-                warn "the author certificate expires within $days days — renew it BEFORE it lapses, or every installed screen needs a manual reinstall"
+                warn "the author certificate expires within $days days — renew it from the existing key (Certificate Manager: 'Use an existing author certificate'), which keeps the estate updatable; a new key means a manual reinstall on every installed screen"
                 break
             fi
         done

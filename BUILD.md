@@ -3,10 +3,13 @@
 The widget's source lives in `src/`. Everything under `production/` and
 `staging/` is build output.
 
-Releases go through the **Release widget** workflow, not a laptop. Before it
-existed the package was built by hand in Tizen Studio, which is how
-`production/latest/` came to serve 1.0.7 while 1.0.9 sat unreleased beside it —
-the fleet follows `latest/`, so no screen ever saw it.
+Releases go through two workflows, not a laptop. **Release widget** builds,
+signs and publishes `production/<version>/`. **Promote release** copies an
+already-published version into the two directories the fleet follows, and never
+builds or signs anything. Before they existed the package was built by hand in
+Tizen Studio, which is how `production/latest/` came to serve 1.0.7 while 1.0.9
+sat unreleased beside it — the fleet follows `latest/`, so no screen ever saw
+it.
 
 ## How a display actually gets a new build
 
@@ -152,20 +155,43 @@ Actions → **Release widget** → Run workflow.
    describes — a one-time manual reinstall on every screen in the field. Tick
    it once, knowing that, and not before. From the release after that the
    identities match and the flag stays off.
-4. Prove that build on **one panel, through the SSSP path** — put the `.wgt`
-   and `sssp_config.xml` on a URL, point the panel's Custom App at that
-   directory, reboot, and watch it come up on its own.
-5. Only then run with **publish_latest** on. That is the step the fleet follows.
+4. Prove that build on **one panel, through the SSSP path**. It is already
+   served at its own URL — `…/production/<version>/` — so point the panel's
+   Custom App at that directory, reboot, and watch it come up on its own.
+5. Only then roll it out, with the **Promote release** workflow: Actions →
+   Promote release → Run workflow, and type the version you just proved.
+
+Step 5 is a separate workflow for one reason, and it is the reason this
+pipeline exists. Running Release widget a second time **rebuilds**, and a
+rebuild of one version is a different `.wgt` — fresh signature timestamps, a
+different byte count, the same `<ver>`. Rolling that out would hand the fleet a
+package nobody tested, and displays that already have the version would never
+re-download it anyway. Promote release copies the bytes that were proven. It
+needs no certificates at all, and it re-runs the full verification against the
+committed package before it moves anything, so a hand-built directory from
+before this pipeline cannot be rolled out by typing its name into the form — it
+fails the check that `<ver>` is an integer, as `production/1.0.5` and
+`production/1.0.9` both do.
+
+There is a shortcut: **publish** and **publish_latest** in the same Release
+widget run. It builds, publishes and rolls out in one go, and what it skips is
+step 4 — the fleet gets a package that was never on a screen. It exists for the
+case where that is a considered decision. `publish_latest` on its own fails the
+run immediately, because the publish job would not run at all and the rollout
+would finish green having changed nothing.
 
 `force` has one job: overwriting a `production/<version>/` that already exists.
-It is not needed for the first rollout. The published descriptor says
-`<ver>1.0.7`, which is not a number, and the backwards gate treats that as a
-warning rather than a block — every `<ver>` this pipeline emits is at least
+Neither the first rollout nor a promotion needs it. The published descriptor
+says `<ver>1.0.7`, which is not a number, and the backwards gate treats that as
+a warning rather than a block — every `<ver>` this pipeline emits is at least
 10000, which is an increase whether a display reads the old string as an
 integer or compares it as text.
 
-**The live check is an alarm, not a gate.** The order is commit, push, deploy,
-then verify, so by the time it reports a problem the release is already live.
+**The live check is an alarm, not a gate.** Both publishing workflows end with
+it: `scripts/check-served.sh` fetches every directory they wrote, compares the
+served `<ver>`, and then compares the served package against the local one byte
+for byte. But the order is commit, push, deploy, then verify, so by the time it
+reports a problem the release is already live.
 That is the best available arrangement — the alternative, a branch-built site,
 publishes on GitHub's schedule with nobody watching at all — but it means a red
 live check calls for a decision, not a retry. The recovery is a revert on
@@ -179,11 +205,16 @@ more site deployments sits there, and its own 30-minute timeout does not start
 counting until the job starts. Look at the queue before cancelling anything.
 
 `Deploy site` reports success when the deployment is accepted and verifies
-nothing beyond that — the byte-level check belongs to the release path. After a
-revert, fetch the descriptor yourself before believing it:
+nothing beyond that — the byte-level check belongs to the publishing
+workflows. After a revert, check what is being served rather than assuming:
 
 ```sh
 curl -s https://digmiorg.github.io/TizenMarketingWeb/production/latest/sssp_config.xml
+
+# or the same check the workflows run, by bytes, against what you reverted to:
+scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ \
+  <ver> DigmiMarketing production/latest/DigmiMarketing.wgt \
+  production/latest production
 ```
 
 Step 4 is not ceremony, and the method matters. A display refuses an update
@@ -228,12 +259,19 @@ certificate costs is narrower and certain — the partner-level privileges
 and the rest are unreachable however the app calls them.
 
 A Samsung certificate is **valid for one year**. Renewal keeps the installed
-estate updatable only if the same author key is reused: Certificate Manager's
-*Use an existing author certificate* option *"will create a new author
-certificate using the same RSA key"*. The key, and its password, are therefore
-the one artefact that must never be lost — there is no password reset, and
-without it the certificate can never be renewed and every display needs a
-manual reinstall.
+estate updatable because it reuses the author key, and Samsung says so in as
+many words: *"Samsung will issue a new author certificate for you using the
+same RSA key as in existing author certificate. You will be able to update your
+existing app […] if your current author certificate is expired already"*, and
+*"This renewed certificate will be the same as your original RSA key so
+upgrading your application is guaranteed."*
+
+- <https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/extend.html>
+- <https://developer.samsung.com/galaxy-watch-tizen/getting-certificates/create.html>
+
+The key, and its password, are therefore the one artefact that must never be
+lost — there is no password reset, and without it the certificate can never be
+renewed and every display needs a manual reinstall.
 
 ### Why a profile lists with every field N/A
 
@@ -280,8 +318,9 @@ this Samsung account, which was previously an open question.
 One wrinkle in that profile: its author certificate has an **empty CN**
 (`CN=, OU=, O=Digmi Sweden AB, L=Jönköping, ST=Jönköping, C=SE`) because the
 wizard's author-name field was left blank while Additional Fields were filled.
-Updates bind on the certificate itself, not on its CN, so this is cosmetic — but
-it makes the profile harder to recognise in a build log than `CN=Digmi` was.
+Updates bind on the author key, not on any name in the certificate, so this is
+cosmetic — but it makes the profile harder to recognise in a build log than
+`CN=Digmi` was.
 
 Note also that the VS Code extension offers **"Add individual DUIDs (up to 10
 device)"**, where Samsung's own documentation for Tizen Studio states 50. Plan
@@ -339,32 +378,46 @@ signature* after the certificate has already been issued.
 
 ## The signing identity
 
-A display refuses an update signed by a different author certificate than the
-one it already carries. The pipeline therefore compares the identity of each
-build against `production/latest/DigmiMarketing.wgt` and refuses to continue
-unless `accept_new_author_certificate` is set.
+A display refuses an update signed by a different author than the one it
+already carries, and *author* means **the author's public key**, not the
+certificate wrapped around it. That distinction is the whole reason Samsung's
+renewal path works at all: a renewal is a new certificate issued over the
+existing RSA key, and Samsung states that an app signed with it still updates
+(quoted under *Certificates* above). `scripts/author-identity.sh` therefore
+hashes the key's DER `SubjectPublicKeyInfo`, and prints the certificate hash
+beside it as a label. Both publishing workflows compare that identity against
+`production/latest/DigmiMarketing.wgt` and refuse to continue unless
+`accept_new_author_certificate` is set.
 
-This is not theoretical here. The three published packages in this repository
-carry three different author identities:
+Hashing the certificate instead would have been the easy mistake: a routine
+renewal would read as a new identity, and the gate would then tell whoever is
+holding the certificate that every screen in the field needs a manual
+reinstall — at the one moment when that is false and the advice is expensive.
 
-| Release | Author certificate |
-| --- | --- |
-| 1.0.5 | `7461c1fb…` |
-| 1.0.7 (live) | `e318dc37…`, `CN=Digmi`, Tizen Developers CA, expires **2027-01-01** |
-| 1.0.9 | `35c211a7…` (never distributable: different identity, already expired) |
+This is not theoretical here. The three published packages carry three
+different keys, not merely three certificates (measured 2026-11-03 with
+`scripts/author-identity.sh`):
 
-The identity changed at every release, which is why the fleet cannot be updated
-from a laptop that happens to have a certificate on it.
+| Release | Signing key | Author certificate |
+| --- | --- | --- |
+| 1.0.5 | `b279b279…` | `7461c1fb…`, `CN=Digmi AB` |
+| 1.0.7 (live) | `c442303c…` | `e318dc37…`, `CN=Digmi`, Tizen Developers CA, expires **2027-01-01** |
+| 1.0.9 | `b31d589c…` | `35c211a7…` (never distributable: different key, already expired) |
 
-Every build prints this identity and its expiry, and warns at 90 and then 30
-days out, because a certificate that lapses before the next release turns a
-normal update into a manual reinstall on every screen.
+The key changed at every release, which is why the fleet cannot be updated from
+a laptop that happens to have a certificate on it.
+
+Every build prints the key, the certificate and the expiry, and warns at 90 and
+then 30 days out — because a certificate that lapses before the next release
+can no longer be renewed from its key, and that is what turns a normal update
+into a manual reinstall on every screen.
 
 Two consequences worth holding on to. The live certificate expires
 **2027-01-01**, and its private key is not in our possession, so the installed
 estate will need a one-time manual reinstall whatever else happens. And the key
 chosen for the next identity becomes permanent: renewal only preserves
-updatability when the same RSA key is reused, and there is no password reset.
+updatability when it is issued over that same RSA key, which means keeping the
+`.p12` and a password that has no reset.
 
 ## Distribution at scale
 

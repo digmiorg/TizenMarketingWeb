@@ -13,8 +13,9 @@ This is a hosted Digmi Marketing webapp for Tizen url starter.
 
 `production/` and `production/latest/` are both served to displays over SSSP and
 are kept in step with each other. `staging/` is separate and is not built by CI.
-Releases are built, signed and published by the **Release widget** workflow —
-see [BUILD.md](BUILD.md).
+Releases are built, signed and published by the **Release widget** workflow, and
+rolled out to the fleet by **Promote release**, which copies an already-proven
+version rather than rebuilding it — see [BUILD.md](BUILD.md).
 
 Do not hand-edit a descriptor. The naming rules below are necessary but not
 sufficient: `<ver>` has to be an **integer** that increases, or a display never
