@@ -1,7 +1,7 @@
 name: Deploy site
 
-# Everything that is served to displays lives in this repository, and once Pages
-# is built by a workflow rather than from the branch, nothing reaches the web
+# Everything served to displays lives in this repository, and once Pages is
+# built by a workflow rather than from the branch, nothing reaches the web
 # unless a workflow puts it there. The release workflow deploys the commit it
 # makes itself, which covers a release — and nothing else:
 #
@@ -13,10 +13,7 @@ name: Deploy site
 #
 # Without this workflow all of those would land on main and never be served,
 # which is strictly worse than the branch-built site it replaces. So: every
-# push to main redeploys the site exactly as the branch would have served it.
-#
-# A push made by the release workflow uses GITHUB_TOKEN and therefore does not
-# trigger this workflow, which is why the two cannot race over one deployment.
+# push to main redeploys the site as main stands.
 on:
   push:
     branches: [main]
@@ -27,12 +24,19 @@ permissions:
   pages: write
   id-token: write
 
+# Shared with the release workflow's publish job so that the two cannot deploy
+# over each other. `cancel-in-progress: false` in BOTH places or neither: with
+# `true`, a push by a person would cancel a release's publish job after it had
+# already committed and pushed, which is worse than the race it prevents.
 concurrency:
   group: pages-deploy
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
+    # The environment's branch policy also restricts this, but that lives in a
+    # settings page. Say it here too, so the repository states its own rule.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -40,9 +44,38 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
 
     steps:
+      - name: Check how Pages is built
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # While the site is still built from the branch, GitHub's own builder
+          # is deploying every push and this workflow has nothing to do.
+          # Skipping rather than failing matters during the cutover: merged
+          # before the setting is flipped, a failing job would make every push
+          # to main red, and a main where every push is red is a main where the
+          # next real failure goes unnoticed.
+          mode="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type 2>/dev/null || echo unknown)"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          if [ "$mode" != "workflow" ]; then
+            echo "::warning::Pages build_type is '$mode', so the site is still built"
+            echo "::warning::from the branch and this workflow has nothing to deploy."
+            echo "::warning::Set Settings > Pages > Source to 'GitHub Actions' to hand"
+            echo "::warning::deployment to this workflow, then run it once by hand."
+          fi
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        if: steps.pages.outputs.mode == 'workflow'
+        with:
+          # main as it stands when this job runs, not the commit that triggered
+          # it. A run held behind a release in the concurrency group would
+          # otherwise deploy the older tree it was queued for and undo the
+          # release it just waited for.
+          ref: main
 
       - name: Assemble the site exactly as the branch would have served it
+        if: steps.pages.outputs.mode == 'workflow'
         run: |
           set -euo pipefail
           rm -rf _site && mkdir _site
@@ -53,9 +86,11 @@ jobs:
           rm -rf _site/.github
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: steps.pages.outputs.mode == 'workflow'
         with:
           path: _site
 
       - name: Deploy to Pages
         id: deploy
+        if: steps.pages.outputs.mode == 'workflow'
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

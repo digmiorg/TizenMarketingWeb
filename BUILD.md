@@ -76,9 +76,31 @@ is everything the release workflow does not deploy — a hand edit to a
 descriptor, a change under `staging/`, anything in `src/`, and the rollback
 path: a revert of a bad `production/latest/`. So a second workflow, **Deploy
 site**, redeploys the site on every push to `main`. It has no inputs and does
-nothing but publish the tree as it stands. A push made by the release workflow
-uses `GITHUB_TOKEN` and does not trigger it, so the two never race over one
-deployment.
+nothing but publish `main` as it stands.
+
+The two can collide, narrowly: a push by a person during a release starts
+Deploy site, and the older tree it deploys would undo the release. Two things
+stop it. They share one concurrency group, so only one deploys at a time, and
+Deploy site checks out `main` rather than the commit that triggered it, so a
+run held behind a release publishes the release rather than the tree it was
+queued for. Both are needed; neither alone is enough.
+
+### The order of the cutover matters
+
+`Deploy site` skips itself, with a warning, while Pages is still built from the
+branch — so merging first does not turn `main` red. But do not flip the setting
+before there is a workflow able to deploy: what gets served between the flip
+and the first Actions deployment is **not** something this project has
+verified, and if the answer is "nothing", the fleet's own `production/latest/`
+404s. In that order:
+
+1. Merge the branch. Pages is still `legacy`, GitHub's builder deploys the
+   merge commit as before, and `Deploy site` skips with a warning.
+2. Settings → Pages → Source → **GitHub Actions**.
+3. Run **Deploy site** by hand from `main` straight away. That establishes the
+   first workflow-built deployment and proves the path before any release
+   depends on it.
+4. Only then the first **Release widget** run.
 
 The signing secrets are repository-wide on purpose, so that a build-only run
 works from a feature branch. An Environment restricted to `main` would keep a
@@ -111,7 +133,14 @@ Actions → **Release widget** → Run workflow.
    run that publishes nothing has nothing to protect. The
    `accept_new_author_certificate` flag is not needed for this, and should not
    be ticked for it.
-3. Run with **publish** on to commit `production/<version>/`.
+3. Run with **publish** on to commit `production/<version>/`. **The first CI
+   release needs `accept_new_author_certificate`.** Not because anything is
+   wrong: the installed estate carries `e318dc37…`, whose private key nobody
+   here holds, so no certificate we can put in a secret will ever match it.
+   Ticking it is the decision to accept what "## The signing identity" below
+   describes — a one-time manual reinstall on every screen in the field. Tick
+   it once, knowing that, and not before. From the release after that the
+   identities match and the flag stays off.
 4. Prove that build on **one panel, through the SSSP path** — put the `.wgt`
    and `sssp_config.xml` on a URL, point the panel's Custom App at that
    directory, reboot, and watch it come up on its own.
@@ -132,6 +161,14 @@ live check calls for a decision, not a retry. The recovery is a revert on
 `main`, which **Deploy site** then publishes; the fleet moves back only once a
 `<ver>` higher than the bad one is published, so a revert alone will not pull a
 build off screens that already took it.
+
+`Deploy site` reports success when the deployment is accepted and verifies
+nothing beyond that — the byte-level check belongs to the release path. After a
+revert, fetch the descriptor yourself before believing it:
+
+```sh
+curl -s https://digmiorg.github.io/TizenMarketingWeb/production/latest/sssp_config.xml
+```
 
 Step 4 is not ceremony, and the method matters. A display refuses an update
 signed by a different author certificate than the one it already carries, and

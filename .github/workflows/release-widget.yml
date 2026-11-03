@@ -188,6 +188,11 @@ jobs:
           WIDGET: ${{ steps.build.outputs.widget_name }}
         run: |
           set -euo pipefail
+          # Without this, an empty WIDGET makes $published a path that cannot
+          # exist, and the step reports "nothing published yet" and waves a
+          # changed signing identity through on a publishing run.
+          [ -n "$WIDGET" ] || { echo "::error::no widget name from the build"; exit 1; }
+
           published="production/latest/$WIDGET.wgt"
           if [ ! -f "$published" ]; then
             echo "nothing published yet — no identity to compare against"
@@ -251,6 +256,15 @@ jobs:
       contents: write
       pages: write
       id-token: write
+    # Shared with the Deploy site workflow. Without it the two can deploy over
+    # each other: a person pushes to main during a release, their run deploys
+    # the tree from before this release, and the live check only catches it
+    # while it is still polling. `cancel-in-progress: false` in both places —
+    # with `true` a push would cancel this job after it had already committed
+    # and pushed, which is worse than the race.
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
     # Required by actions/deploy-pages, and it puts the release in the
     # repository's deployment history where it can be seen and rolled back.
     environment:
@@ -321,9 +335,17 @@ jobs:
           # and would need the force flag — which also unlocks overwriting a
           # released version, an unrelated protection that should stay on.
           if ! [[ "$raw" =~ ^[0-9]+$ ]]; then
-            echo "::warning::production/latest/ advertises <ver>${raw:-nothing}</ver>,"
-            echo "::warning::the legacy format this pipeline replaces. <ver>$SSSP_VER is an"
-            echo "::warning::increase over it under either reading, so publishing proceeds."
+            if [ -z "$raw" ]; then
+              echo "::warning::production/latest/sssp_config.xml has no <ver> element at"
+              echo "::warning::all — an empty or half-written descriptor, not the legacy"
+              echo "::warning::format. Publishing over it is right either way, but the"
+              echo "::warning::previous publish is worth a look."
+            else
+              echo "::warning::production/latest/ advertises <ver>$raw</ver>, the legacy"
+              echo "::warning::format this pipeline replaces."
+            fi
+            echo "::warning::<ver>$SSSP_VER is an increase over it under every reading of"
+            echo "::warning::that value, so publishing proceeds."
             exit 0
           fi
           published="$raw"
@@ -440,9 +462,10 @@ jobs:
           built_sha="$(sha256sum .build/out/*.wgt | cut -d' ' -f1)"
           echo "built sha256:$built_sha"
 
-          # 15 tries 10s apart: 2m20s of waiting per directory, three
-          # directories, inside a 30-minute job that deploy-pages may already
-          # have spent ten minutes of. No sleep after the last try.
+          # 15 tries 10s apart: 2m20s of sleeping per directory, and with
+          # curl's own --max-time 20 a worst case of 5m20s per directory — up
+          # to three directories, inside a 30-minute job that deploy-pages may
+          # already have spent ten minutes of. No sleep after the last try.
           attempts=15
 
           for dir in $dirs; do
@@ -485,7 +508,13 @@ jobs:
               exit 1
             fi
 
-            curl -fsS --max-time 180 -o served.wgt "$BASE$dir/$WIDGET.wgt"
+            if ! curl -fsS --max-time 180 -o served.wgt "$BASE$dir/$WIDGET.wgt"; then
+              echo "::error::$BASE$dir/$WIDGET.wgt could not be fetched, while the"
+              echo "::error::descriptor beside it is this build's. A display would read"
+              echo "::error::<ver>$SSSP_VER, try the package and get nothing. Check that"
+              echo "::error::the .wgt was committed under the name the descriptor gives."
+              exit 1
+            fi
             served_sha="$(sha256sum served.wgt | cut -d' ' -f1)"
             if [ "$served_sha" != "$built_sha" ]; then
               echo "::error::$BASE$dir/$WIDGET.wgt is not the package this run built."
