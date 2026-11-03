@@ -1,0 +1,168 @@
+name: Deploy site
+
+# Everything served to displays lives in this repository, and once Pages is
+# built by a workflow rather than from the branch, nothing reaches the web
+# unless a workflow puts it there. The release workflow deploys the commit it
+# makes itself, which covers a release — and nothing else:
+#
+#   * a hand edit to a descriptor
+#   * a change under staging/, which the release workflow deliberately does not
+#     build
+#   * a revert of a bad production/latest/ — the rollback path
+#   * anything under src/
+#
+# Without this workflow all of those would land on main and never be served,
+# which is strictly worse than the branch-built site it replaces. So: every
+# push to main redeploys the site as main stands.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A floor, not a grant: this repository's default for GITHUB_TOKEN is write,
+# so a job added later without its own `permissions:` would silently get
+# write-all — including `contents: write` — in the workflow that owns the
+# fleet's deployment path. Each job opts in to what it needs below.
+permissions: {}
+
+jobs:
+  # Split from the deploy on purpose. With the check and the deploy in one job,
+  # the job runs either way, so during the cutover every push to main would
+  # produce a green job that deployed nothing, engage the github-pages
+  # environment, and add a deployment with no URL. Split, the deploy below is
+  # genuinely skipped — grey, not green — and nobody can read a tick as a
+  # release.
+  gate:
+    # The environment's branch policy also restricts this, but that lives in a
+    # settings page. Say it here too, so the repository states its own rule.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Reads one setting and checks out nothing. The deploy job below is where
+    # write is needed.
+    permissions:
+      pages: read
+    outputs:
+      mode: ${{ steps.pages.outputs.mode }}
+    steps:
+      - name: Check how Pages is built
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # Read it or fail. Treating an unreadable answer as "still built from
+          # the branch" would turn any transient 5xx, rate limit or token
+          # glitch into a green run that deployed nothing while warning that
+          # nothing needed deploying — and this workflow is the rollback path,
+          # so that silence would land on a revert nobody could see had failed.
+          # stderr to a file rather than 2>&1: merged into the substitution, a
+          # warning from gh on an otherwise successful call would end up inside
+          # $mode, which is the hole this whole step exists to close.
+          if ! mode="$(gh api "repos/$GITHUB_REPOSITORY/pages" \
+               --jq .build_type 2>"$RUNNER_TEMP/gh.err")"; then
+            err="$(cat "$RUNNER_TEMP/gh.err" || true)"
+            # One message for three unrelated situations would send someone to
+            # the wrong place: 404 is an outage, 403 is a setting, 5xx is a
+            # retry.
+            # Anchored on gh's own format — "gh: Not Found (HTTP 404)" — rather
+            # than a bare 404, so a repository name or a documentation URL
+            # carrying those digits cannot pick an arm. Exactly one (HTTP n) is
+            # written per error, so the arms cannot both match.
+            case "$err" in
+              *"(HTTP 404)"*)
+                echo "::error::GitHub Pages is not enabled for this repository, so"
+                echo "::error::nothing is served at all — production/latest/ included."
+                echo "::error::This is an outage, not a configuration preference." ;;
+              *"(HTTP 403)"*)
+                echo "::error::This job's token cannot read the Pages configuration."
+                echo "::error::Check its 'pages' permission and any organisation policy"
+                echo "::error::that reduces GITHUB_TOKEN." ;;
+              *)
+                echo "::error::Could not read the Pages configuration. Refusing to guess"
+                echo "::error::whether this workflow owns deployment; nothing was"
+                echo "::error::deployed." ;;
+            esac
+            echo "::error::gh said: $err"
+            exit 1
+          fi
+          if [ -z "$mode" ] || [ "$mode" = null ]; then
+            echo "::error::Pages reports no build_type at all. Refusing to guess."
+            exit 1
+          fi
+
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Pages build_type: $mode"
+
+          # Skipping rather than failing matters during the cutover: merged
+          # before the setting is flipped, a failing job would make every push
+          # to main red, and a main where every push is red is a main where the
+          # next real failure goes unnoticed. Afterwards it means the opposite
+          # — see BUILD.md — so put it where someone will actually see it.
+          if [ "$mode" != "workflow" ]; then
+            echo "::warning::Pages build_type is '$mode', so GitHub still builds the site from the branch and this workflow has nothing to deploy."
+            {
+              echo "### Site not deployed"
+              echo
+              echo "Pages \`build_type\` is \`$mode\`, so GitHub builds the site from the"
+              echo "branch and this workflow skipped itself."
+              echo
+              echo "**Before the cutover** that is expected. **After it**, it means Pages"
+              echo "has been switched back and nothing pushed to \`main\` — a revert"
+              echo "included — is reaching displays. Treat it as an outage."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deploy:
+    needs: gate
+    if: needs.gate.outputs.mode == 'workflow'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # Shared with the release workflow's publish job so the two cannot deploy
+    # over each other. `queue: max` so an unrelated push cannot evict a queued
+    # release from the group, and `cancel-in-progress: false` in both places —
+    # with `true`, a push by a person would cancel a release's publish job
+    # after it had already committed and pushed.
+    concurrency:
+      group: pages-deploy
+      queue: max
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # main as it stands when this job runs, not the commit that triggered
+          # it. A run held behind a release in the concurrency group would
+          # otherwise deploy the older tree it was queued for and undo the
+          # release it just waited for.
+          #
+          # The cost: GitHub records the deployment against GITHUB_SHA, the
+          # triggering commit, which may not be the tree deployed. Do not read
+          # a Pages deployment's SHA as the content it published.
+          ref: main
+
+      - name: Assemble the site exactly as the branch would have served it
+        run: |
+          set -euo pipefail
+          rm -rf _site && mkdir _site
+          # git archive, not a copy of the working tree: tracked files only, at
+          # this commit, so nothing untracked can ride along into what the
+          # fleet fetches.
+          git archive HEAD | tar -x -C _site
+          rm -rf _site/.github
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

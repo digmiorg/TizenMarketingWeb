@@ -4,9 +4,24 @@ This is a hosted Digmi Marketing webapp for Tizen url starter.
 
 ## Table Of Contents
 
+* [Where published builds come from](#where-published-builds-come-from)
 * [howto tizen](#howto-tizen)
   * [Howto sssp from usb](#howto-sssp-from-usb)
   * [Howto sssp from web](#howto-sssp-from-web)
+
+## Where published builds come from
+
+`production/` and `production/latest/` are both served to displays over SSSP and
+are kept in step with each other. `staging/` is separate and is not built by CI.
+Releases are built, signed and published by the **Release widget** workflow —
+see [BUILD.md](BUILD.md).
+
+Do not hand-edit a descriptor. The naming rules below are necessary but not
+sufficient: `<ver>` has to be an **integer** that increases, or a display never
+re-downloads, and `<size>`, where stated, has to be the package's exact byte
+count. The descriptors already committed here say `<ver>1.0.7</ver>` and omit
+`<size>` — that is the format the workflow exists to replace, not an example to
+copy.
 
 ## howto tizen
 

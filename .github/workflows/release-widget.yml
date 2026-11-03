@@ -1,0 +1,533 @@
+name: Release widget
+
+# Manual only, and publishing to `latest/` is a separate opt-in.
+#
+# The fleet follows `production/latest/`, so a workflow that wrote there on
+# every push would hand every screen an untested build. A Samsung display also
+# refuses an update signed by a different author certificate than the one it
+# already has, which means the first release after a certificate change has to
+# be proven on one panel before the rest of the estate is pointed at it.
+#
+# So: build and verify freely, publish deliberately.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Commit the package to production/<version>/'
+        type: boolean
+        default: false
+      publish_latest:
+        description: 'Also update production/latest/ — this rolls out to the fleet'
+        type: boolean
+        default: false
+      force:
+        description: 'Overwrite an already-published production/<version>/'
+        type: boolean
+        default: false
+      accept_new_author_certificate:
+        description: 'Allow a different signing identity — the installed estate will stop updating'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One release at a time. Two runs publishing at once would each clear the
+# backwards gate against the same baseline, and whichever committed last would
+# leave latest/ advertising the lower <ver> — a fleet frozen on an older build
+# with both jobs green.
+concurrency:
+  group: release-widget
+  cancel-in-progress: false
+
+env:
+  # Pinned deliberately: Samsung re-spins installers under the same URL, so the
+  # checksum is the only thing that says we got what we tested against. Both
+  # live as repository variables; see BUILD.md for how to refresh them.
+  TIZEN_INSTALLER_URL: ${{ vars.TIZEN_INSTALLER_URL }}
+  TIZEN_INSTALLER_SHA256: ${{ vars.TIZEN_INSTALLER_SHA256 }}
+  TIZEN_HOME: ${{ github.workspace }}/.tizen-studio
+  CERT_PROFILE: digmi-ci
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # A blocked password prompt inside the Tizen CLI waits forever; without a
+    # ceiling it would hold a runner for the default six hours.
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      sssp_ver: ${{ steps.build.outputs.sssp_ver }}
+      size: ${{ steps.build.outputs.size }}
+      widget_name: ${{ steps.build.outputs.widget_name }}
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Refuse to publish from anywhere but main
+        if: inputs.publish
+        run: |
+          # Both publish gates measure this build against production/latest/ as
+          # it exists in the CHECKED-OUT tree, and workflow_dispatch accepts any
+          # ref. Dispatched from an older branch the baseline is whatever that
+          # branch happens to carry, so a build can clear "refuse to go
+          # backwards" and still strand the fleet on the version it has.
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::dispatched from '$GITHUB_REF', not refs/heads/main."
+            echo "::error::Build-only runs are fine from any ref; publishing is not."
+            exit 1
+          fi
+
+      - name: Check the signing inputs are present
+        env:
+          AUTHOR_P12: ${{ secrets.TIZEN_AUTHOR_P12_BASE64 }}
+          AUTHOR_PASSWORD: ${{ secrets.TIZEN_AUTHOR_PASSWORD }}
+          DISTRIBUTOR_P12: ${{ secrets.TIZEN_DISTRIBUTOR_P12_BASE64 }}
+          DISTRIBUTOR_PASSWORD: ${{ secrets.TIZEN_DISTRIBUTOR_PASSWORD }}
+        run: |
+          missing=0
+          for v in TIZEN_INSTALLER_URL TIZEN_INSTALLER_SHA256; do
+            [ -n "${!v}" ] || { echo "::error::repository variable $v is not set"; missing=1; }
+          done
+          [ -n "$AUTHOR_P12" ] || { echo "::error::secret TIZEN_AUTHOR_P12_BASE64 is not set"; missing=1; }
+          [ -n "$DISTRIBUTOR_P12" ] || { echo "::error::secret TIZEN_DISTRIBUTOR_P12_BASE64 is not set"; missing=1; }
+          # Without these the CLI signs with an empty password and fails deep
+          # inside the packager rather than in the step that exists to say
+          # "not configured".
+          [ -n "$AUTHOR_PASSWORD" ] || { echo "::error::secret TIZEN_AUTHOR_PASSWORD is not set"; missing=1; }
+          [ -n "$DISTRIBUTOR_PASSWORD" ] || { echo "::error::secret TIZEN_DISTRIBUTOR_PASSWORD is not set"; missing=1; }
+          exit $missing
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install the Tizen Studio CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL -o installer.bin "$TIZEN_INSTALLER_URL"
+          echo "$TIZEN_INSTALLER_SHA256  installer.bin" | sha256sum -c -
+          chmod +x installer.bin
+          ./installer.bin --accept-license "$TIZEN_HOME"
+          echo "$TIZEN_HOME/tools/ide/bin" >> "$GITHUB_PATH"
+
+          # A broken install, or a JDK the toolchain will not talk to, otherwise
+          # surfaces deep inside the dbus-run-session block where the error is
+          # unreadable. The JDK pinned above is NOT verified against Tizen
+          # Studio 6.1; if this line is what fails, that is the first thing to
+          # change. See BUILD.md.
+          "$TIZEN_HOME/tools/ide/bin/tizen" version
+
+      - name: Install the keyring the signing engine expects
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gnome-keyring dbus-x11
+
+      - name: Install the Samsung Certificate Extension
+        run: |
+          set -euo pipefail
+          # Samsung certificates do not exist as a profile type without this.
+          "$TIZEN_HOME/package-manager/package-manager-cli.bin" \
+            install --no-java-check --accept-license "Samsung Certificate Extension"
+
+      - name: Sign and build
+        id: build
+        env:
+          AUTHOR_P12: ${{ secrets.TIZEN_AUTHOR_P12_BASE64 }}
+          AUTHOR_PASSWORD: ${{ secrets.TIZEN_AUTHOR_PASSWORD }}
+          DISTRIBUTOR_P12: ${{ secrets.TIZEN_DISTRIBUTOR_P12_BASE64 }}
+          DISTRIBUTOR_PASSWORD: ${{ secrets.TIZEN_DISTRIBUTOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Before the files exist, not after: a chmod afterwards leaves them
+          # readable for the moment in between.
+          umask 077
+          CERTS="$RUNNER_TEMP/certs"
+          mkdir -p "$CERTS"
+          printf '%s' "$AUTHOR_P12" | base64 -d > "$CERTS/author.p12"
+          printf '%s' "$DISTRIBUTOR_P12" | base64 -d > "$CERTS/distributor.p12"
+          export CERTS
+
+          # One session for both commands. The signing engine keeps certificate
+          # passwords in a Freedesktop keyring, and `security-profiles add` and
+          # `tizen package` only round-trip them within a single session bus.
+          # Split across two steps, the second finds no password and blocks on
+          # an interactive prompt until the job times out.
+          dbus-run-session -- bash -euo pipefail -c '
+            echo "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+
+            # The CLI resolves a relative profiles path against its own bin
+            # directory, and TIZEN_HOME here is not the default location.
+            tizen cli-config "profiles.path=$TIZEN_HOME/tools/certificate-generator/profiles.xml"
+
+            tizen security-profiles add \
+              -n "$CERT_PROFILE" \
+              -a "$CERTS/author.p12" -p "$AUTHOR_PASSWORD" \
+              -d "$CERTS/distributor.p12" -dp "$DISTRIBUTOR_PASSWORD"
+
+            # Fail here, loudly, rather than inside the packager.
+            tizen security-profiles list
+
+            scripts/build-wgt.sh "$CERT_PROFILE"
+          '
+
+      - name: Verify the package
+        run: scripts/verify-wgt.sh .build/out
+
+      - name: Remove the certificates from the runner
+        if: always()
+        run: |
+          # profiles.xml too: the CLI stores the certificate password there
+          # under its own reversible obfuscation, so leaving it behind leaves
+          # the password behind.
+          rm -rf "$RUNNER_TEMP/certs" \
+                 "$TIZEN_HOME/tools/certificate-generator" \
+                 "$HOME/tizen-studio-data/profile" || true
+
+      - name: Compare the signing identity against the published build
+        env:
+          WIDGET: ${{ steps.build.outputs.widget_name }}
+        run: |
+          set -euo pipefail
+          # Without this, an empty WIDGET makes $published a path that cannot
+          # exist, and the step reports "nothing published yet" and waves a
+          # changed signing identity through on a publishing run.
+          [ -n "$WIDGET" ] || { echo "::error::no widget name from the build"; exit 1; }
+
+          published="production/latest/$WIDGET.wgt"
+          if [ ! -f "$published" ]; then
+            echo "nothing published yet — no identity to compare against"
+            exit 0
+          fi
+
+          built="$(find .build/out -maxdepth 1 -name '*.wgt' | head -1 || true)"
+          [ -n "$built" ] || { echo "::error::no built .wgt to compare"; exit 1; }
+
+          was="$(scripts/author-identity.sh "$published")"
+          now="$(scripts/author-identity.sh "$built")"
+          echo "published: $was"
+          echo "built:     $now"
+
+          if [ "$was" = "$now" ]; then
+            echo "same signing identity as the published build"
+            exit 0
+          fi
+
+          # A build-only run has no publication to protect, and today it cannot
+          # match even in principle: the live package is signed by a key nobody
+          # here holds. Failing the run would make the documented first step —
+          # both inputs off, read the output — impossible to perform, and the
+          # flag that silences it is one nobody should tick for a smoke test.
+          if [ "${{ inputs.publish }}" != "true" ]; then
+            echo "::notice::Different author identity than the published build. Expected"
+            echo "::notice::until the installed estate is reinstalled, and harmless in a"
+            echo "::notice::run that publishes nothing — accept_new_author_certificate is"
+            echo "::notice::not needed here."
+            exit 0
+          fi
+
+          echo "::error::This build is signed by a different author certificate than"
+          echo "::error::the one the installed estate carries. A display refuses an"
+          echo "::error::update signed by a different author identity, so publishing"
+          echo "::error::this means every screen already in the field needs the app"
+          echo "::error::uninstalled and reinstalled by hand. If that migration is the"
+          echo "::error::intent, re-run with accept_new_author_certificate."
+          [ "${{ inputs.accept_new_author_certificate }}" = "true" ] || exit 1
+          echo "::warning::new author identity accepted — the installed estate will not update"
+
+      # Keep the package even when a later gate rejects it. The identity
+      # comparison above is precisely the failure where someone has to look
+      # inside the .wgt before deciding what to do.
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        with:
+          name: widget-${{ steps.build.outputs.version }}
+          path: .build/out/
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    # The live check below waits on a CDN; without a ceiling a stuck fetch holds
+    # a runner for the default six hours.
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    # Shared with the Deploy site workflow. Without it the two can deploy over
+    # each other: a person pushes to main during a release, their run deploys
+    # the tree from before this release, and the live check only catches it
+    # while it is still polling. `cancel-in-progress: false` in both places —
+    # with `true` a push would cancel this job after it had already committed
+    # and pushed, which is worse than the race.
+    concurrency:
+      group: pages-deploy
+      # Without this the group holds one pending entry, and an unrelated push
+      # would evict this job from the queue after the build had already signed
+      # a package.
+      queue: max
+      cancel-in-progress: false
+    # Required by actions/deploy-pages, and it puts the release in the
+    # repository's deployment history where it can be seen and rolled back.
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Check Pages is built by this workflow, not from the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mode="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type)"
+          if [ "$mode" != "workflow" ]; then
+            echo "::error::Pages build_type is '$mode'. While the site is built from the"
+            echo "::error::branch, this commit goes live on GitHub's schedule rather than"
+            echo "::error::ours: a run that fails its live check still leaves latest/ on"
+            echo "::error::main, and the next unrelated push rolls it out to every screen"
+            echo "::error::with nobody watching. Set Settings > Pages > Source to"
+            echo "::error::'GitHub Actions' and re-run."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: widget-${{ needs.build.outputs.version }}
+          path: .build/out
+
+      - name: Refuse to overwrite a released version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -d "production/$VERSION" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "::error::production/$VERSION already exists. A rebuild of the same"
+            echo "::error::version produces a different .wgt (fresh signature timestamps)"
+            echo "::error::and therefore a different <size>, while <ver> stays put — so"
+            echo "::error::displays never re-download it and latest/ would advertise a"
+            echo "::error::package the fleet does not have. Bump the version, or re-run"
+            echo "::error::with force if you know the old one was never distributed."
+            exit 1
+          fi
+
+      - name: Refuse to go backwards
+        if: inputs.publish_latest
+        env:
+          SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
+        run: |
+          set -euo pipefail
+          if [ ! -f production/latest/sssp_config.xml ]; then
+            echo "nothing published yet — no version to compare against"
+            exit 0
+          fi
+
+          # `|| true`: under pipefail a failed sed in a command substitution
+          # takes the whole step down before the checks below can report why.
+          raw="$(sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' \
+            production/latest/sssp_config.xml | head -1 || true)"
+
+          # latest/ currently advertises <ver>1.0.7</ver>, the legacy format this
+          # pipeline replaces. There is nothing to compare and nothing to
+          # protect: every <ver> this pipeline emits is at least 10000, which is
+          # an increase whether a display reads the old string as an integer (1)
+          # or compares it as text ("10010" > "1.0.7"). Blocking here would mean
+          # the first rollout could not be done the way BUILD.md documents it,
+          # and would need the force flag — which also unlocks overwriting a
+          # released version, an unrelated protection that should stay on.
+          if ! [[ "$raw" =~ ^[0-9]+$ ]]; then
+            if [ -z "$raw" ]; then
+              echo "::warning::production/latest/sssp_config.xml has no <ver> element at"
+              echo "::warning::all — an empty or half-written descriptor, not the legacy"
+              echo "::warning::format. Publishing over it is right either way, but the"
+              echo "::warning::previous publish is worth a look."
+            else
+              echo "::warning::production/latest/ advertises <ver>$raw</ver>, the legacy"
+              echo "::warning::format this pipeline replaces."
+            fi
+            echo "::warning::<ver>$SSSP_VER is an increase over it under every reading of"
+            echo "::warning::that value, so publishing proceeds."
+            exit 0
+          fi
+          published="$raw"
+
+          # The main gate in the build job stops the common case; this stays as
+          # the one that cannot be argued with. Displays only re-download when
+          # the number grows, so a lower <ver> in latest/ freezes the whole
+          # fleet on the build it already has, silently and permanently — and a
+          # revert or a force-push on main can lower the baseline too.
+          if [ "$SSSP_VER" -le "$published" ]; then
+            echo "::error::latest/ already advertises <ver>$published and this build is"
+            echo "::error::<ver>$SSSP_VER. Publishing it would strand every display on"
+            echo "::error::the version it already runs. Check which ref you dispatched."
+            exit 1
+          fi
+          echo "<ver> $published -> $SSSP_VER"
+
+      - name: Place the package
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "production/$VERSION"
+          cp .build/out/*.wgt .build/out/sssp_config.xml "production/$VERSION/"
+
+          if [ "${{ inputs.publish_latest }}" != "true" ]; then
+            echo "production/latest/ left alone; prove it on one panel through SSSP first"
+            exit 0
+          fi
+
+          # TWO directories are served to displays, not one. production/latest/
+          # and production/ each carry a descriptor and a .wgt, they hold the
+          # same package byte for byte today, and a given screen's configured
+          # URL may be either. Updating only latest/ leaves every screen pointed
+          # at production/ on <ver>1.0.7 forever — which is how production/1.0.9
+          # came to exist in this repository without a display ever fetching it.
+          for dir in production/latest production; do
+            mkdir -p "$dir"
+            cp .build/out/*.wgt .build/out/sssp_config.xml "$dir/"
+          done
+          echo "::warning::production/ and production/latest/ updated — the fleet follows these"
+
+          # staging/ is a third served directory, carries its own widget name
+          # (DigmiMarketingStaging) and is not built here. Say so rather than
+          # leaving it to be discovered on a screen.
+          # `|| true` for the reason the sister step above spells out: head
+          # closes the pipe and pipefail turns that into a failed step.
+          staging_ver="$(sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' \
+            staging/sssp_config.xml | head -1 || true)"
+          echo "::notice::staging/ still advertises <ver>$staging_ver and is not maintained by this workflow"
+
+      - name: Commit
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add production
+          git diff --cached --quiet && { echo 'nothing changed'; exit 0; }
+          git commit -m "build(widget): publish $VERSION (sssp ver $SSSP_VER)
+
+          Built and signed by the Release widget workflow, run ${{ github.run_number }}.
+          production/latest/ updated: ${{ inputs.publish_latest }}"
+          git push
+
+      - name: Assemble the site exactly as the branch would have served it
+        run: |
+          set -euo pipefail
+          rm -rf _site && mkdir _site
+          # git archive, not a copy of the working tree: only tracked files at
+          # the commit just made, so .build/ and any untracked stray cannot ride
+          # along into what the fleet fetches.
+          git archive HEAD | tar -x -C _site
+          rm -rf _site/.github
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      - name: Confirm the fleet is actually being served this build
+        env:
+          SSSP_VER: ${{ needs.build.outputs.sssp_ver }}
+          VERSION: ${{ needs.build.outputs.version }}
+          WIDGET: ${{ needs.build.outputs.widget_name }}
+          BASE: ${{ steps.deploy.outputs.page_url }}
+          PUBLISH_LATEST: ${{ inputs.publish_latest }}
+        run: |
+          set -euo pipefail
+          # The deployment's page_url carries a trailing slash today, but the
+          # action's own test fixtures do not, so do not depend on either.
+          BASE="${BASE%/}/"
+
+          # Deploying is not serving, and a descriptor alone proves nothing. A
+          # display reads <ver>, then fetches the .wgt and checks it against
+          # <size>; a fresh descriptor served beside a stale package is the
+          # failure that looks exactly like success. So check by bytes.
+          #
+          # production/<version>/ is checked even when latest/ is left alone,
+          # because that is the directory a panel gets pointed at by hand to
+          # prove a release before the fleet is allowed to follow it. Sending
+          # someone to a shop to test a URL we never confirmed is served is the
+          # one trip this check exists to prevent.
+          dirs="production/$VERSION"
+          if [ "$PUBLISH_LATEST" = "true" ]; then
+            dirs="$dirs production/latest production"
+          fi
+
+          built_sha="$(sha256sum .build/out/*.wgt | cut -d' ' -f1)"
+          echo "built sha256:$built_sha"
+
+          # 15 tries 10s apart: 2m20s of sleeping per directory, and with
+          # curl's own --max-time 20 a worst case of 5m20s per directory — up
+          # to three directories, inside a 30-minute job that deploy-pages may
+          # already have spent ten minutes of. No sleep after the last try.
+          attempts=15
+
+          for dir in $dirs; do
+            url="$BASE$dir/sssp_config.xml"
+            served_ver=''
+            fetched=0
+            ok=0
+
+            for n in $(seq 1 "$attempts"); do
+              if body="$(curl -fsS --max-time 20 "$url" 2>/dev/null)"; then
+                fetched=1
+                served_ver="$(printf '%s' "$body" \
+                  | sed -n 's|.*<ver>\([0-9]*\)</ver>.*|\1|p' | head -1 || true)"
+                if [ "$served_ver" = "$SSSP_VER" ]; then
+                  ok=1
+                  break
+                fi
+                echo "$dir try $n/$attempts: serving <ver> '${served_ver:-absent or non-integer}', waiting for $SSSP_VER"
+              else
+                # Kept apart from the stale case on purpose: a 404 and a
+                # not-yet-propagated file both read as nothing, and they call
+                # for completely different things to be looked at.
+                echo "$dir try $n/$attempts: $url does not answer yet"
+              fi
+              if [ "$n" -lt "$attempts" ]; then
+                sleep 10
+              fi
+            done
+
+            if [ "$ok" != 1 ]; then
+              if [ "$fetched" = 0 ]; then
+                echo "::error::$url never answered. The commit landed and the"
+                echo "::error::deployment reported success, so the file is missing from"
+                echo "::error::what was deployed — check what git archive HEAD contained."
+              else
+                echo "::error::$url serves <ver> '${served_ver:-absent or non-integer}'"
+                echo "::error::instead of $SSSP_VER. The file is there but it is not this"
+                echo "::error::build, so an older tree was deployed."
+              fi
+              exit 1
+            fi
+
+            if ! curl -fsS --max-time 180 -o served.wgt "$BASE$dir/$WIDGET.wgt"; then
+              echo "::error::$BASE$dir/$WIDGET.wgt could not be fetched, while the"
+              echo "::error::descriptor beside it is this build's. A display would read"
+              echo "::error::<ver>$SSSP_VER, try the package and get nothing. Check that"
+              echo "::error::the .wgt was committed under the name the descriptor gives."
+              exit 1
+            fi
+            served_sha="$(sha256sum served.wgt | cut -d' ' -f1)"
+            if [ "$served_sha" != "$built_sha" ]; then
+              echo "::error::$BASE$dir/$WIDGET.wgt is not the package this run built."
+              echo "::error::served sha256:$served_sha"
+              echo "::error::The descriptor advertises <ver>$SSSP_VER and a <size> taken"
+              echo "::error::from a different file, so every display will fetch the"
+              echo "::error::descriptor and then decline the download without saying why."
+              exit 1
+            fi
+
+            echo "$dir: serving <ver>$SSSP_VER and the exact package we built"
+          done
