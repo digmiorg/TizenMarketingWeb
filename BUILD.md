@@ -100,32 +100,57 @@ the one artefact that must never be lost — there is no password reset, and
 without it the certificate can never be renewed and every display needs a
 manual reinstall.
 
-### How the password gets lost
+### Why a profile lists with every field N/A
 
-Not by being forgotten. Tizen Studio never shows the password again after the
-profile is created; it writes it to a `.pwd` file next to the `.p12` and reads
-it from there. On Windows that file is a **DPAPI blob** — encrypted against the
-Windows *user account* that created it. Copying `Tizen-data/` to OneDrive, or to
-another machine, therefore carries the key across and leaves the password
-behind: the `.p12` arrives intact and permanently unopenable.
+`profiles.xml` points each key at a `.pwd` file holding its password. Certificate
+Manager cannot open an encrypted `.p12` without it, so when that file is absent
+every field — identity, expiry, even *Key file location* — reads N/A. The key is
+not missing; the password is.
 
-A `.pwd` beginning `01 00 00 00 d0 8c 9d df 01 15 d1 11` (after Tizen's 4-byte
-length prefix) is such a blob — `df9d8cd0-1501-11d1-8c7a-00c04fc297eb` is
-DPAPI's provider GUID. It can only be decrypted on the originating Windows
-install, signed in as that user.
+Two different things produce that, and they need different fixes.
 
-**So: record the password somewhere outside Tizen Studio when you create the
-profile.** The `.pwd` file is not a backup of it.
+**The VS Code Certificate Manager on macOS does not write `.pwd` at all.**
+Verified on a profile created 2026-11-03: `profiles.xml` was written pointing at
+`author.pwd` and `distributor.pwd`, and neither file was created anywhere on
+disk. This is benign *if* the password is known — CI never reads `.pwd`, it takes
+the password as a secret and builds the profile itself with `tizen
+security-profiles add`. But it means **the password you type into the wizard is
+the only copy**, so write it down then and there.
+
+**A `.pwd` written on Windows is bound to that Windows account.** It is a DPAPI
+blob — `df9d8cd0-1501-11d1-8c7a-00c04fc297eb` is DPAPI's provider GUID, visible
+after Tizen's 4-byte length prefix. Copying `Tizen-data/` to OneDrive or another
+machine carries the key across and strands the password: the `.p12` arrives
+intact and permanently unopenable. That is the state of
+`Tizen-data/keystore/author/DigmiTizen.p12`.
+
+Either way the `.pwd` file is not a backup of the password. Keep your own.
 
 ### What this machine actually holds
 
 Read from the unencrypted `author.crt` / `distributor.crt` beside each key
 (2026-11-02):
 
-| Profile | Author | Author CA | Expires | Distributor privilege | DUIDs |
-| --- | --- | --- | --- | --- | --- |
-| `TV` | `93295b0f…` CN=Digmi | Samsung VD Author CA | 2026-11-10 | **Public** | `2DCPQL4LSAA66` |
-| `Tizen7` | `93227dd2…` CN=Digmi | Samsung VD Author CA | 2026-11-12 | **Public** | `2DCPQL4LSAA66` |
+| Profile | Author | Expires | Distributor privilege | DUIDs |
+| --- | --- | --- | --- | --- |
+| `TV` | `93295b0f…` CN=Digmi | 2026-11-10 | **Public** | `2DCPQL4LSAA66` |
+| `Tizen7` | `93227dd2…` CN=Digmi | 2026-11-12 | **Public** | `2DCPQL4LSAA66` |
+| `Digmi_Samsung_Partner_2026` | `670295c0…` O=Digmi Sweden AB | 2027-11-03 | **Partner** | `XTCPQL4LSAA4S`, `2DCPQL4LSAA66` |
+
+All three are issued by `Samsung VD Author CA`. The 2026-11-03 profile is the
+first to carry Partner privilege — `VD DEVELOPER Partner CA Class` rather than
+`VD DEVELOPER Public CA Class` — so partner-level privileges are available on
+this Samsung account, which was previously an open question.
+
+One wrinkle in that profile: its author certificate has an **empty CN**
+(`CN=, OU=, O=Digmi Sweden AB, L=Jönköping, ST=Jönköping, C=SE`) because the
+wizard's author-name field was left blank while Additional Fields were filled.
+Updates bind on the certificate itself, not on its CN, so this is cosmetic — but
+it makes the profile harder to recognise in a build log than `CN=Digmi` was.
+
+Note also that the VS Code extension offers **"Add individual DUIDs (up to 10
+device)"**, where Samsung's own documentation for Tizen Studio states 50. Plan
+for the lower number on this toolchain.
 
 Three things follow, and none of them were assumed before the certificates were
 read:
