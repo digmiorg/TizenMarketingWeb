@@ -163,11 +163,25 @@ jobs:
           found="$(find "$dir" -maxdepth 1 -name '*.wgt' | wc -l | tr -d ' ')"
           if [ "$found" != 1 ]; then
             echo "::error::$dir holds $found paths matching *.wgt; it must hold exactly one"
+            # Named, because find matches a dot file and the place step's glob
+            # does not: a stray .something.wgt is counted here and shows up in
+            # no ordinary listing. Folded onto one line through tr — an
+            # annotation is line-oriented, and a committed name containing a
+            # newline would otherwise write a line of its own.
+            echo "::error::  $(find "$dir" -maxdepth 1 -name '*.wgt' | tr '\n\r' '  ')"
             exit 1
           fi
 
           wgt="$dir/$widget.wgt"
-          if [ ! -f "$wgt" ] || [ -L "$wgt" ]; then
+          # Before -f, which follows the link and would call this a package.
+          if [ -L "$wgt" ]; then
+            echo "::error::$widget.wgt in $dir is a symlink rather than the package. What it"
+            echo "::error::resolves to is not this directory's committed bytes, so nothing"
+            echo "::error::here can say what the fleet would end up being served. Commit"
+            echo "::error::the package itself."
+            exit 1
+          fi
+          if [ ! -f "$wgt" ]; then
             echo "::error::$dir/sssp_config.xml advertises <widgetname>$widget, so a display"
             echo "::error::fetches $widget.wgt — and $dir holds no such regular file. Fix the"
             echo "::error::directory rather than rolling it out."
@@ -193,6 +207,13 @@ jobs:
           DIR: ${{ steps.pkg.outputs.dir }}
         run: |
           # The same check the build ran, against the bytes actually committed.
+          #
+          # It takes the directory and picks the package with a `find | head -1`
+          # of its own, so it reads the file the step above resolved only
+          # because that step proved the directory holds exactly one. Loosen
+          # that count and this silently goes back to verifying something other
+          # than what is served.
+          #
           # It is not a formality: a hand-built directory from before this
           # pipeline fails it — no <size>, a non-integer <ver>, IDE leftovers
           # inside the package — and those are exactly the directories nobody
