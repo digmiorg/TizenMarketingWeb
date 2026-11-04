@@ -535,6 +535,25 @@ repository variables:
 A checksum mismatch stops the build. That is the intended behaviour — verify the
 new binary before updating the pin.
 
+### Where the CLI keeps security profiles
+
+The data directory, `tizen-studio-data/profile/profiles.xml`, which is a sibling
+of the SDK and not a directory inside it. The first run of this pipeline
+(41796421422, 2026-11-04) pointed `profiles.path` at
+`$TIZEN_HOME/tools/certificate-generator/profiles.xml` and `security-profiles
+add` answered *"Not found a file of security profiles. Please check specified
+path."* — that directory holds the certificate generator, never the profiles.
+
+Two things follow, and the workflow does both. The path is read back from
+`tizen cli-config -l` rather than assumed, falling back to the documented
+location. And the file is created empty if it is absent, because `add` reads it
+before it writes to it: an absent file is that error, not an empty list to
+append the first profile to.
+
+`profiles.xml` holds the certificate passwords, so the cleanup step deletes the
+file that was actually used — the signing step exports its path for exactly
+that reason.
+
 ## Building locally
 
 Rarely needed, but useful when debugging the scripts themselves:

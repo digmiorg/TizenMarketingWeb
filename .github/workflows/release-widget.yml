@@ -186,17 +186,64 @@ jobs:
           dbus-run-session -- bash -euo pipefail -c '
             echo "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
 
-            # The CLI resolves a relative profiles path against its own bin
-            # directory, and TIZEN_HOME here is not the default location.
-            tizen cli-config "profiles.path=$TIZEN_HOME/tools/certificate-generator/profiles.xml"
+            # Security profiles live in the DATA directory, which is a sibling
+            # of the SDK rather than a directory under it. Run 41796421422 set
+            # this to $TIZEN_HOME/tools/certificate-generator/profiles.xml and
+            # got "Not found a file of security profiles" out of
+            # `security-profiles add` — that path holds the certificate
+            # generator, never the profiles. The cleanup step below has been
+            # deleting the right directory since before this line was written.
+            #
+            # Asked rather than assumed, with the documented location as the
+            # fallback. `|| true` on the pipeline: head closes the pipe, and
+            # pipefail would turn that SIGPIPE into a failed step.
+            cli_config="$(tizen cli-config -l 2>&1 || true)"
+            echo "$cli_config"
+            profiles="$(printf "%s\n" "$cli_config" \
+              | sed -n "s/^\(default\.\)\{0,1\}profiles\.path=//p" \
+              | head -1 || true)"
+            : "${profiles:=$HOME/tizen-studio-data/profile/profiles.xml}"
+            echo "profiles file: $profiles"
+            mkdir -p "$(dirname "$profiles")"
+
+            # `add` READS this file before it writes to it, so an absent one is
+            # the error above rather than an empty list to append the first
+            # profile to. The skeleton is the documented empty form; the CLI
+            # fills in everything else.
+            if [ ! -f "$profiles" ]; then
+              printf "%s\n" \
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>" \
+                "<profiles active=\"\" version=\"3.1\"/>" > "$profiles"
+              echo "wrote an empty $profiles"
+            fi
+
+            # So the cleanup step can delete the file we actually used: it
+            # holds the certificate passwords.
+            echo "PROFILES_FILE=$profiles" >> "$GITHUB_ENV"
+
+            tizen cli-config "profiles.path=$profiles"
 
             tizen security-profiles add \
               -n "$CERT_PROFILE" \
               -a "$CERTS/author.p12" -p "$AUTHOR_PASSWORD" \
               -d "$CERTS/distributor.p12" -dp "$DISTRIBUTOR_PASSWORD"
 
-            # Fail here, loudly, rather than inside the packager.
-            tizen security-profiles list
+            # Fail here, loudly, rather than inside the packager, and read the
+            # list rather than only printing it: whether `add` can exit zero
+            # without leaving a usable profile behind is not something anyone
+            # here has established, and the packager is a bad place to find out.
+            # `case`, not a pipe into grep -q: that grep exits at the first
+            # match, and under pipefail the SIGPIPE it sends upstream would
+            # fail the step precisely when the profile IS there.
+            list="$(tizen security-profiles list 2>&1 || true)"
+            echo "$list"
+            case "$list" in
+              *"$CERT_PROFILE"*) ;;
+              *)
+                echo "::error::$CERT_PROFILE is not in $profiles after add"
+                ls -la "$(dirname "$profiles")" >&2 || true
+                exit 1 ;;
+            esac
 
             scripts/build-wgt.sh "$CERT_PROFILE"
           '
@@ -210,9 +257,13 @@ jobs:
           # profiles.xml too: the CLI stores the certificate password there
           # under its own reversible obfuscation, so leaving it behind leaves
           # the password behind.
+          # PROFILES_FILE is whatever the signing step resolved; the two
+          # fixed paths stay because the step may have failed before it got
+          # that far.
           rm -rf "$RUNNER_TEMP/certs" \
                  "$TIZEN_HOME/tools/certificate-generator" \
-                 "$HOME/tizen-studio-data/profile" || true
+                 "$HOME/tizen-studio-data/profile" \
+                 ${PROFILES_FILE:+"$PROFILES_FILE"} || true
 
       - name: Compare the signing identity against what is served
         env:
