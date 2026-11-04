@@ -153,10 +153,11 @@ jobs:
           # The signing step passes -f and -A to `security-profiles add`, and
           # they carry weight: -f is what creates profiles.xml at the path the
           # CLI resolves, which is the whole escape from the failure of run
-          # 41796421422. They are taken from a transcript of --help for CLI
-          # 2.5.25, not from a binary anyone here has run. Printed so the next
-          # run settles it either way, and so a usage error further down has
-          # its explanation in the same log.
+          # 41796421422. Run 41846786550 printed this --help and both are
+          # on the binary, so they are measured rather than taken from a
+          # transcript. Still printed, because the installer is pinned by
+          # checksum and not by version: if a future CLI drops either flag,
+          # the usage error further down has its explanation in the same log.
           "$TIZEN_HOME/tools/ide/bin/tizen" security-profiles add --help || true
 
       - name: Install the keyring the signing engine expects
@@ -231,12 +232,17 @@ jobs:
             # with the profile it just made. The reference docs name one, the
             # CLI itself names the other. It is second because the choice
             # barely matters — both are read, and the fallback below is the
-            # same path under either reading. BUILD.md quotes the output and
-            # the thread it came from.
+            # same path under either reading. BUILD.md quotes both.
             #
-            # Which of them a listing actually holds has never been seen
-            # here: 41796421422 never ran `cli-config -l`. This step prints
-            # the whole listing, so the next run settles it.
+            # What a real listing holds was settled by run 41846786550:
+            # eight keys, every one of them `default.`-prefixed, no bare
+            # `profiles.path`, and `default.profiles.path` already pointing
+            # at the data directory. So the documented spelling is the one
+            # that answers in practice and the bare read is dead weight that
+            # costs nothing. Whether a bare key would OVERRIDE the prefixed
+            # one is still unknown and now unimportant: both are read, and
+            # the fallback below is the same path either way. The listing is
+            # still printed, because a changed installer could change it.
             #
             # `|| true` on the pipeline: head closes the pipe, and pipefail
             # would turn that SIGPIPE into a failed step. The trim is not
@@ -278,19 +284,23 @@ jobs:
             # ${TIZEN_HOME}-data/profile unconditionally, so a write that does
             # not take strands nothing. Its EXIT STATUS was not optional until
             # this line was guarded — bare under errexit, it would kill the
-            # step. And unlike the spelling it replaces, its acceptance on
-            # CLI 2.5.25 is documented rather than measured, in front of a
-            # signing path that has never completed in CI. A warning, so a
-            # surprise is still in the log, rather than `|| true`.
+            # step.
+            #
+            # CLI 2.5.25 accepts the key: run 41846786550 emitted no
+            # warning here and went on to sign. The guard stays anyway,
+            # because the only thing it can cost is a log line, and what it
+            # buys is that a CLI which stops accepting the key cannot take
+            # the whole release down for a write whose effect is optional.
+            # A warning rather than `|| true`, so the surprise is visible.
             tizen cli-config "default.profiles.path=$profiles" \
               || echo "::warning::could not set default.profiles.path — continuing, because add -f resolves the path itself"
 
             # -f creates profiles.xml when it is absent, at the path the CLI
             # itself resolves, which is what the run above died for the want
             # of. -A makes the profile active, so nothing downstream depends
-            # on which profile a bare command would pick. Both are in
-            # `security-profiles add --help` for CLI 2.5.25, the version this
-            # installer produces.
+            # on which profile a bare command would pick. Both were printed
+            # by the binary itself in run 41846786550, by the --help the
+            # CLI install step runs earlier in this job.
             tizen security-profiles add -f -A \
               -n "$CERT_PROFILE" \
               -a "$CERTS/author.p12" -p "$AUTHOR_PASSWORD" \
@@ -301,10 +311,14 @@ jobs:
             # behaviour being guarded against — a CLI message that merely
             # mentioned the name would have passed.
             #
-            # A warning, NOT a gate, because nobody here has established what
-            # `list -n` exits when the profile IS present. Making that a
-            # failure would be a new way to fail a build that signs perfectly,
-            # bought with no new coverage: the real net is verify-wgt.sh, which
+            # A warning, NOT a gate. `list -n` exits 0 for a profile that is
+            # there — run 41846786550 measured it, so the original reason
+            # for not gating is gone. It stays a warning because the thing
+            # worth failing a release over is an unsigned package, not an
+            # unparsed profile listing, and because a CLI version that
+            # answered non-zero anyway would otherwise fail a build that
+            # signs perfectly, for no new coverage: the real net is
+            # verify-wgt.sh, which
             # refuses a package with no author-signature.xml — the documented
             # way `tizen package` exits 0 having signed nothing. What this is
             # worth is a readable line here instead of a confusing one inside

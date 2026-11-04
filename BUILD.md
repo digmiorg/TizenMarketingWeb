@@ -560,8 +560,19 @@ The workflow does not rely on that alone. It reads the path back from `tizen
 cli-config -l`, falls back to `${TIZEN_HOME}-data/profile/profiles.xml`, and
 passes `-f` to `security-profiles add`, which creates the file at whatever path
 the CLI itself resolves. `-A` makes the profile active so nothing downstream
-depends on which profile a bare command would choose. Both options are in
-`security-profiles add --help` for CLI 2.5.25.
+depends on which profile a bare command would choose. Both options are on the
+binary the installer produces, printed by `security-profiles add --help` in run
+41846786550:
+
+```
+ -A (--active)                           Set this profile as active.
+ …
+ -f (--force)                            If there is no Profile XML, then
+                                          generates a file.
+```
+
+(The two are twelve lines apart in that output, with the certificate options
+between them.)
 
 The key is `default.profiles.path`, all of it. `default.` is part of the name
 rather than a marker for a value something else overrides — [Samsung's CLI page
@@ -574,23 +585,28 @@ It reads a bare `profiles.path` too, second. Do not "fix" the write over to
 that spelling without reading the rest of this section: both are genuinely out
 there, which is how the mistake happened. The reference docs above name the
 prefixed one — so do the desktop and Unity recipes — but **the CLI itself
-recommends the bare one.** `security-profiles add` ends by printing this, with
-the forum's typographic quotes normalised back to the ASCII the CLI emits:
+recommends the bare one.** `security-profiles add` ends by printing this, on
+our own runner, in the green run:
 
 ```
-Succeed to add 'gaia-samsung-tizen' profile.
+Succeed to add 'digmi-ci' profile.
 If want to sign by this, add the file of security profiles in CLI configuration
-like 'tizen cli-config "profiles.path=/home/installuser/tizen-studio-data/profile/profiles.xml"'.
+  like 'tizen cli-config "profiles.path=/home/runner/work/TizenMarketingWeb/TizenMarketingWeb/.tizen-studio-data/profile/profiles.xml"'.
 ```
+
+So the CLI recommends a key that its own `cli-config -l` does not list, and
+names the right path while doing it. The same two sentences appear in the forum
+thread below, which is where they were first found.
 
 Ranking it second is therefore not a judgement about which spelling is better
 attested. The real reason is that the choice does not matter much: the step
 reads both, the documented spelling first, and the fallback is the same path
 under either reading.
 
-That output is quoted from [a thread about packaging a TV app in
+Those two sentences were first found in [a thread about packaging a TV app in
 Docker](https://forum.developer.samsung.com/t/solved-cant-package-tv-app-using-docker/22987),
-and the thread is worth reading for two further reasons. Its accepted
+before this pipeline had ever printed them itself, and the thread is still
+worth reading for two further reasons. Its accepted
 resolution — by the asker, confirmed by another developer in August 2025 who
 needed the same thing in CI — **writes no `cli-config` key at all**: just
 `dbus-run-session -- package.sh`, where the script unlocks the keyring, runs
@@ -600,13 +616,96 @@ it is independent confirmation of why this step wraps the whole script in
 `dbus-run-session` rather than running it per command: the keyring has to stay
 available between where the SDK writes the password and where it reads it back.
 
-Whether a real listing holds one spelling, both or neither has not been
-observed: run 41796421422 never got as far as `cli-config -l`. The step prints
-the whole listing, so the next run settles it. The write is guarded with a
-`::warning::` rather than left bare, because an unguarded non-zero exit there
-would kill the step under `errexit` for a write whose effect is optional, and
-because the prefixed spelling is documented rather than measured — the bare one
-this step used until 2026-11-04 was measured accepted in that failed run.
+### What a real listing holds
+
+Run [41846786550](https://github.com/digmiorg/TizenMarketingWeb/actions/runs/41846786550),
+the first run in which this step got as far as `cli-config -l`, printed this on
+a fresh install:
+
+```
+default.build.architecture=x86_64
+default.build.compiler=gcc
+default.build.configuration=Debug
+default.csharp.buildtool.path=C:/Program Files/Microsoft Visual Studio/2022/Professional/Msbuild/Current/Bin/amd64/MSBuild.exe
+default.csharp.toolchain=dotnet-cli
+default.dotnet.tool.path=/usr/bin/dotnet
+default.profiles.path=/home/runner/work/TizenMarketingWeb/TizenMarketingWeb/.tizen-studio-data/profile/profiles.xml
+default.sdb.timeout=60000
+```
+
+Every key is `default.`-prefixed, there is no bare `profiles.path`, and
+`default.profiles.path` already points at the data directory — which is why
+nothing in the failed run was wrong about the layout. What was wrong was this
+step's own write to `certificate-generator`. (The Windows MSBuild path on a
+Linux runner is the installer's, not ours.)
+
+Two things that run did **not** settle, so do not read them into it:
+
+* **Whether a bare `profiles.path` would override the prefixed key.** The
+  listing has no bare key to compete with, and the earlier failure proves
+  nothing either way: at that point no `profiles.xml` existed anywhere, so
+  `add` without `-f` would have failed whichever key it read. Unknown, and
+  harmless now that both are read and the fallback is the same path.
+* **Whether the write takes effect.** `default.profiles.path` already held the
+  value the step writes, so a write that did nothing would look identical.
+
+The write is guarded with a `::warning::` rather than left bare because an
+unguarded non-zero exit there would kill the step under `errexit` for a write
+whose effect is optional — `add -f` resolves the path itself, and the cleanup
+step removes `${TIZEN_HOME}-data/profile` unconditionally, so a write that does
+not take strands nothing. Run 41846786550 emitted no warning, so CLI 2.5.25
+accepts the key.
+
+The same run settled one more open question: `security-profiles list -n` exits
+0 when the profile is there. The check after `add` is still a warning rather
+than a gate, because the thing worth failing on is an unsigned package, and
+`verify-wgt.sh` already refuses one.
+
+### Testing the signing step without a runner
+
+`scripts/signtest.py` cuts the `bash -c` block out of `release-widget.yml` and
+runs it against a stub `tizen`, so the step can be changed without spending a
+runner on each attempt:
+
+```sh
+python3 scripts/signtest.py                              # the workflow in this tree
+python3 scripts/signtest.py /path/to/some/other/copy.yml # any other copy
+```
+
+Stock `python3` is enough — it needs no third-party modules. It uses
+`shellcheck` when that is on PATH and says so when it is not. It exits
+non-zero if any case fails, and also before the first case runs if the block
+cannot be found or parsed, if `shellcheck` has something to say about it, or
+if it contains an apostrophe.
+
+What it covers is the list of bugs this one step has already had: the profiles
+path, the key spelling read and the key spelling written, `-f` and `-A`
+reaching `add`, the write being guarded, whitespace and carriage returns in the
+path, and the rule that no apostrophe may appear inside the block — the block
+is a single-quoted argument to `bash -c`, so one apostrophe silently turns the
+rest of the script into shell words.
+
+A test that cannot fail protects nothing, so the suite proves it bites rather
+than asserting it:
+
+```sh
+python3 scripts/signtest.py --mutate
+```
+
+That puts each of those defects back into a copy of the workflow, one at a
+time, runs the whole suite against it, and insists both that the suite goes red
+and that it goes red on the case that defect is named for. A surviving mutant
+is a failure. It takes a couple of minutes, which is why it is not the default.
+If a substitution no longer matches the workflow, that is an error too: the
+step has been reworked and the table above the cases needs rereading. Without
+`shellcheck` on PATH one entry is skipped rather than failed, and the run says
+so — the mutation set is smaller, and the exit status does not show it.
+
+It cannot tell you that the real CLI accepts a flag or a key; only a run can.
+`actionlint .github/workflows/release-widget.yml` is the other half, and it is
+what caught the apostrophe the suite missed. Its four standing findings on this
+file — two `queue: max` false positives and two shellcheck infos — are the
+baseline; anything beyond them is new.
 
 ### What holds the signing secret on a runner
 
