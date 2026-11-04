@@ -127,8 +127,6 @@ jobs:
             exit 1
           fi
 
-          wgt="$(find "$dir" -maxdepth 1 -name '*.wgt' | head -1 || true)"
-          [ -n "$wgt" ] || { echo "::error::$dir holds no .wgt"; exit 1; }
           [ -f "$dir/sssp_config.xml" ] || { echo "::error::$dir holds no sssp_config.xml"; exit 1; }
 
           # `|| true` on each: head closes the pipe and pipefail turns that
@@ -149,6 +147,70 @@ jobs:
               exit 1 ;;
           esac
 
+          # The package is chosen by the name the descriptor advertises, not by
+          # whatever `find | head -1` reaches first, and the directory must hold
+          # that one and nothing else that looks like one. Both halves matter,
+          # and neither is caught before the fleet already has the result:
+          #   * a second .wgt would be copied into both served directories by
+          #     the place step below — it copies $DIR/*.wgt — while only the one
+          #     reached first was verified and identity-checked;
+          #   * a single .wgt under some other name would leave $widget.wgt in
+          #     the served directories holding the PREVIOUS release's bytes,
+          #     under a descriptor advertising these ones and their <size>.
+          # verify-wgt.sh compares <widgetname> against the <name> INSIDE the
+          # package, which both states satisfy, so the live check after the
+          # deployment is the only thing that would notice.
+          # NUL-separated and counted by separator, not by line: a committed
+          # name may contain a newline, and `wc -l` would then report more
+          # paths than there are files — an untrue number printed directly
+          # above a true list of them.
+          #
+          # release-widget.yml counts the same thing with `wc -l`, deliberately:
+          # it counts .build/out, which the build in that same run created, and
+          # build-wgt.sh guards the name it writes there to letters, digits,
+          # dot, underscore and hyphen. A newline cannot reach it. This one
+          # counts a committed tree, where nothing has guarded anything.
+          found="$(find "$dir" -maxdepth 1 -name '*.wgt' -print0 \
+            | tr -dc '\0' | wc -c | tr -d ' ')"
+          if [ "$found" != 1 ]; then
+            echo "::error::$dir holds $found files matching *.wgt; it must hold exactly one"
+            # Named, because find matches a dot file and the place step's glob
+            # does not: a stray .something.wgt is counted here and shows up in
+            # no ordinary listing. Folded onto one line through tr — an
+            # annotation is line-oriented, and a name containing a newline
+            # would otherwise write a line of its own. Skipped at zero, where
+            # it would print an empty red line under the real error.
+            if [ "$found" != 0 ]; then
+              echo "::error::  $(find "$dir" -maxdepth 1 -name '*.wgt' | tr '\n\r' '  ')"
+            fi
+            exit 1
+          fi
+
+          wgt="$dir/$widget.wgt"
+          # Before -f, which follows the link and would call this a package.
+          if [ -L "$wgt" ]; then
+            echo "::error::$widget.wgt in $dir is a symlink rather than the package, so"
+            echo "::error::the bytes it stands for are not in this directory. The place step"
+            echo "::error::copies through the link: where it resolves, the two served"
+            echo "::error::directories would carry the target's bytes while $dir kept only"
+            echo "::error::the link, leaving the archive this release is supposed to BE"
+            echo "::error::disagreeing with what the fleet is handed; where it dangles or"
+            echo "::error::names a directory, that copy simply fails. Commit the package."
+            exit 1
+          fi
+          if [ ! -f "$wgt" ]; then
+            echo "::error::$dir/sssp_config.xml advertises <widgetname>$widget, so a display"
+            echo "::error::fetches $widget.wgt — and $dir holds no such regular file. Fix the"
+            echo "::error::directory rather than rolling it out."
+            # The package that IS there, by the count above exactly one. Saying
+            # only what is missing leaves the reader to guess that something is
+            # sitting next to it under another name — which is the whole state
+            # being reported.
+            echo "::error::  what is there: $(find "$dir" -maxdepth 1 -name '*.wgt' \
+              | tr '\n\r' '  ')"
+            exit 1
+          fi
+
           # The digest is printed so it can be read against what the release
           # run's live check printed for the same directory. Nothing here can
           # prove these are the bytes that were proven on a panel — a forced
@@ -168,6 +230,13 @@ jobs:
           DIR: ${{ steps.pkg.outputs.dir }}
         run: |
           # The same check the build ran, against the bytes actually committed.
+          #
+          # It takes the directory and picks the package with a `find | head -1`
+          # of its own, so it reads the file the step above resolved only
+          # because that step proved the directory holds exactly one. Loosen
+          # that count and this silently goes back to verifying something other
+          # than what is served.
+          #
           # It is not a formality: a hand-built directory from before this
           # pipeline fails it — no <size>, a non-integer <ver>, IDE leftovers
           # inside the package — and those are exactly the directories nobody
