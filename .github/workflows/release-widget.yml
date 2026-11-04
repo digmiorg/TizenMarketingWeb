@@ -150,6 +150,15 @@ jobs:
           # change. See BUILD.md.
           "$TIZEN_HOME/tools/ide/bin/tizen" version
 
+          # The signing step passes -f and -A to `security-profiles add`, and
+          # they carry weight: -f is what creates profiles.xml at the path the
+          # CLI resolves, which is the whole escape from the failure of run
+          # 41796421422. They are taken from a transcript of --help for CLI
+          # 2.5.25, not from a binary anyone here has run. Printed so the next
+          # run settles it either way, and so a usage error further down has
+          # its explanation in the same log.
+          "$TIZEN_HOME/tools/ide/bin/tizen" security-profiles add --help || true
+
       - name: Install the keyring the signing engine expects
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gnome-keyring dbus-x11
 
@@ -186,17 +195,129 @@ jobs:
           dbus-run-session -- bash -euo pipefail -c '
             echo "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
 
-            # The CLI resolves a relative profiles path against its own bin
-            # directory, and TIZEN_HOME here is not the default location.
-            tizen cli-config "profiles.path=$TIZEN_HOME/tools/certificate-generator/profiles.xml"
+            # Security profiles live in the DATA directory: a sibling of the
+            # SDK, named after it. Run 41796421422 set this to
+            # $TIZEN_HOME/tools/certificate-generator/profiles.xml and got
+            # "Not found a file of security profiles" out of
+            # `security-profiles add` — that path holds the certificate
+            # generator, never the profiles. That run also printed where the
+            # directory actually is, which beats any documentation for this
+            # layout:
+            #
+            #   * Data directory : .../TizenMarketingWeb/.tizen-studio-data
+            #
+            # for TIZEN_HOME=.../TizenMarketingWeb/.tizen-studio. So it is not
+            # under $HOME either, unless the SDK is — the cleanup step below
+            # was deleting $HOME/tizen-studio-data/profile, which is the right
+            # directory for a DEFAULT install and never existed on this one.
+            #
+            # Asked rather than assumed, with that measured path as the
+            # fallback.
+            #
+            cli_config="$(tizen cli-config -l 2>&1 || true)"
+            printf "%s\n" "$cli_config"
 
-            tizen security-profiles add \
+            # `default.profiles.path` is the whole NAME of the key, not a
+            # default that some bare `profiles.path` overrides. Samsung
+            # documents it for this very product — "Default certificate
+            # profile path" — directly beside
+            # `default.sdb.timeout=<timeout value>`, and that one is a
+            # timeout, not a precedence marker:
+            # https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/command-line-interface.html
+            #
+            # The bare spelling is read too, second, and NOT because it is
+            # merely undocumented folklore: `security-profiles add` ends by
+            # printing advice to set that exact spelling in order to sign
+            # with the profile it just made. The reference docs name one, the
+            # CLI itself names the other. It is second because the choice
+            # barely matters — both are read, and the fallback below is the
+            # same path under either reading. BUILD.md quotes the output and
+            # the thread it came from.
+            #
+            # Which of them a listing actually holds has never been seen
+            # here: 41796421422 never ran `cli-config -l`. This step prints
+            # the whole listing, so the next run settles it.
+            #
+            # `|| true` on the pipeline: head closes the pipe, and pipefail
+            # would turn that SIGPIPE into a failed step. The trim is not
+            # theoretical — a path with a stray space is created happily here
+            # and then not found by a CLI that trimmed it.
+            # $1 is spliced into a sed BRE, so it must arrive escaped and
+            # sed-safe: a bare dot matches any character, and a slash ends the
+            # substitution. A key that breaks either way comes back empty with
+            # status 0, because of the `|| true` below — a silent fall-through
+            # to the next spelling, visible only as a sed complaint on stderr.
+            cli_config_value() {
+              printf "%s\n" "$cli_config" \
+                | sed -n "s/^[[:space:]]*$1=//p" \
+                | head -1 \
+                | tr -d "\r" \
+                | sed -e "s/^[[:space:]]*//" -e "s/[[:space:]]*$//" || true
+            }
+            profiles="$(cli_config_value "default\.profiles\.path")"
+            if [ -z "$profiles" ]; then
+              profiles="$(cli_config_value "profiles\.path")"
+            fi
+            : "${profiles:=${TIZEN_HOME}-data/profile/profiles.xml}"
+            printf "profiles file: %s\n" "$profiles"
+            mkdir -p "$(dirname "$profiles")"
+
+            # So the cleanup step can delete the file we actually used. Not
+            # because it holds the passwords — it does not, see that step —
+            # but because it is the one artefact of this job that names them.
+            printf "PROFILES_FILE=%s\n" "$profiles" >> "$GITHUB_ENV"
+
+            # The documented key, per the page cited above. The bare
+            # spelling this line used until now was accepted by the CLI
+            # ("Setting configuration is succeeded...." in 41796421422), but
+            # acceptance of a key is not proof that anything reads it back.
+            #
+            # The EFFECT of the write is optional: `add -f` creates the file at
+            # whatever path the CLI resolves, the fallback above is that same
+            # default path, and the cleanup step removes
+            # ${TIZEN_HOME}-data/profile unconditionally, so a write that does
+            # not take strands nothing. Its EXIT STATUS was not optional until
+            # this line was guarded — bare under errexit, it would kill the
+            # step. And unlike the spelling it replaces, its acceptance on
+            # CLI 2.5.25 is documented rather than measured, in front of a
+            # signing path that has never completed in CI. A warning, so a
+            # surprise is still in the log, rather than `|| true`.
+            tizen cli-config "default.profiles.path=$profiles" \
+              || echo "::warning::could not set default.profiles.path — continuing, because add -f resolves the path itself"
+
+            # -f creates profiles.xml when it is absent, at the path the CLI
+            # itself resolves, which is what the run above died for the want
+            # of. -A makes the profile active, so nothing downstream depends
+            # on which profile a bare command would pick. Both are in
+            # `security-profiles add --help` for CLI 2.5.25, the version this
+            # installer produces.
+            tizen security-profiles add -f -A \
               -n "$CERT_PROFILE" \
               -a "$CERTS/author.p12" -p "$AUTHOR_PASSWORD" \
               -d "$CERTS/distributor.p12" -dp "$DISTRIBUTOR_PASSWORD"
 
-            # Fail here, loudly, rather than inside the packager.
-            tizen security-profiles list
+            # Ask about THIS profile rather than matching its name against the
+            # whole listing, whose format is no better established than the
+            # behaviour being guarded against — a CLI message that merely
+            # mentioned the name would have passed.
+            #
+            # A warning, NOT a gate, because nobody here has established what
+            # `list -n` exits when the profile IS present. Making that a
+            # failure would be a new way to fail a build that signs perfectly,
+            # bought with no new coverage: the real net is verify-wgt.sh, which
+            # refuses a package with no author-signature.xml — the documented
+            # way `tizen package` exits 0 having signed nothing. What this is
+            # worth is a readable line here instead of a confusing one inside
+            # the packager.
+            if listed="$(tizen security-profiles list -n "$CERT_PROFILE" 2>&1)"; then
+              printf "%s\n" "$listed"
+            else
+              printf "%s\n" "$listed"
+              echo "::warning::could not confirm $CERT_PROFILE in $profiles."
+              echo "::warning::Continuing: the package is signed with -s and verified"
+              echo "::warning::afterwards, so an unsigned one still cannot get out."
+              ls -la "$(dirname "$profiles")" || true
+            fi
 
             scripts/build-wgt.sh "$CERT_PROFILE"
           '
@@ -207,12 +328,26 @@ jobs:
       - name: Remove the certificates from the runner
         if: always()
         run: |
-          # profiles.xml too: the CLI stores the certificate password there
-          # under its own reversible obfuscation, so leaving it behind leaves
-          # the password behind.
+          set -euo pipefail
+          # What actually holds the secret, in order:
+          #
+          #   * the .p12 files, written from the secrets — $RUNNER_TEMP/certs;
+          #   * the GNOME keyring, where `security-profiles add` puts the
+          #     passwords. --unlock with an empty password persists it under
+          #     $HOME/.local/share/keyrings, which outlives dbus-run-session;
+          #   * profiles.xml, whose password= attribute is NOT the password
+          #     but a path to a .pwd entry in that keyring. It names the
+          #     secret rather than holding it, which is a reason to delete it
+          #     and not a reason to relax about the two above.
+          #
+          # PROFILES_FILE is whatever the signing step resolved; the fixed
+          # paths stay because the step may have failed before it got there.
           rm -rf "$RUNNER_TEMP/certs" \
+                 "$HOME/.local/share/keyrings" \
                  "$TIZEN_HOME/tools/certificate-generator" \
-                 "$HOME/tizen-studio-data/profile" || true
+                 "${TIZEN_HOME}-data/profile" \
+                 "$HOME/tizen-studio-data/profile" \
+                 ${PROFILES_FILE:+"$PROFILES_FILE"} || true
 
       - name: Compare the signing identity against what is served
         env:

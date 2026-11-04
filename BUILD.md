@@ -535,6 +535,93 @@ repository variables:
 A checksum mismatch stops the build. That is the intended behaviour — verify the
 new binary before updating the pin.
 
+### Where the CLI keeps security profiles
+
+In the data directory, which is a **sibling of the SDK named after it** — not a
+directory inside it. The first run of this pipeline (41796421422, 2026-11-04)
+pointed `profiles.path` at `$TIZEN_HOME/tools/certificate-generator/profiles.xml`
+and `security-profiles add` answered *"Not found a file of security profiles.
+Please check specified path."* That directory holds the certificate generator,
+never the profiles.
+
+The same run's installer output says where it does belong, and is the authority
+here over any documentation:
+
+```
+* Data directory : /home/runner/work/TizenMarketingWeb/TizenMarketingWeb/.tizen-studio-data
+Tizen CLI 2.5.25
+```
+
+So for `TIZEN_HOME=<workspace>/.tizen-studio` the profiles file is
+`<workspace>/.tizen-studio-data/profile/profiles.xml`, and a default install
+under `$HOME` is a different layout, not the rule.
+
+The workflow does not rely on that alone. It reads the path back from `tizen
+cli-config -l`, falls back to `${TIZEN_HOME}-data/profile/profiles.xml`, and
+passes `-f` to `security-profiles add`, which creates the file at whatever path
+the CLI itself resolves. `-A` makes the profile active so nothing downstream
+depends on which profile a bare command would choose. Both options are in
+`security-profiles add --help` for CLI 2.5.25.
+
+The key is `default.profiles.path`, all of it. `default.` is part of the name
+rather than a marker for a value something else overrides — [Samsung's CLI page
+for this product](https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/command-line-interface.html)
+documents it as "Default certificate profile path" beside
+`default.sdb.timeout=<timeout value>`, and a timeout is a setting, not a
+precedence rule. The workflow reads and writes that spelling.
+
+It reads a bare `profiles.path` too, second. Do not "fix" the write over to
+that spelling without reading the rest of this section: both are genuinely out
+there, which is how the mistake happened. The reference docs above name the
+prefixed one — so do the desktop and Unity recipes — but **the CLI itself
+recommends the bare one.** `security-profiles add` ends by printing this, with
+the forum's typographic quotes normalised back to the ASCII the CLI emits:
+
+```
+Succeed to add 'gaia-samsung-tizen' profile.
+If want to sign by this, add the file of security profiles in CLI configuration
+like 'tizen cli-config "profiles.path=/home/installuser/tizen-studio-data/profile/profiles.xml"'.
+```
+
+Ranking it second is therefore not a judgement about which spelling is better
+attested. The real reason is that the choice does not matter much: the step
+reads both, the documented spelling first, and the fallback is the same path
+under either reading.
+
+That output is quoted from [a thread about packaging a TV app in
+Docker](https://forum.developer.samsung.com/t/solved-cant-package-tv-app-using-docker/22987),
+and the thread is worth reading for two further reasons. Its accepted
+resolution — by the asker, confirmed by another developer in August 2025 who
+needed the same thing in CI — **writes no `cli-config` key at all**: just
+`dbus-run-session -- package.sh`, where the script unlocks the keyring, runs
+`security-profiles add` and then `tizen package -s`. That is real-world
+evidence that the write here is optional, better than reasoning from `-f`. And
+it is independent confirmation of why this step wraps the whole script in
+`dbus-run-session` rather than running it per command: the keyring has to stay
+available between where the SDK writes the password and where it reads it back.
+
+Whether a real listing holds one spelling, both or neither has not been
+observed: run 41796421422 never got as far as `cli-config -l`. The step prints
+the whole listing, so the next run settles it. The write is guarded with a
+`::warning::` rather than left bare, because an unguarded non-zero exit there
+would kill the step under `errexit` for a write whose effect is optional, and
+because the prefixed spelling is documented rather than measured — the bare one
+this step used until 2026-11-04 was measured accepted in that failed run.
+
+### What holds the signing secret on a runner
+
+Three things, and only the first is obvious:
+
+| Where | What it is |
+| --- | --- |
+| `$RUNNER_TEMP/certs` | the `.p12` files, decoded from the secrets |
+| `$HOME/.local/share/keyrings` | the GNOME keyring, where `security-profiles add` puts the passwords. `--unlock` with an empty password persists it, and it outlives `dbus-run-session` |
+| `profiles.xml` | **not** the password: `password=` is a path to a `.pwd` entry in that keyring. It names the secret rather than holding it |
+
+The cleanup step deletes all three, and runs on failure as well as success. The
+signing step exports the profiles path it resolved so that the file actually
+used is the file removed.
+
 ## Building locally
 
 Rarely needed, but useful when debugging the scripts themselves:
