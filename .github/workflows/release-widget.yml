@@ -214,17 +214,50 @@ jobs:
             # Asked rather than assumed, with that measured path as the
             # fallback.
             #
-            # `|| true` on the pipeline: head closes the pipe, and pipefail
-            # would turn that SIGPIPE into a failed step. The trailing trim is
-            # not theoretical — a path with a stray space is created happily
-            # here and then not found by a CLI that trimmed it.
             cli_config="$(tizen cli-config -l 2>&1 || true)"
             printf "%s\n" "$cli_config"
-            profiles="$(printf "%s\n" "$cli_config" \
-              | sed -n "s/^[[:space:]]*\(default\.\)\{0,1\}profiles\.path=//p" \
-              | head -1 \
-              | tr -d "\r" \
-              | sed -e "s/^[[:space:]]*//" -e "s/[[:space:]]*$//" || true)"
+
+            # `default.profiles.path` is the whole NAME of the key, not a
+            # default that some bare `profiles.path` overrides. Samsung
+            # documents it for this very product — "Default certificate
+            # profile path" — directly beside
+            # `default.sdb.timeout=<timeout value>`, and that one is a
+            # timeout, not a precedence marker:
+            # https://developer.samsung.com/smarttv/develop/getting-started/using-sdk/command-line-interface.html
+            #
+            # The bare spelling is read too, second, and NOT because it is
+            # merely undocumented folklore: `security-profiles add` ends by
+            # printing advice to set that exact spelling in order to sign
+            # with the profile it just made. The reference docs name one, the
+            # CLI itself names the other. It is second because the choice
+            # barely matters — both are read, and the fallback below is the
+            # same path under either reading. BUILD.md quotes the output and
+            # the thread it came from.
+            #
+            # Which of them a listing actually holds has never been seen
+            # here: 41796421422 never ran `cli-config -l`. This step prints
+            # the whole listing, so the next run settles it.
+            #
+            # `|| true` on the pipeline: head closes the pipe, and pipefail
+            # would turn that SIGPIPE into a failed step. The trim is not
+            # theoretical — a path with a stray space is created happily here
+            # and then not found by a CLI that trimmed it.
+            # $1 is spliced into a sed BRE, so it must arrive escaped and
+            # sed-safe: a bare dot matches any character, and a slash ends the
+            # substitution. A key that breaks either way comes back empty with
+            # status 0, because of the `|| true` below — a silent fall-through
+            # to the next spelling, visible only as a sed complaint on stderr.
+            cli_config_value() {
+              printf "%s\n" "$cli_config" \
+                | sed -n "s/^[[:space:]]*$1=//p" \
+                | head -1 \
+                | tr -d "\r" \
+                | sed -e "s/^[[:space:]]*//" -e "s/[[:space:]]*$//" || true
+            }
+            profiles="$(cli_config_value "default\.profiles\.path")"
+            if [ -z "$profiles" ]; then
+              profiles="$(cli_config_value "profiles\.path")"
+            fi
             : "${profiles:=${TIZEN_HOME}-data/profile/profiles.xml}"
             printf "profiles file: %s\n" "$profiles"
             mkdir -p "$(dirname "$profiles")"
@@ -234,7 +267,23 @@ jobs:
             # but because it is the one artefact of this job that names them.
             printf "PROFILES_FILE=%s\n" "$profiles" >> "$GITHUB_ENV"
 
-            tizen cli-config "profiles.path=$profiles"
+            # The documented key, per the page cited above. The bare
+            # spelling this line used until now was accepted by the CLI
+            # ("Setting configuration is succeeded...." in 41796421422), but
+            # acceptance of a key is not proof that anything reads it back.
+            #
+            # The EFFECT of the write is optional: `add -f` creates the file at
+            # whatever path the CLI resolves, the fallback above is that same
+            # default path, and the cleanup step removes
+            # ${TIZEN_HOME}-data/profile unconditionally, so a write that does
+            # not take strands nothing. Its EXIT STATUS was not optional until
+            # this line was guarded — bare under errexit, it would kill the
+            # step. And unlike the spelling it replaces, its acceptance on
+            # CLI 2.5.25 is documented rather than measured, in front of a
+            # signing path that has never completed in CI. A warning, so a
+            # surprise is still in the log, rather than `|| true`.
+            tizen cli-config "default.profiles.path=$profiles" \
+              || echo "::warning::could not set default.profiles.path — continuing, because add -f resolves the path itself"
 
             # -f creates profiles.xml when it is absent, at the path the CLI
             # itself resolves, which is what the run above died for the want
