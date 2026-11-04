@@ -598,10 +598,11 @@ So the CLI recommends a key that its own `cli-config -l` does not list, and
 names the right path while doing it. The same two sentences appear in the forum
 thread below, which is where they were first found.
 
-Ranking it second is therefore not a judgement about which spelling is better
-attested. The real reason is that the choice does not matter much: the step
-reads both, the documented spelling first, and the fallback is the same path
-under either reading.
+It is ranked second because the reference documentation beats a CLI message
+when the two disagree — not because the order is unimportant. If a listing ever
+held both keys, which path the CLI itself uses would be unknown, and this order
+would be a guess at it. The fallback says nothing either way: it only runs when
+*neither* spelling matched. See the note further down on what that would cost.
 
 Those two sentences were first found in [a thread about packaging a TV app in
 Docker](https://forum.developer.samsung.com/t/solved-cant-package-tv-app-using-docker/22987),

@@ -367,7 +367,11 @@ def mutate():
         ok = rc != 0 and ('FAIL  ' + expected in out
                           or 'signtest.py: ' + expected in out)
         if not ok:
-            bad.append(f'{name}: rc={rc}, expected {expected!r}')
+            if 'TIMEOUT  ' + expected in out:
+                bad.append(f'{name}: the case timed out rather than failing, '
+                           f'so this defect is unproven')
+            else:
+                bad.append(f'{name}: rc={rc}, expected {expected!r}')
         print(('ok     ' if ok else 'LIVED  ') + f'{name} -> {expected}')
         shutil.rmtree(tmp.parent, ignore_errors=True)
     tail = f' ({skipped} skipped)' if skipped else ''
@@ -436,7 +440,10 @@ def run(case, cli_config_out, expect_rc=0, expect=(), reject=(),
                      'TIZEN_STUB_CLICONFIG': str(cfg)},
             )
         except subprocess.TimeoutExpired:
-            print(f'FAIL  {case}   [no answer in {CASE_TIMEOUT}s]')
+            # Deliberately NOT the `FAIL  ` prefix: that is what the
+            # mutation gate reads as a proven failure, and a script that
+            # hung has proven nothing. The case still counts as failed.
+            print(f'TIMEOUT  {case}   [no answer in {CASE_TIMEOUT}s]')
             fails.append(case)
             return
         log = (r.stdout.decode('utf-8', 'replace')
