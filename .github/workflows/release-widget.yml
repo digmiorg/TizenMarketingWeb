@@ -186,64 +186,80 @@ jobs:
           dbus-run-session -- bash -euo pipefail -c '
             echo "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
 
-            # Security profiles live in the DATA directory, which is a sibling
-            # of the SDK rather than a directory under it. Run 41796421422 set
-            # this to $TIZEN_HOME/tools/certificate-generator/profiles.xml and
-            # got "Not found a file of security profiles" out of
+            # Security profiles live in the DATA directory: a sibling of the
+            # SDK, named after it. Run 41796421422 set this to
+            # $TIZEN_HOME/tools/certificate-generator/profiles.xml and got
+            # "Not found a file of security profiles" out of
             # `security-profiles add` — that path holds the certificate
-            # generator, never the profiles. The cleanup step below has been
-            # deleting the right directory since before this line was written.
+            # generator, never the profiles. That run also printed where the
+            # directory actually is, which beats any documentation for this
+            # layout:
             #
-            # Asked rather than assumed, with the documented location as the
-            # fallback. `|| true` on the pipeline: head closes the pipe, and
-            # pipefail would turn that SIGPIPE into a failed step.
+            #   * Data directory : .../TizenMarketingWeb/.tizen-studio-data
+            #
+            # for TIZEN_HOME=.../TizenMarketingWeb/.tizen-studio. So it is not
+            # under $HOME either, unless the SDK is — the cleanup step below
+            # was deleting $HOME/tizen-studio-data/profile, which is the right
+            # directory for a DEFAULT install and never existed on this one.
+            #
+            # Asked rather than assumed, with that measured path as the
+            # fallback.
+            #
+            # `|| true` on the pipeline: head closes the pipe, and pipefail
+            # would turn that SIGPIPE into a failed step. The trailing trim is
+            # not theoretical — a path with a stray space is created happily
+            # here and then not found by a CLI that trimmed it.
             cli_config="$(tizen cli-config -l 2>&1 || true)"
-            echo "$cli_config"
+            printf "%s\n" "$cli_config"
             profiles="$(printf "%s\n" "$cli_config" \
-              | sed -n "s/^\(default\.\)\{0,1\}profiles\.path=//p" \
-              | head -1 || true)"
-            : "${profiles:=$HOME/tizen-studio-data/profile/profiles.xml}"
-            echo "profiles file: $profiles"
+              | sed -n "s/^[[:space:]]*\(default\.\)\{0,1\}profiles\.path=//p" \
+              | head -1 \
+              | tr -d "\r" \
+              | sed -e "s/[[:space:]]*$//" || true)"
+            : "${profiles:=${TIZEN_HOME}-data/profile/profiles.xml}"
+            printf "profiles file: %s\n" "$profiles"
             mkdir -p "$(dirname "$profiles")"
 
-            # `add` READS this file before it writes to it, so an absent one is
-            # the error above rather than an empty list to append the first
-            # profile to. The skeleton is the documented empty form; the CLI
-            # fills in everything else.
-            if [ ! -f "$profiles" ]; then
-              printf "%s\n" \
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>" \
-                "<profiles active=\"\" version=\"3.1\"/>" > "$profiles"
-              echo "wrote an empty $profiles"
-            fi
-
-            # So the cleanup step can delete the file we actually used: it
-            # holds the certificate passwords.
-            echo "PROFILES_FILE=$profiles" >> "$GITHUB_ENV"
+            # So the cleanup step can delete the file we actually used. Not
+            # because it holds the passwords — it does not, see that step —
+            # but because it is the one artefact of this job that names them.
+            printf "PROFILES_FILE=%s\n" "$profiles" >> "$GITHUB_ENV"
 
             tizen cli-config "profiles.path=$profiles"
 
-            tizen security-profiles add \
+            # -f creates profiles.xml when it is absent, at the path the CLI
+            # itself resolves, which is what the run above died for the want
+            # of. -A makes the profile active, so nothing downstream depends
+            # on which profile a bare command would pick. Both are in
+            # `security-profiles add --help` for CLI 2.5.25, the version this
+            # installer produces.
+            tizen security-profiles add -f -A \
               -n "$CERT_PROFILE" \
               -a "$CERTS/author.p12" -p "$AUTHOR_PASSWORD" \
               -d "$CERTS/distributor.p12" -dp "$DISTRIBUTOR_PASSWORD"
 
-            # Fail here, loudly, rather than inside the packager, and read the
-            # list rather than only printing it: whether `add` can exit zero
-            # without leaving a usable profile behind is not something anyone
-            # here has established, and the packager is a bad place to find out.
-            # `case`, not a pipe into grep -q: that grep exits at the first
-            # match, and under pipefail the SIGPIPE it sends upstream would
-            # fail the step precisely when the profile IS there.
-            list="$(tizen security-profiles list 2>&1 || true)"
-            echo "$list"
-            case "$list" in
-              *"$CERT_PROFILE"*) ;;
-              *)
-                echo "::error::$CERT_PROFILE is not in $profiles after add"
-                ls -la "$(dirname "$profiles")" >&2 || true
-                exit 1 ;;
-            esac
+            # Ask about THIS profile rather than matching its name against the
+            # whole listing, whose format is no better established than the
+            # behaviour being guarded against — a CLI message that merely
+            # mentioned the name would have passed.
+            #
+            # A warning, NOT a gate, because nobody here has established what
+            # `list -n` exits when the profile IS present. Making that a
+            # failure would be a new way to fail a build that signs perfectly,
+            # bought with no new coverage: the real net is verify-wgt.sh, which
+            # refuses a package with no author-signature.xml — the documented
+            # way `tizen package` exits 0 having signed nothing. What this is
+            # worth is a readable line here instead of a confusing one inside
+            # the packager.
+            if listed="$(tizen security-profiles list -n "$CERT_PROFILE" 2>&1)"; then
+              printf "%s\n" "$listed"
+            else
+              printf "%s\n" "$listed"
+              echo "::warning::could not confirm $CERT_PROFILE in $profiles."
+              echo "::warning::Continuing: the package is signed with -s and verified"
+              echo "::warning::afterwards, so an unsigned one still cannot get out."
+              ls -la "$(dirname "$profiles")" || true
+            fi
 
             scripts/build-wgt.sh "$CERT_PROFILE"
           '
@@ -254,14 +270,23 @@ jobs:
       - name: Remove the certificates from the runner
         if: always()
         run: |
-          # profiles.xml too: the CLI stores the certificate password there
-          # under its own reversible obfuscation, so leaving it behind leaves
-          # the password behind.
-          # PROFILES_FILE is whatever the signing step resolved; the two
-          # fixed paths stay because the step may have failed before it got
-          # that far.
+          # What actually holds the secret, in order:
+          #
+          #   * the .p12 files, written from the secrets — $RUNNER_TEMP/certs;
+          #   * the GNOME keyring, where `security-profiles add` puts the
+          #     passwords. --unlock with an empty password persists it under
+          #     $HOME/.local/share/keyrings, which outlives dbus-run-session;
+          #   * profiles.xml, whose password= attribute is NOT the password
+          #     but a path to a .pwd entry in that keyring. It names the
+          #     secret rather than holding it, which is a reason to delete it
+          #     and not a reason to relax about the two above.
+          #
+          # PROFILES_FILE is whatever the signing step resolved; the fixed
+          # paths stay because the step may have failed before it got there.
           rm -rf "$RUNNER_TEMP/certs" \
+                 "$HOME/.local/share/keyrings" \
                  "$TIZEN_HOME/tools/certificate-generator" \
+                 "${TIZEN_HOME}-data/profile" \
                  "$HOME/tizen-studio-data/profile" \
                  ${PROFILES_FILE:+"$PROFILES_FILE"} || true
 

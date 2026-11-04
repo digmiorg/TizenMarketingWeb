@@ -537,22 +537,45 @@ new binary before updating the pin.
 
 ### Where the CLI keeps security profiles
 
-The data directory, `tizen-studio-data/profile/profiles.xml`, which is a sibling
-of the SDK and not a directory inside it. The first run of this pipeline
-(41796421422, 2026-11-04) pointed `profiles.path` at
-`$TIZEN_HOME/tools/certificate-generator/profiles.xml` and `security-profiles
-add` answered *"Not found a file of security profiles. Please check specified
-path."* — that directory holds the certificate generator, never the profiles.
+In the data directory, which is a **sibling of the SDK named after it** — not a
+directory inside it. The first run of this pipeline (41796421422, 2026-11-04)
+pointed `profiles.path` at `$TIZEN_HOME/tools/certificate-generator/profiles.xml`
+and `security-profiles add` answered *"Not found a file of security profiles.
+Please check specified path."* That directory holds the certificate generator,
+never the profiles.
 
-Two things follow, and the workflow does both. The path is read back from
-`tizen cli-config -l` rather than assumed, falling back to the documented
-location. And the file is created empty if it is absent, because `add` reads it
-before it writes to it: an absent file is that error, not an empty list to
-append the first profile to.
+The same run's installer output says where it does belong, and is the authority
+here over any documentation:
 
-`profiles.xml` holds the certificate passwords, so the cleanup step deletes the
-file that was actually used — the signing step exports its path for exactly
-that reason.
+```
+* Data directory : /home/runner/work/TizenMarketingWeb/TizenMarketingWeb/.tizen-studio-data
+Tizen CLI 2.5.25
+```
+
+So for `TIZEN_HOME=<workspace>/.tizen-studio` the profiles file is
+`<workspace>/.tizen-studio-data/profile/profiles.xml`, and a default install
+under `$HOME` is a different layout, not the rule.
+
+The workflow does not rely on that alone. It reads the path back from `tizen
+cli-config -l`, falls back to `${TIZEN_HOME}-data/profile/profiles.xml`, and
+passes `-f` to `security-profiles add`, which creates the file at whatever path
+the CLI itself resolves. `-A` makes the profile active so nothing downstream
+depends on which profile a bare command would choose. Both options are in
+`security-profiles add --help` for CLI 2.5.25.
+
+### What holds the signing secret on a runner
+
+Three things, and only the first is obvious:
+
+| Where | What it is |
+| --- | --- |
+| `$RUNNER_TEMP/certs` | the `.p12` files, decoded from the secrets |
+| `$HOME/.local/share/keyrings` | the GNOME keyring, where `security-profiles add` puts the passwords. `--unlock` with an empty password persists it, and it outlives `dbus-run-session` |
+| `profiles.xml` | **not** the password: `password=` is a path to a `.pwd` entry in that keyring. It names the secret rather than holding it |
+
+The cleanup step deletes all three, and runs on failure as well as success. The
+signing step exports the profiles path it resolved so that the file actually
+used is the file removed.
 
 ## Building locally
 
