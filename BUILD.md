@@ -644,8 +644,24 @@ Two things that run did **not** settle, so do not read them into it:
 * **Whether a bare `profiles.path` would override the prefixed key.** The
   listing has no bare key to compete with, and the earlier failure proves
   nothing either way: at that point no `profiles.xml` existed anywhere, so
-  `add` without `-f` would have failed whichever key it read. Unknown, and
-  harmless now that both are read and the fallback is the same path.
+  `add` without `-f` would have failed whichever key it read.
+
+  Reading both does **not** settle it, and neither does the fallback, which
+  only runs when the prefixed value is empty. If a listing ever holds both and
+  the CLI honours the bare one, the step resolves the prefixed path and the
+  `mkdir` and `PROFILES_FILE` then aim at a file the CLI does not write.
+
+  The likeliest cost of that is nothing visible: `-f` creates the file at
+  whatever path the CLI resolved, `list -n` finds the profile and `package -s`
+  signs. Run 41796421422 is not the precedent — it died because the path was
+  wrong *and* `-f` was absent. What remains is a `profiles.xml` stranded
+  outside what cleanup reaches, or an `add` that fails on a resolved path whose
+  parent does not exist, if it turns out not to create intermediate directories
+  — which nobody here has measured. Neither is a leaked password: that is in
+  the keyring, which cleanup removes unconditionally, as it does
+  `${TIZEN_HOME}-data/profile` where the measured value points, and a hosted
+  runner is destroyed with the job in any case. The precondition has never been
+  observed, which is why this is recorded rather than coded around.
 * **Whether the write takes effect.** `default.profiles.path` already held the
   value the step writes, so a write that did nothing would look identical.
 

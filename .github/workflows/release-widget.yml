@@ -239,10 +239,30 @@ jobs:
             # `profiles.path`, and `default.profiles.path` already pointing
             # at the data directory. So the documented spelling is the one
             # that answers in practice and the bare read is dead weight that
-            # costs nothing. Whether a bare key would OVERRIDE the prefixed
-            # one is still unknown and now unimportant: both are read, and
-            # the fallback below is the same path either way. The listing is
-            # still printed, because a changed installer could change it.
+            # costs nothing.
+            #
+            # Whether a bare key would OVERRIDE the prefixed one is still
+            # unknown, and NOT made harmless by the fallback below: that
+            # fallback only runs when the prefixed value is empty, so a
+            # listing holding both keys takes the prefixed one here while
+            # the CLI might use the other, leaving the mkdir and the
+            # PROFILES_FILE export aiming at a file the CLI does not write.
+            #
+            # What that costs is probably NOTHING visible: -f makes the file
+            # at whatever path the CLI resolved, `list -n` then finds the
+            # profile, and `package -s` signs. 41796421422 is not the
+            # precedent — it died because the path was wrong AND -f was
+            # absent. What is left is a profiles.xml stranded outside what
+            # cleanup reaches, or an `add` that fails on a resolved path
+            # whose parent does not exist, if it turns out not to create
+            # intermediate directories. Not a leaked password either way:
+            # that is in the keyring, which cleanup removes unconditionally,
+            # as it does ${TIZEN_HOME}-data/profile, where the measured value
+            # points — and a hosted runner is destroyed with the job
+            # regardless. The precondition has never been observed: no
+            # listing here has held a bare key. Written down rather than
+            # coded around, for that reason. The listing is still printed,
+            # because a changed installer could change it.
             #
             # `|| true` on the pipeline: head closes the pipe, and pipefail
             # would turn that SIGPIPE into a failed step. The trim is not
