@@ -150,6 +150,15 @@ jobs:
           # change. See BUILD.md.
           "$TIZEN_HOME/tools/ide/bin/tizen" version
 
+          # The signing step passes -f and -A to `security-profiles add`, and
+          # they carry weight: -f is what creates profiles.xml at the path the
+          # CLI resolves, which is the whole escape from the failure of run
+          # 41796421422. They are taken from a transcript of --help for CLI
+          # 2.5.25, not from a binary anyone here has run. Printed so the next
+          # run settles it either way, and so a usage error further down has
+          # its explanation in the same log.
+          "$TIZEN_HOME/tools/ide/bin/tizen" security-profiles add --help || true
+
       - name: Install the keyring the signing engine expects
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gnome-keyring dbus-x11
 
@@ -215,7 +224,7 @@ jobs:
               | sed -n "s/^[[:space:]]*\(default\.\)\{0,1\}profiles\.path=//p" \
               | head -1 \
               | tr -d "\r" \
-              | sed -e "s/[[:space:]]*$//" || true)"
+              | sed -e "s/^[[:space:]]*//" -e "s/[[:space:]]*$//" || true)"
             : "${profiles:=${TIZEN_HOME}-data/profile/profiles.xml}"
             printf "profiles file: %s\n" "$profiles"
             mkdir -p "$(dirname "$profiles")"
@@ -270,6 +279,7 @@ jobs:
       - name: Remove the certificates from the runner
         if: always()
         run: |
+          set -euo pipefail
           # What actually holds the secret, in order:
           #
           #   * the .p12 files, written from the secrets — $RUNNER_TEMP/certs;
