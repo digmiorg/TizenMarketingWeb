@@ -230,19 +230,43 @@ jobs:
             # merely undocumented folklore: `security-profiles add` ends by
             # printing advice to set that exact spelling in order to sign
             # with the profile it just made. The reference docs name one, the
-            # CLI itself names the other. It is second because the choice
-            # barely matters — both are read, and the fallback below is the
-            # same path under either reading. BUILD.md quotes both.
+            # CLI itself names the other. It is second because the
+            # reference docs beat a CLI message when the two disagree, not
+            # because the order is unimportant: if a listing ever held both
+            # keys, which path the CLI itself uses would be unknown, and
+            # this order would be a guess. The fallback below says nothing
+            # about that — it only runs when NEITHER spelling matched.
+            # BUILD.md quotes both.
             #
             # What a real listing holds was settled by run 41846786550:
             # eight keys, every one of them `default.`-prefixed, no bare
             # `profiles.path`, and `default.profiles.path` already pointing
             # at the data directory. So the documented spelling is the one
             # that answers in practice and the bare read is dead weight that
-            # costs nothing. Whether a bare key would OVERRIDE the prefixed
-            # one is still unknown and now unimportant: both are read, and
-            # the fallback below is the same path either way. The listing is
-            # still printed, because a changed installer could change it.
+            # costs nothing.
+            #
+            # Whether a bare key would OVERRIDE the prefixed one is still
+            # unknown, and NOT made harmless by the fallback below: that
+            # fallback only runs when the prefixed value is empty, so a
+            # listing holding both keys takes the prefixed one here while
+            # the CLI might use the other, leaving the mkdir and the
+            # PROFILES_FILE export aiming at a file the CLI does not write.
+            #
+            # What that costs is probably NOTHING visible: -f makes the file
+            # at whatever path the CLI resolved, `list -n` then finds the
+            # profile, and `package -s` signs. 41796421422 is not the
+            # precedent — it died because the path was wrong AND -f was
+            # absent. What is left is a profiles.xml stranded outside what
+            # cleanup reaches, or an `add` that fails on a resolved path
+            # whose parent does not exist, if it turns out not to create
+            # intermediate directories. Not a leaked password either way:
+            # that is in the keyring, which cleanup removes unconditionally,
+            # as it does ${TIZEN_HOME}-data/profile, where the measured value
+            # points — and a hosted runner is destroyed with the job
+            # regardless. The precondition has never been observed: no
+            # listing here has held a bare key. Written down rather than
+            # coded around, for that reason. The listing is still printed,
+            # because a changed installer could change it.
             #
             # `|| true` on the pipeline: head closes the pipe, and pipefail
             # would turn that SIGPIPE into a failed step. The trim is not
@@ -278,11 +302,15 @@ jobs:
             # ("Setting configuration is succeeded...." in 41796421422), but
             # acceptance of a key is not proof that anything reads it back.
             #
-            # The EFFECT of the write is optional: `add -f` creates the file at
-            # whatever path the CLI resolves, the fallback above is that same
-            # default path, and the cleanup step removes
-            # ${TIZEN_HOME}-data/profile unconditionally, so a write that does
-            # not take strands nothing. Its EXIT STATUS was not optional until
+            # The EFFECT of the write is optional: `add -f` creates the file
+            # at whatever path the CLI resolves, and the cleanup step removes
+            # ${TIZEN_HOME}-data/profile unconditionally — where the measured
+            # value of this key already points — so a write that does not
+            # take strands nothing. The fallback above is NOT part of that
+            # argument, though the two paths coincide: when the write does
+            # not take, the CLI uses its own configured value, and the
+            # fallback only decides what $profiles, the mkdir and
+            # PROFILES_FILE point at, and only when the listing was silent. Its EXIT STATUS was not optional until
             # this line was guarded — bare under errexit, it would kill the
             # step.
             #

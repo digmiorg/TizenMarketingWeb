@@ -35,12 +35,32 @@ import sys
 import tempfile
 
 SELF = str(pathlib.Path(__file__).resolve())
+# Deadlines on the scripts under test. They are deliberately broken shell
+# scripts, and one that waits on a terminal must fail a case rather than hang
+# the run. Generous: a case takes well under a second, a whole suite about ten.
+CASE_TIMEOUT = 120
+SUITE_TIMEOUT = 600
 DEFAULT_WF = (pathlib.Path(SELF).parent.parent
               / '.github/workflows/release-widget.yml')
 args = [a for a in sys.argv[1:] if a != '--mutate']
 MUTATE = '--mutate' in sys.argv[1:]
 SRC = pathlib.Path(args[0]) if args else DEFAULT_WF
 OPENER = "dbus-run-session -- bash -euo pipefail -c '"
+
+
+def read_raw(path):
+    """Decode without newline translation: a CR has to stay a CR.
+
+    `text=True` on a subprocess and `read_text()` on a file both apply
+    universal newlines, which turns a lone CR into a newline — so an
+    assertion that names a CR cannot match. Measured: with everything
+    translated, a `reject` naming the CR does not fire against a workflow
+    with the CR trim removed; with raw reads it does.
+
+    This was not what let that defect through, though. Nothing covered a CR
+    the trailing trim could not reach, and the case below is what closes it.
+    """
+    return path.read_bytes().decode('utf-8', 'replace')
 
 
 def die(message):
@@ -85,7 +105,7 @@ def extract(raw):
 print(f'workflow under test: {SRC}')
 if not SRC.is_file():
     die(f'no such workflow file: {SRC}')
-inner = extract(SRC.read_text())
+inner = extract(SRC.read_text(encoding='utf-8'))
 if '${{' in inner:
     die('the inner script interpolates a workflow expression')
 # The block is a single-quoted argument to `bash -c`, so one apostrophe ends
@@ -271,6 +291,8 @@ MUTATIONS = [
      '              profiles="$(cli_config_value "profiles\\.path")"\n'
      '            fi\n', '',
      'the bare spelling on its own is still used'),
+    ('nocrtrim', '                | tr -d "\\r" \\\n', '',
+     'a carriage return the trailing trim cannot reach'),
     ('unanchoredsed', 'sed -n "s/^[[:space:]]*$1=//p"',
      'sed -n "s/^$1=//p"',
      'cli-config -l indents its output'),
@@ -302,7 +324,7 @@ MUTATIONS = [
 
 def mutate():
     """Run the whole suite against one defective copy of the workflow each."""
-    raw = SRC.read_text()
+    raw = SRC.read_text(encoding='utf-8')
     bad = []
     ran = skipped = 0
     for entry in MUTATIONS:
@@ -320,18 +342,36 @@ def mutate():
             continue
         ran += 1
         tmp = pathlib.Path(tempfile.mkdtemp()) / SRC.name
-        tmp.write_text(raw.replace(old, new))
-        r = subprocess.run([sys.executable, SELF, str(tmp)],
-                           capture_output=True, text=True)
-        out = r.stdout + r.stderr
+        tmp.write_text(raw.replace(old, new), encoding='utf-8')
+        try:
+            r = subprocess.run([sys.executable, SELF, str(tmp)],
+                               capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL,
+                               timeout=SUITE_TIMEOUT)
+            out = r.stdout + r.stderr
+            rc = r.returncode
+        except subprocess.TimeoutExpired:
+            # Not a kill: a suite that never answered has not demonstrated
+            # anything about this defect. Reported as a timeout rather than
+            # only as rc=0, because a hung suite and a green one need
+            # different responses.
+            print(f'TIMED OUT {name} -> no answer in {SUITE_TIMEOUT}s')
+            bad.append(f'{name}: the suite did not answer in '
+                       f'{SUITE_TIMEOUT}s, so this defect is unproven')
+            shutil.rmtree(tmp.parent, ignore_errors=True)
+            continue
         # `FAIL  <case>`, not `<case>`: the suite prints the name of every
         # case it runs, `ok` ones included, so matching the bare name only
         # asks whether the case exists. The two defects caught before any
         # case runs are matched on the message the run dies with instead.
-        ok = r.returncode != 0 and ('FAIL  ' + expected in out
-                                    or 'signtest.py: ' + expected in out)
+        ok = rc != 0 and ('FAIL  ' + expected in out
+                          or 'signtest.py: ' + expected in out)
         if not ok:
-            bad.append(f'{name}: rc={r.returncode}, expected {expected!r}')
+            if 'TIMEOUT  ' + expected in out:
+                bad.append(f'{name}: the case timed out rather than failing, '
+                           f'so this defect is unproven')
+            else:
+                bad.append(f'{name}: rc={rc}, expected {expected!r}')
         print(('ok     ' if ok else 'LIVED  ') + f'{name} -> {expected}')
         shutil.rmtree(tmp.parent, ignore_errors=True)
     tail = f' ({skipped} skipped)' if skipped else ''
@@ -375,25 +415,43 @@ def run(case, cli_config_out, expect_rc=0, expect=(), reject=(),
         (bin_ / 'tizen').chmod(0o755)
 
     try:
-        r = subprocess.run(
-            ['bash', '-euo', 'pipefail', '-c', inner],
-            cwd=work, capture_output=True, text=True,
-            env={'PATH': f'{bin_}:{os.environ["PATH"]}', 'HOME': str(work),
-                 'TIZEN_HOME': str(work / '.tizen-studio'),
-                 'CERT_PROFILE': 'digmi-ci', 'CERTS': str(work / 'certs'),
-                 # Deliberately different: equal passwords would hide a swap
-                 # of the two.
-                 'AUTHOR_PASSWORD': 'author-pw',
-                 'DISTRIBUTOR_PASSWORD': 'dist-pw',
-                 'GITHUB_ENV': str(gh_env), 'TIZEN_STUB_STATE': str(state),
-                 **({'TIZEN_STUB_LIST_RC': list_rc} if list_rc else {}),
-                 **({'TIZEN_STUB_WRITE_RC': write_rc} if write_rc else {}),
-                 'TIZEN_STUB_CLICONFIG': str(cfg)},
-        )
-        log = r.stdout + r.stderr + '\n--- $GITHUB_ENV ---\n' + gh_env.read_text()
+        try:
+            r = subprocess.run(
+                ['bash', '-euo', 'pipefail', '-c', inner],
+                cwd=work, capture_output=True,
+                # No text=True: see read_raw. No inherited stdin and a
+                # deadline either, because these are deliberately broken
+                # shell scripts and one that waits on a terminal would hang
+                # the suite rather than fail a case.
+                stdin=subprocess.DEVNULL, timeout=CASE_TIMEOUT,
+                env={'PATH': f'{bin_}:{os.environ["PATH"]}',
+                     'HOME': str(work),
+                     'TIZEN_HOME': str(work / '.tizen-studio'),
+                     'CERT_PROFILE': 'digmi-ci',
+                     'CERTS': str(work / 'certs'),
+                     # Deliberately different: equal passwords would hide a
+                     # swap of the two.
+                     'AUTHOR_PASSWORD': 'author-pw',
+                     'DISTRIBUTOR_PASSWORD': 'dist-pw',
+                     'GITHUB_ENV': str(gh_env),
+                     'TIZEN_STUB_STATE': str(state),
+                     **({'TIZEN_STUB_LIST_RC': list_rc} if list_rc else {}),
+                     **({'TIZEN_STUB_WRITE_RC': write_rc} if write_rc else {}),
+                     'TIZEN_STUB_CLICONFIG': str(cfg)},
+            )
+        except subprocess.TimeoutExpired:
+            # Deliberately NOT the `FAIL  ` prefix: that is what the
+            # mutation gate reads as a proven failure, and a script that
+            # hung has proven nothing. The case still counts as failed.
+            print(f'TIMEOUT  {case}   [no answer in {CASE_TIMEOUT}s]')
+            fails.append(case)
+            return
+        log = (r.stdout.decode('utf-8', 'replace')
+               + r.stderr.decode('utf-8', 'replace')
+               + '\n--- $GITHUB_ENV ---\n' + read_raw(gh_env))
         for name in ('write', 'addargs', 'certs'):
             f = state / name
-            log += f'\n--- {name} ---\n' + (f.read_text() if f.exists() else '')
+            log += f'\n--- {name} ---\n' + (read_raw(f) if f.exists() else '')
         bad = []
         if r.returncode != expect_rc:
             bad.append(f'rc {r.returncode}, expected {expect_rc}')
@@ -530,6 +588,22 @@ run('a carriage return and trailing spaces on the path',
     expect_rc=0,
     expect=['profiles file: {work}/crlf/profile/profiles.xml\n',
             'PROFILES_FILE={work}/crlf/profile/profiles.xml\n'])
+
+# Not a realistic input: every CR anyone has seen here comes from a CRLF
+# line ending, which puts it last, where the trailing trim removes it —
+# `[[:space:]]` matches CR, measured on BSD sed and required by POSIX. A path
+# that literally contains a CR is not something known to occur. The case is
+# here because `tr -d "\r"` could be deleted with this suite green, which
+# reads as dead code, and nailing the line down is the cheaper answer than
+# arguing about whether it can ever matter.
+run('a carriage return the trailing trim cannot reach',
+    'default.profiles.path={work}/cr\rmid/profile/profiles.xml\n',
+    expect_rc=0,
+    expect=['profiles file: {work}/crmid/profile/profiles.xml\n',
+            'PROFILES_FILE={work}/crmid/profile/profiles.xml\n'],
+    # Scoped to the decision lines: the step prints the whole listing, so the
+    # fixture's own CR is in the log by design.
+    reject=['profiles file: {work}/cr\r', 'PROFILES_FILE={work}/cr\r'])
 
 run('a listing header rather than a key=value line',
     'Tizen CLI configuration\n====\n', expect_rc=0,

@@ -598,10 +598,11 @@ So the CLI recommends a key that its own `cli-config -l` does not list, and
 names the right path while doing it. The same two sentences appear in the forum
 thread below, which is where they were first found.
 
-Ranking it second is therefore not a judgement about which spelling is better
-attested. The real reason is that the choice does not matter much: the step
-reads both, the documented spelling first, and the fallback is the same path
-under either reading.
+It is ranked second because the reference documentation beats a CLI message
+when the two disagree — not because the order is unimportant. If a listing ever
+held both keys, which path the CLI itself uses would be unknown, and this order
+would be a guess at it. The fallback says nothing either way: it only runs when
+*neither* spelling matched. See the note further down on what that would cost.
 
 Those two sentences were first found in [a thread about packaging a TV app in
 Docker](https://forum.developer.samsung.com/t/solved-cant-package-tv-app-using-docker/22987),
@@ -644,8 +645,24 @@ Two things that run did **not** settle, so do not read them into it:
 * **Whether a bare `profiles.path` would override the prefixed key.** The
   listing has no bare key to compete with, and the earlier failure proves
   nothing either way: at that point no `profiles.xml` existed anywhere, so
-  `add` without `-f` would have failed whichever key it read. Unknown, and
-  harmless now that both are read and the fallback is the same path.
+  `add` without `-f` would have failed whichever key it read.
+
+  Reading both does **not** settle it, and neither does the fallback, which
+  only runs when the prefixed value is empty. If a listing ever holds both and
+  the CLI honours the bare one, the step resolves the prefixed path and the
+  `mkdir` and `PROFILES_FILE` then aim at a file the CLI does not write.
+
+  The likeliest cost of that is nothing visible: `-f` creates the file at
+  whatever path the CLI resolved, `list -n` finds the profile and `package -s`
+  signs. Run 41796421422 is not the precedent — it died because the path was
+  wrong *and* `-f` was absent. What remains is a `profiles.xml` stranded
+  outside what cleanup reaches, or an `add` that fails on a resolved path whose
+  parent does not exist, if it turns out not to create intermediate directories
+  — which nobody here has measured. Neither is a leaked password: that is in
+  the keyring, which cleanup removes unconditionally, as it does
+  `${TIZEN_HOME}-data/profile` where the measured value points, and a hosted
+  runner is destroyed with the job in any case. The precondition has never been
+  observed, which is why this is recorded rather than coded around.
 * **Whether the write takes effect.** `default.profiles.path` already held the
   value the step writes, so a write that did nothing would look identical.
 
