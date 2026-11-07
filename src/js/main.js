@@ -1,4 +1,4 @@
-const appVersion = '1.0.10';
+const appVersion = '1.0.11';
 const baseUrl = 'https://portal.digmi.eu';
 // Shared tablet bearer. /api/v1/devices needs it (401 without); verify-device
 // does not, so it is no longer sent there. It lives in one place now because
@@ -8,14 +8,56 @@ const apiAuthorization = 'Bearer DzQ7bhe9mt32FrGQXdhH5JrKesmrVcf40QwXiR2z8nvMaCe
 let lastGeneratedUrl = null; // Store the last generated URL outside the function to track changes.
 let checkInterval;
 
-new QRCode(document.getElementById('qrcode'), {
-  text: baseUrl,
-  width: 360,
-  height: 360,
-  colorDark: '#000000',
-  colorLight: '#ffffff',
-  correctLevel: QRCode.CorrectLevel.H,
-});
+/**
+ * Pixel size to RENDER the QR at. The box it sits in is sized in vmin by
+ * brand.css and the canvas is stretched to fill it, so this is about
+ * resolution, not layout: a 360px canvas blown up to 46vmin on a 4K panel is
+ * a blurry QR, and a blurry QR is one a phone gives up on. Same function
+ * signature and same shares as signage.digmi.eu, so the two screens scan
+ * alike. Falls back to the old fixed 360 if brand.js did not load - a
+ * small QR beats no QR on the one screen whose entire job is to be scanned.
+ */
+function qrPixelSize() {
+  if (!window.DigmiBrand || typeof window.DigmiBrand.qrRenderSize !== 'function') {
+    return 360;
+  }
+  return window.DigmiBrand.qrRenderSize(
+    window.innerWidth,
+    window.innerHeight,
+    window.devicePixelRatio || 1
+  );
+}
+
+// Guarded, because this runs at module level and a throw here takes the
+// REST of this file with it: window.onload is never assigned, checkDevice()
+// never starts, and the panel stops polling before it has polled once -
+// a screen showing a blank white plate that can never discover it was
+// paired, until someone power-cycles it. Measured by serving the page
+// without js/vendor/qrcode.min.js: zero verify-device calls.
+// The placeholder itself is worth little; keeping the rest of the file
+// alive is worth everything.
+//
+// What this does NOT do is recover the QR. generateQRCode() throws the same
+// ReferenceError when it runs, and it is async, so that one becomes an
+// unhandled rejection with nowhere to surface on the panel: the white plate
+// stays empty until someone reinstalls. What survives is the polling, which
+// is the half that matters - the screen can still be paired from the portal
+// using the uuid on the debug panel. signage.digmi.eu has a scheduleQrRetry()
+// for the other half; porting it is the fix, and it is not done here.
+try {
+  new QRCode(document.getElementById('qrcode'), {
+    text: baseUrl,
+    width: qrPixelSize(),
+    height: qrPixelSize(),
+    colorDark: '#000000',
+    colorLight: '#ffffff',
+    correctLevel: QRCode.CorrectLevel.H,
+  });
+} catch (error) {
+  if (window.console && console.error) {
+    console.error('QR placeholder failed to render:', error);
+  }
+}
 
 function showReloadModal() {
   const modal = document.getElementById('reload-modal');
@@ -144,8 +186,8 @@ async function generateQRCode() {
     qrContainer.innerHTML = ''; // Clear the previous QR code if URL has changed
     new QRCode(qrContainer, {
       text: qrUrl,
-      width: 360,
-      height: 360,
+      width: qrPixelSize(),
+      height: qrPixelSize(),
       colorDark: '#000000',
       colorLight: '#ffffff',
       correctLevel: QRCode.CorrectLevel.H,
@@ -224,6 +266,16 @@ async function fetchDeviceMedia(uuid) {
 
     const data = await response.json();
 
+    // The fetch worked, so whatever this function's catch last put on the
+    // screen is now stale. Cleared HERE, by the function that wrote it,
+    // because the alternative - leaving it to displayMediaContent() - only
+    // fires when the payload CHANGED: a blip during a playing campaign,
+    // followed by an identical payload, left "Kunde inte hämta innehåll"
+    // standing over the customer's content with nothing left to clear it.
+    // Before the display call below, so anything that screen decides to say
+    // for itself still wins.
+    showStatus('');
+
     // Update device info
     document.getElementById('device-uuid').textContent = uuid;
     if (data.location) {
@@ -240,7 +292,12 @@ async function fetchDeviceMedia(uuid) {
 
     return data;
   } catch (error) {
-    showStatus('Media fetch failed: ' + (error && error.message ? error.message : error));
+    // Swedish, like the rest of the screen. These strings belong in
+    // brand.js with the others, but js/brand.js here is a byte-for-byte copy
+    // of DigmiMarketing - adding keys means adding them THERE first, then
+    // re-copying. Until then they live here rather than staying English on a
+    // screen that is otherwise Swedish.
+    showStatus('Kunde inte hämta innehåll: ' + (error && error.message ? error.message : error));
 
     // If we have cached data, keep using it during error
     if (cachedData) {
@@ -288,14 +345,20 @@ function updateStageGeometry() {
     'x' + (slide.naturalHeight || slide.videoHeight || '?');
 }
 
-/** Everything that makes up the pre-pairing screen, hidden as one unit. */
+/**
+ * Everything that makes up the pre-pairing screen, hidden as one unit.
+ *
+ * One element, not a list of ids. The list form hid exactly the five things
+ * that were on the screen the day it was written, so anything added to the
+ * screen afterwards stayed on top of the customer's campaign - and the
+ * failure is silent, because the campaign does start playing, underneath.
+ * #content-reg is the whole activation view, so nothing can be left behind.
+ */
 function hideRegistrationScreen() {
-  ['logo', 'image-banner', 'qrcode', 'qr-text', 'background-image'].forEach((id) => {
-    const element = document.getElementById(id);
-    if (element) {
-      element.style.display = 'none';
-    }
-  });
+  const screen = document.getElementById('content-reg');
+  if (screen) {
+    screen.style.display = 'none';
+  }
 }
 
 /**
@@ -312,7 +375,12 @@ function showStatus(text) {
   const statusLine = document.getElementById('status-line');
   if (statusLine) {
     statusLine.textContent = text;
-    statusLine.style.display = text ? 'block' : 'none';
+    // 'flex', not 'block'. #status-line is a .digmi-chip, which brand.css
+    // lays out as flex; an inline `display: block` beats the stylesheet and
+    // turns the chip's ::before dot into an inline box with no width or
+    // height, so the dot silently disappears - measured, the text shifts
+    // 15px left and nothing is drawn.
+    statusLine.style.display = text ? 'flex' : 'none';
   }
 }
 
@@ -429,8 +497,8 @@ function displayMediaContent(data) {
                   // here, which killed the very poll that would have picked the
                   // next campaign up.
                   mediaPlayer.innerHTML = '';
-                  showStatus('Connected to ' + (data.location || 'DIGMI') +
-                    ' — no content planned for this screen yet.');
+                  showStatus('Ansluten till ' + (data.location || 'DIGMI') +
+                    ' — inget innehåll är planerat för den här skärmen än.');
 
                   return true;
                 }
@@ -603,6 +671,20 @@ function checkDevice(uuid) {
           campaignContainer.style.display = 'block';
 
           if (media.campaign_media && media.campaign_media.length > 0) {
+            // Clear the status line BEFORE giving up. A failed media fetch
+            // that fell back on cached content leaves its reason on screen
+            // (see fetchDeviceMedia's catch), and this branch is the last
+            // thing that runs - the `return` below ends the backoff chain,
+            // and nothing else would ever write over that line. Without
+            // this, "Kunde inte hämta innehåll: …" sits on a paying
+            // customer's screen, on top of their campaign, until someone
+            // power-cycles the panel.
+            showStatus('');
+            // Vestigial: `checkInterval` is declared and never assigned -
+            // the backoff is a setTimeout chain, not an interval. Left in
+            // place rather than removed in this commit, which is about the
+            // pairing screen; clearInterval(undefined) is a no-op. The
+            // `return` is what actually stops the polling.
             clearInterval(checkInterval);
 
             return;
@@ -613,14 +695,14 @@ function checkDevice(uuid) {
           // media, so a screen that paired into an empty playlist had nothing
           // watching for content to appear. That is the state Hair & Co's TV
           // sat in.
-          showStatus('Connected to ' + (media.location || 'DIGMI') +
-            ' — no content planned for this screen yet.');
+          showStatus('Ansluten till ' + (media.location || 'DIGMI') +
+            ' — inget innehåll är planerat för den här skärmen än.');
         }
       }
     } catch (error) {
       // This catch used to be empty, which is why a week of this outage left
       // no trace on the screen at all. Say what went wrong.
-      showStatus('Check failed: ' + (error && error.message ? error.message : error));
+      showStatus('Kontrollen misslyckades: ' + (error && error.message ? error.message : error));
     }
 
     attempt++;
@@ -658,6 +740,16 @@ function displayAppVersion() {
   }
 }
 window.onload = function () {
+  // Before the QR and before any status text: this swaps the page's Swedish
+  // defaults for the screen's own language and hides the [data-box-only]
+  // parts. Guarded rather than assumed - if brand.js failed to load, the
+  // markup's Swedish still reads correctly, which is why the defaults are
+  // real sentences and not i18n keys.
+  if (window.DigmiBrand && typeof window.DigmiBrand.applyBrandTexts === 'function') {
+    const lang = window.DigmiBrand.resolveLanguage(window.location.search, navigator.language);
+    window.DigmiBrand.applyBrandTexts(document, lang, window.DigmiBrand.isBox(window.location.search));
+  }
+
   getDUID().then((duid) => {
     document.getElementById('device-duid').textContent = duid || 'Not available';
   });
