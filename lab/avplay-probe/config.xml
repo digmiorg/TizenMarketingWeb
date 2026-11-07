@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" id="https://digmi.eu/lab/avplay-probe" version="1.50.0" height="1920" width="1080" viewmodes="fullscreen">
+    <!--
+      Lab probe. NOT the product: its own application and package id, so it
+      installs beside DigmiMarketing on a bench panel and can never replace it.
+
+      Geometry copied from src/config.xml rather than guessed — a probe that
+      draws 1920 wide on a 1080 panel would be read as "AVPlay looks broken"
+      when the only thing missing was a rotation call.
+    -->
+    <tizen:application id="DgmiLab001.AvplayProbe" package="DgmiLab001" required_version="5.0"/>
+    <access origin="*" subdomains="true"></access>
+    <content src="index.html"/>
+    <feature name="http://tizen.org/feature/screen.size.all"/>
+    <icon src="icon.png"/>
+    <name>DigmiAvplayProbe</name>
+    <author href="https://digmi.se" email="conny@digmi.se">Digmi Group AB</author>
+    <!-- AVPlay itself. -->
+    <tizen:privilege name="http://developer.samsung.com/privilege/avplay"/>
+    <!-- Signage control. A Public certificate never had access to this; the
+         Partner profile created 2026-11-03 is the first one that might, and
+         finding out is half of why this widget exists. -->
+    <tizen:privilege name="http://developer.samsung.com/privilege/b2bcontrol"/>
+    <tizen:privilege name="http://developer.samsung.com/privilege/productinfo"/>
+    <tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
+    <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
+    <!-- captureScreen writes a file and hands back its path; reading it back
+         is a separate permission, and it is the step that decides whether a
+         screenshot can reach the portal at all. The production widget
+         already declares both. -->
+    <tizen:privilege name="http://tizen.org/privilege/filesystem.read"/>
+    <tizen:privilege name="http://tizen.org/privilege/filesystem.write"/>
+    <tizen:profile name="tv-samsung"/>
+    <tizen:setting screen-orientation="portrait" context-menu="disable" background-support="disable" encryption="disable" install-location="auto" hwkey-event="enable"/>
+</widget>

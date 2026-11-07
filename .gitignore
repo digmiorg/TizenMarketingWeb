@@ -1,2 +1,8 @@
 .build/
 _site/
+
+# Editor and Tizen tooling state, written into the tree by Tizen Studio and
+# VS Code. Never part of a build: .tizen-rds/ is remote-deploy bookkeeping
+# that names the panel it last pushed to.
+.vscode/
+.tizen-rds/
