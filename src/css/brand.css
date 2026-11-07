@@ -1,0 +1,698 @@
+/* digmi brand layer for signage.digmi.eu.
+   Loaded after style.css. Everything here is scoped to .digmi-* classes and
+   :root tokens, so the campaign player (.media-container, #campaign-container)
+   is untouched.
+
+   Chrome 63 (Tizen): no min()/max()/clamp(), no container queries, no flex
+   gap, no `inset`. Every min()/cqi value is preceded by a plain value on the
+   line above, and spacing between flex children uses margins, not gap.
+   Colours use the legacy rgba(r, g, b, 0.n) form: the space-separated
+   rgb(r g b / n%) form that stylelint-config-standard asks for only arrived
+   in Chrome 65, and Chrome 63 would drop those declarations. */
+
+/* stylelint-disable color-function-notation, color-function-alias-notation, alpha-value-notation */
+
+/* One face per weight used (400, 500, 600, 700), all on the same variable
+   file: a font-weight range in @font-face is not verified on Chrome 63, and
+   single weights let every engine pick the real weight. */
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('../fonts/instrument-sans-latin.woff2?v=1.1.1') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('../fonts/instrument-sans-latin.woff2?v=1.1.1') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('../fonts/instrument-sans-latin.woff2?v=1.1.1') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('../fonts/instrument-sans-latin.woff2?v=1.1.1') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Instrument Serif';
+  src: url('../fonts/instrument-serif-italic-latin.woff2?v=1.1.1') format('woff2');
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
+}
+
+/* The dark set. The kiosk forces dark mode, so no view may opt out. */
+:root {
+  color-scheme: dark;
+
+  --bg: #1a1714;
+  --fg: #f4f1ec;
+  --fg-88: rgba(244, 241, 236, 0.88);
+  --fg-72: rgba(244, 241, 236, 0.72);
+  --fg-60: rgba(244, 241, 236, 0.6);
+  --rule: rgba(244, 241, 236, 0.24);
+  --accent: #e2c79e;
+  --danger: #f0a08a;
+  --radius: 1.4vmin;
+  --qr: 46vmin;
+}
+
+/* Page */
+
+/* The box-only and generic-only parts (applyBrandTexts) are toggled with
+   the hidden attribute, which loses to any author display rule such as
+   .digmi-step's flex. */
+.digmi-page [hidden] {
+  display: none;
+}
+
+.digmi-page {
+  position: fixed;
+  /* stylelint-disable-next-line declaration-block-no-redundant-longhand-properties -- Chrome 63 has no `inset` */
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 5.5vmin 6.5vmin;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Instrument Sans', sans-serif;
+}
+
+/* style.css sets Inter on `body *`; this one selector (0,1,0) wins over it
+   and lets the page's family through. Rules that pick their own family
+   (.digmi-title em) are more specific still. */
+.digmi-page * {
+  font-family: inherit;
+}
+
+.digmi-page > * + * {
+  margin-top: 3vmin;
+}
+
+/* The activation view: deep brown fade, light ink, sand accent.
+   The ink alphas keep at least 4.5:1 over rgb(115, 90, 64), the lightest
+   point of the gradient where text sits (behind the eyebrow, top right). */
+.digmi-reg {
+  --bg: #2a1d13;
+  --fg: #f4f1ec;
+  --fg-88: rgba(244, 241, 236, 0.9);
+  --fg-72: rgba(244, 241, 236, 0.87);
+  --fg-60: rgba(244, 241, 236, 0.84);
+  --rule: rgba(244, 241, 236, 0.3);
+  --accent: #e2c79e;
+
+  background:
+    radial-gradient(120% 90% at 85% 15%, rgba(226, 199, 158, 0.28) 0%, rgba(226, 199, 158, 0) 55%),
+    radial-gradient(90% 80% at 10% 100%, rgba(140, 92, 50, 0.55) 0%, rgba(140, 92, 50, 0) 60%),
+    linear-gradient(135deg, #1a1714 0%, #3b2717 45%, #6b4626 100%);
+  color: var(--fg);
+}
+
+.digmi-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.digmi-wordmark {
+  font-size: 4.2vmin;
+  font-weight: 700;
+  letter-spacing: -0.045em;
+  line-height: 1;
+}
+
+.digmi-wordmark sup {
+  font-size: 0.3em;
+  font-weight: 500;
+}
+
+.digmi-eyebrow {
+  font-size: 1.7vmin;
+  font-weight: 500;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--fg-72);
+}
+
+/* Activation stage */
+
+.digmi-stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  align-items: center;
+}
+
+.digmi-qr-column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.digmi-qr-label {
+  display: flex;
+  align-items: center;
+  margin-bottom: 2vmin;
+  font-size: 4.2vmin;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.digmi-qr-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6em;
+  height: 1.6em;
+  margin-right: 1.6vmin;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+}
+
+/* qrcodejs draws no quiet zone, so the padding is it: 4 modules and then
+   some for the codes our URLs give, as in the sketch. */
+.digmi-qr-box {
+  box-sizing: border-box;
+  width: var(--qr);
+  height: var(--qr);
+  padding: calc(var(--qr) * 0.135);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.digmi-qr-box svg,
+.digmi-qr-box canvas,
+.digmi-qr-box img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+/* The link and the container qrcodejs draws into, between the plate and
+   the canvas/img: both pass the plate's size through. */
+.digmi-qr-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* The copy column is the container the title and lead are capped by.
+   Size containment gives it no intrinsic width, so it needs an explicit
+   one: without it a centred (portrait) grid item shrinks to 0 and the cqi
+   caps drive the text to 0. */
+.digmi-copy {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  max-width: 62vmin;
+}
+
+.digmi-step {
+  display: flex;
+  align-items: center;
+}
+
+.digmi-step-bar {
+  width: 3.9vmin;
+  height: 0.56vmin;
+  border-radius: 0.28vmin;
+  background: var(--accent);
+}
+
+.digmi-step-bar + .digmi-step-bar {
+  margin-left: 1.1vmin;
+}
+
+.digmi-step-label {
+  margin-left: 1.9vmin;
+  font-size: 1.7vmin;
+  font-weight: 500;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--fg-72);
+}
+
+.digmi-title,
+.digmi-lead,
+.digmi-help,
+.digmi-status,
+.digmi-sub {
+  margin: 0;
+}
+
+.digmi-title {
+  font-size: 7.8vmin;
+  font-size: min(7.8vmin, 12.6cqi);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.digmi-title em {
+  font-family: 'Instrument Serif', serif;
+  font-style: italic;
+  font-weight: 400;
+  color: var(--accent);
+}
+
+.digmi-lead {
+  font-size: 2.8vmin;
+  font-size: min(2.8vmin, 4.2cqi);
+  line-height: 1.45;
+  color: var(--fg-88);
+}
+
+.digmi-help {
+  font-size: 2.1vmin;
+  line-height: 1.4;
+  color: var(--fg-60);
+}
+
+.digmi-help b,
+.digmi-help a {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.digmi-help a {
+  text-decoration: none;
+}
+
+/* After the margin: 0 above, so the copy's rhythm wins. */
+.digmi-copy > * + * {
+  margin-top: 3.3vmin;
+}
+
+/* Starting / loading */
+
+/* The loader and the loading modal sit outside .digmi-page (the modal) or
+   under style.css's id rules (the loader), so they need the brand font and
+   background explicitly. Not the campaign: .media-container and
+   #campaign-container keep their own fonts. */
+.digmi-font,
+.digmi-font * {
+  font-family: 'Instrument Sans', sans-serif;
+}
+
+#initial-loader.digmi-loader {
+  background: var(--bg);
+}
+
+#loading-modal.digmi-font {
+  background: rgba(26, 23, 20, 0.94);
+  color: var(--fg);
+}
+
+.digmi-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.digmi-dots {
+  display: flex;
+}
+
+.digmi-dots span {
+  width: 1.6vmin;
+  height: 1.6vmin;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.35;
+}
+
+.digmi-dots span + span {
+  margin-left: 1.6vmin;
+}
+
+.digmi-dots span:nth-child(2) {
+  opacity: 0.65;
+}
+
+.digmi-dots span:nth-child(3) {
+  opacity: 1;
+}
+
+.digmi-status {
+  font-size: 6vmin;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.digmi-sub {
+  font-size: 2.6vmin;
+  color: var(--fg-72);
+}
+
+/* After the margin: 0 above. */
+.digmi-center > * + * {
+  margin-top: 4vmin;
+}
+
+/* The box-only step indicator is the copy's first child: when it is
+   hidden the title must not keep the gap below it. Here, after the
+   other "> * + *" rules, for stylelint's specificity order. */
+.digmi-copy > [hidden] + * {
+  margin-top: 0;
+}
+
+/* Chips over running content: offline (warn, bottom left) and notices
+   (info, top centre). The dot is drawn by ::before. */
+
+.digmi-chip {
+  position: fixed;
+  z-index: 10000;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  padding: 1.3vmin 2.4vmin 1.3vmin 2.2vmin;
+  border-radius: var(--radius);
+  background: rgba(26, 23, 20, 0.88);
+  color: var(--fg);
+  font-family: 'Instrument Sans', sans-serif;
+  font-size: 2.2vmin;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.digmi-chip::before {
+  content: '';
+  flex: none;
+  width: 1.4vmin;
+  height: 1.4vmin;
+  margin-right: 1.4vmin;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.digmi-chip--warn {
+  bottom: 3vmin;
+  left: 3vmin;
+}
+
+.digmi-chip--warn::before {
+  background: var(--danger);
+}
+
+.digmi-chip--info {
+  top: 3vmin;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.digmi-chip--info::before {
+  background: var(--accent);
+}
+
+/* Toast placements (showToast's position parameter). After the dot
+   modifiers above: they reset the opposite edges, so a warn toast placed
+   at the top does not keep --warn's bottom-left. */
+/* stylelint-disable declaration-block-no-redundant-longhand-properties -- Chrome 63 has no `inset` */
+.digmi-chip--top-center {
+  top: 3vmin;
+  right: auto;
+  bottom: auto;
+  left: 50%;
+  width: max-content;
+  max-width: 90vw;
+  transform: translateX(-50%);
+}
+
+.digmi-chip--top-left {
+  top: 3vmin;
+  right: auto;
+  bottom: auto;
+  left: 3vmin;
+  transform: none;
+}
+
+.digmi-chip--top-right {
+  top: 3vmin;
+  right: 3vmin;
+  bottom: auto;
+  left: auto;
+  transform: none;
+}
+
+.digmi-chip--bottom-left {
+  top: auto;
+  right: auto;
+  bottom: 3vmin;
+  left: 3vmin;
+  transform: none;
+}
+
+.digmi-chip--bottom-right {
+  top: auto;
+  right: 3vmin;
+  bottom: 3vmin;
+  left: auto;
+  transform: none;
+}
+
+/* stylelint-enable declaration-block-no-redundant-longhand-properties */
+
+/* Version badge, top right. --fg-88 passes 4.5:1 over the gradient with
+   either token set, so the badge reads whether or not it is inside
+   .digmi-reg. */
+.digmi-badge {
+  position: fixed;
+  top: 3vmin;
+  right: 3vmin;
+  font-family: 'Instrument Sans', sans-serif;
+
+  /* Above the start screen (z-max, 9999) and the offline/notice chips
+     (10000), and never in the way of a click. */
+  z-index: 10001;
+  pointer-events: none;
+  font-size: 1.5vmin;
+  letter-spacing: 0.06em;
+  color: var(--fg-88);
+}
+
+/* Fullscreen buttons (bottom right): brand ink on a dark plate, thin rule. */
+.fullscreen-interaction {
+  background: rgba(26, 23, 20, 0.72);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  color: var(--fg);
+}
+
+.fullscreen-interaction button {
+  color: var(--fg);
+}
+
+/* Device info panel (a debug tool: labels stay in English, only the title
+   is translated). A dark translucent sheet, a thin rule, sand uppercase
+   card headings. The family comes from .digmi-font on the panel. */
+.device-info {
+  background: rgba(26, 23, 20, 0.94);
+  border: 1px solid var(--rule);
+  border-bottom: 0;
+  border-radius: 1.4vmin 1.4vmin 0 0;
+  color: var(--fg);
+  font-size: 1.7vmin;
+  line-height: 1.35;
+}
+
+.device-info-title {
+  margin: 0 0 2vmin;
+  font-size: 2.2vmin;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.device-info-container {
+  scrollbar-color: var(--rule) transparent;
+}
+
+.device-info-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.device-info-container::-webkit-scrollbar-thumb {
+  background-color: var(--rule);
+  border-radius: 4px;
+}
+
+.device-info-container > div {
+  display: grid;
+  width: 100%;
+  max-width: none;
+  grid-template-columns: 1fr 1fr;
+  /* stylelint-disable-next-line property-no-deprecated -- Chrome 63 only knows grid-gap */
+  grid-gap: 1.6vmin 6vmin;
+}
+
+.device-info-card.media-playback-card {
+  grid-column: 1 / -1;
+}
+
+.device-info-card {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.device-info-card-header {
+  padding: 0 0 0.8vmin;
+  background: none;
+  border-bottom: 1px solid var(--rule);
+}
+
+.device-info-card-title {
+  margin: 0;
+  font-size: 1.4vmin;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.device-info-card-body {
+  padding: 0.6vmin 0 0;
+}
+
+.device-info-item {
+  display: flex;
+  align-items: baseline;
+  padding: 0.3vmin 0;
+  margin: 0;
+  border: 0;
+}
+
+.device-info-item-label {
+  flex: 0 0 15vmin;
+  margin: 0;
+  font-size: inherit;
+  font-weight: 400;
+  color: var(--fg-72);
+}
+
+.device-info-item-value {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding: 0;
+  font-size: inherit;
+  font-weight: 600;
+  color: var(--fg);
+  text-shadow: none;
+}
+
+/* Mobile browser: style.css's 13px panel font and one-column layout lose to
+   the rules above, so the mobile case is repeated here, after them. */
+/* stylelint-disable-next-line media-feature-range-notation -- Chrome 63 has no range syntax */
+@media (max-width: 480px) {
+  .device-info {
+    font-size: 13px;
+  }
+
+  .device-info-container > div {
+    grid-template-columns: 1fr;
+  }
+
+  .device-info-item-label {
+    flex-basis: 38%;
+  }
+}
+
+.device-info-not-available {
+  font-style: normal;
+  font-weight: 400;
+  color: var(--fg-60);
+}
+
+.media-playback-label {
+  font-weight: 400;
+}
+
+.media-playback-value {
+  margin: 0;
+  font-size: inherit;
+}
+
+/* Orientation. Last, so it overrides the base rules above. */
+
+/* Landscape: the code left, the copy right. The code is 46vmin unless the
+   panel is too narrow to leave the copy column 45vh: 13vmin is the page's
+   side padding (2 x 6.5vmin) and 6vmin the stage's column gap.
+   Accepted: on panels with a width/height ratio under 1.10, --qr drops
+   below 46vmin.
+
+   A custom property takes any value, so in Chrome 63 a plain fallback line
+   would be overridden by the min() line and var(--qr) would then be invalid
+   at computed time. The min() variant therefore sits behind @supports. */
+@media (orientation: landscape) {
+  :root {
+    --qr: 46vmin;
+  }
+
+  /* The plain line is the fallback the Chrome 63 rule asks for. */
+  /* stylelint-disable declaration-block-no-duplicate-custom-properties */
+  @supports (width: min(1px, 2px)) {
+    :root {
+      --qr: 46vmin;
+      --qr: min(46vmin, calc(100vw - 13vmin - 6vmin - 45vh));
+    }
+  }
+  /* stylelint-enable declaration-block-no-duplicate-custom-properties */
+
+  .digmi-stage {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .digmi-copy {
+    margin-left: 6vmin;
+  }
+}
+
+/* Portrait: the code on top, centred, the copy under it. */
+@media (orientation: portrait) {
+  :root {
+    --qr: 62vmin;
+  }
+
+  .digmi-stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    justify-items: center;
+    align-content: center;
+    text-align: center;
+  }
+
+  .digmi-copy {
+    margin-top: 4vmin;
+    align-items: center;
+  }
+}
