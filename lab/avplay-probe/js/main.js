@@ -314,8 +314,75 @@
     return n ? " (-" + n + ")" : "";
   }
 
+  // 0 means "not worked out yet", and a budget that cannot be worked out
+  // stays 0 so the check simply never fires. It may under-report clipping;
+  // it may not invent it.
+  var capLineBudget = 0;
+  // Attempted once, not once per summary(): if the ceiling turns out to be
+  // unreadable the budget stays 0 forever, and keying the retry off that 0
+  // would call getComputedStyle on every log line of every seam — a style
+  // flush in the hot path, which is what budgeting was for.
+  var capBudgetTried = false;
+  // The CEILING, never the current height. #caps is `max-height: 38vh` with
+  // overflow:hidden, so clientHeight tracks the CONTENT until it reaches
+  // that ceiling — budget it from clientHeight and a short readout yields a
+  // small budget, which a longer readout then exceeds while still fitting
+  // on the panel. That is a banner on a readout nothing is wrong with: the
+  // same class of lie as the clipping, pointing the other way. maxHeight
+  // resolves to px (vh is viewport-relative, not parent-relative) and is
+  // readable even in the two states that hide the panel outright.
+  function measureCapLineBudget() {
+    // Always writes. It is both the first measurement and the re-measurement
+    // after a resize, and in the second role an early return below would
+    // otherwise leave a budget computed for the OLD viewport standing — too
+    // large after a shrink (a silent miss) or too small (a false banner).
+    // Clearing first makes the promise above, "a budget that cannot be
+    // worked out stays 0", true on both paths.
+    capLineBudget = 0;
+    var css = window.getComputedStyle(capsEl);
+    // parseFloat cannot tell px from a percentage: `max-height: 38%` parses
+    // as 38, passes the >0 guard, and budgets one line — which brands every
+    // multi-line readout clipped, forever. Demand the unit.
+    if (!/px$/.test(css.maxHeight)) return; // "none", "38%", unreadable
+    var ceiling = parseFloat(css.maxHeight);
+    if (!(ceiling > 0)) return;
+    var lh = parseFloat(css.lineHeight);
+    // A computed "normal" parses as NaN. Falling back to the stylesheet's
+    // own 17px x 1.2 keeps the budget honest rather than disabling the
+    // check silently, which would be the clipping problem over again.
+    if (!(lh > 0)) lh = 17 * 1.2;
+    // max-height caps the CONTENT box, but overflow:hidden clips at the
+    // PADDING box — so the bottom padding is extra room the content may be
+    // drawn into, not room taken away from it. An earlier version here
+    // subtracted both paddings, which put the budget a full line under what
+    // the panel really shows: at 1080x1920 it budgeted 35 lines against 36
+    // visible, and printed CLIPPED over a readout with nothing cut off.
+    // That is the banner lying in the one direction it must not.
+    var padBottom = parseFloat(css.paddingBottom) || 0;
+    // Floor: a partly visible last line is not a readable line.
+    capLineBudget = Math.floor((ceiling + padBottom) / lh);
+    if (capLineBudget < 1) capLineBudget = 1;
+  }
+  // A resize changes what 38vh is worth, and a stale budget would then
+  // either cry clipping or miss it. Measured HERE rather than by clearing
+  // the flag for the next summary() to pick up: that next summary() can be
+  // the one inside a seam, which would move the style flush into the hot
+  // path this is all arranged to keep it out of.
+  window.addEventListener("resize", function () {
+    capBudgetTried = true;
+    measureCapLineBudget();
+  });
+  // Wrapped lines still count as one, so the budget is optimistic: a readout
+  // can be clipped without this firing. It never fires when nothing is cut.
+  function countLines(s) {
+    var n = 1;
+    for (var i = 0; i < s.length; i++) {
+      if (s.charCodeAt(i) === 10) n++;
+    }
+    return n;
+  }
   function summary() {
-    capsEl.textContent =
+    var text =
       geomWarn +
       clockWarn +
       cardWarn +
@@ -371,6 +438,33 @@
       rotation.replace("PLAYER_DISPLAY_ROTATION_", "") +
       "\n" +
       capsText;
+    // #caps is clipped at 38vh with overflow:hidden, and capsText sits LAST
+    // — so the capability answer, the thing key 3 exists to show, is the
+    // first thing a long readout loses, and it is lost SILENTLY. A readout
+    // that looks complete and is not is the one failure this instrument may
+    // not have. This does not fix the clipping; it refuses to hide it.
+    //
+    // Counted, NOT measured per call. summary() runs from log(), armLog()
+    // and caps(), which fire inside the seams this file times to the
+    // millisecond, and reading scrollHeight or clientHeight forces a
+    // synchronous layout — so the obvious check would add its own cost to
+    // the very numbers it sits beside. The ceiling and the line height are
+    // both fixed, so one read of the computed style buys a line budget.
+    if (!capBudgetTried) {
+      capBudgetTried = true;
+      measureCapLineBudget();
+    }
+    // Counted on the text BEFORE the banner, so switching it on cuts two
+    // further lines off the end — off capsText, the capability answer. The
+    // trade is deliberate: a short answer under a banner that says so beats
+    // a whole answer that looks complete and is not.
+    if (capLineBudget > 0 && countLines(text) > capLineBudget) {
+      text =
+        "*** PANEL CLIPPED — more here than the panel shows, and what is\n" +
+        "    cut off is the END: the capability answer ***\n" +
+        text;
+    }
+    capsEl.textContent = text;
   }
   // A thrown value tells you WHICH answer you got: SecurityError means the
   // certificate did not grant the privilege, NotSupportedError means the

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" id="https://digmi.eu/lab/avplay-probe" version="1.50.0" height="1920" width="1080" viewmodes="fullscreen">
+<widget xmlns="http://www.w3.org/ns/widgets" xmlns:tizen="http://tizen.org/ns/widgets" id="https://digmi.eu/lab/avplay-probe" version="1.51.0" height="1920" width="1080" viewmodes="fullscreen">
     <!--
       Lab probe. NOT the product: its own application and package id, so it
       installs beside DigmiMarketing on a bench panel and can never replace it.

@@ -631,10 +631,33 @@ if [ "${1:-}" = "install" ]; then
       echo "panel." >&2
       ;;
     *)
-      echo "install finished but DgmiLab001 is not in applist on $TARGET." >&2
-      echo "applist DID answer, so this is a real absence: the panel" >&2
-      echo "rejected it, or it landed somewhere else." >&2
-      exit 1
+      # rc 0 and output that never names the package. That is NOT the same
+      # thing as a real absence. sdb writes trouble to STDOUT and still exits
+      # 0 — a wedged local server, a panel that dropped the connection
+      # mid-command — and this branch used to read exactly that as "applist
+      # DID answer, so the package is absent" and fail a build whose install
+      # had succeeded. Same mistake as the rc!=0 branch above, one layer in.
+      #
+      # Telling a real absence from sdb-on-stdout needs the application-list
+      # header this panel actually prints, and that is UNMEASURED: the bench
+      # panel was not connected when this was written, and guessing the
+      # header would put the guess underneath an `exit 1`. So print what came
+      # back and let the reader judge. Measure the header on the panel and a
+      # genuine absence can fail the build again, gated on it.
+      echo "install finished. applist answered without naming DgmiLab001," >&2
+      echo "which is EITHER a real absence OR sdb reporting trouble on" >&2
+      echo "stdout with rc 0. This script cannot yet tell those apart, so" >&2
+      echo "it is NOT confirmed either way. applist said:" >&2
+      # sed -n, NOT `| head`: this file has twice paid for the same trap
+      # (lines 337 and 395). Under pipefail head closes the pipe once it has
+      # its 40 lines, printf dies of SIGPIPE, the pipeline reports 141 and
+      # `set -e` kills the script ON THIS LINE — so the branch written to
+      # stop a successful install failing the build would fail it instead,
+      # and with the output it exists to print only half-written. Verified:
+      # 4000 lines through `| head -40` exits the script 141. sed reads its
+      # input to the end, so there is no early close to die of.
+      printf '%s\n' "$installed" | sed -n '1,40{s/^/  | /p;}' >&2
+      echo "Start the probe and read the version in the capability panel." >&2
       ;;
   esac
 fi
