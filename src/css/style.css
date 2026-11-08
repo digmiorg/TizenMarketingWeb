@@ -97,30 +97,19 @@ html {
   overflow: auto;
 }
 
-/* Two cards side by side where there is room, stacked where there is not.
-   A plain media query rather than auto-fit/minmax: this has to behave the
-   same on a portrait panel, where one column is the right answer and a
-   fractional track would give two cramped ones. */
-.device-info-grid {
-  display: block;
-}
-
-@media (min-width: 900px) {
-  .device-info-grid {
-    display: flex;
-  }
-
-  .device-info-card {
-    flex: 1 1 0;
-  }
-
-  /* Margin, not gap: flex gap is the one thing in this file that a very old
-     webview would drop silently, and the result would be two cards touching
-     rather than a broken layout you would notice. */
-  .device-info-card + .device-info-card {
-    margin-left: 2.4vmin;
-  }
-}
+/* The two-card layout belongs to brand.css and is deliberately not restated
+   here. `.device-info-container > div` (a class plus a type, specificity
+   0,1,1) sets `display: grid` with `grid-template-columns: 1fr 1fr` and drops
+   to a single column under 480px -- and `.device-info-grid` IS that direct
+   child. A `.device-info-grid` rule in this file (0,1,0) therefore loses to
+   it whatever the source order, and a media query adds no specificity, so the
+   block that used to sit here was dead code apart from one `margin-left` on
+   the second card that applied on top of the grid's own 6vmin column gap.
+   Measured before deleting it, at 1920x1080 and at 1080x1920: `display`
+   resolved to `grid` either way, and the cards came out 901px against 875px
+   -- a visible 26px asymmetry. Matching the signage page is the whole point
+   of this rebrand, and brand.css is what the boxes already run, so the fix is
+   to let it own the layout rather than to raise specificity and fight it. */
 
 /* The scrim lives here, not in brand.css. brand.css dresses the signage
    page's `#loading-modal`; this widget's element is `#reload-modal`, so that

@@ -59,6 +59,11 @@ try {
   }
 }
 
+/**
+ * Covers the screen with the "Startar om…" modal and reloads the widget 1.5 s
+ * later. The delay is the whole point: it gives the modal time to fade in so
+ * the panel shows a reason for going blank rather than just going blank.
+ */
 function showReloadModal() {
   const modal = document.getElementById('reload-modal');
   modal.style.display = 'flex';
@@ -118,12 +123,27 @@ document.addEventListener('keydown', function (e) {
   }
 });
 
+/**
+ * Builds a v4-shaped UUID from `crypto.getRandomValues`. Used only as the
+ * fallback identity when Tizen's own device id is unavailable.
+ *
+ * @returns {string} A v4-shaped UUID.
+ */
 function generateUUID() {
   return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c) =>
     (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16)
   );
 }
 
+/**
+ * Reads the panel's Tizen device id, preferring the `tizenid` capability and
+ * falling back to the legacy `getCapabilities().duid`.
+ *
+ * Never rejects: a panel that answers neither way yields the literal string
+ * 'Not available', which is what the INFO panel then displays.
+ *
+ * @returns {Promise<string>} The device id, or 'Not available'.
+ */
 async function getDUID() {
   try {
     // Method 1: Recommended way - using getCapability for tizenid
@@ -144,6 +164,16 @@ async function getDUID() {
   }
 }
 
+/**
+ * Resolves this screen's stable identity and persists it under the
+ * `myUUID` localStorage key, so the id survives a reload and a power cut.
+ *
+ * Order: an id already in localStorage, else Tizen's `tizenid`, else a
+ * generated one. Note the loose `uuid == false` guard, which also regenerates
+ * for '' and '0' - deliberately left as-is, since neither is a usable id.
+ *
+ * @returns {Promise<string>} The persisted device identity.
+ */
 async function getUUID() {
   let uuid;
   uuid = localStorage.getItem('myUUID');
@@ -162,6 +192,18 @@ async function getUUID() {
   return uuid;
 }
 
+/**
+ * Renders the pairing QR for this screen, pointing at
+ * `/register-device/{uuid}/{model}`. Falls back to a literal 'unknown' model
+ * segment when Tizen will not report one, because a QR that pairs without a
+ * model beats no QR at all.
+ *
+ * Re-renders only when the encoded URL actually changed, guarded by
+ * `lastGeneratedUrl`: the caller polls, and rebuilding the canvas on every
+ * poll made the code visibly flash.
+ *
+ * @returns {Promise<void>}
+ */
 async function generateQRCode() {
   let qrUrl;
   const qrContainer = document.getElementById('qrcode');
@@ -196,6 +238,12 @@ async function generateQRCode() {
   }
 }
 
+/**
+ * Promisifies Tizen's callback-style `getPropertyValue('BUILD')` to read the
+ * panel's model name.
+ *
+ * @returns {Promise<string>} The model name; rejects if the Tizen API throws.
+ */
 function getDeviceModel() {
   return new Promise((resolve, reject) => {
     try {
@@ -242,6 +290,22 @@ const MediaStorage = {
   }
 };
 
+/**
+ * Fetches this screen's planned content, displaying the cached payload first
+ * so a slow network does not leave the panel blank, then caching and
+ * displaying the fresh one.
+ *
+ * The return value distinguishes three outcomes the caller has to tell apart:
+ * the fresh payload, the cached payload when the request failed but something
+ * is still playable, and `null` when it failed with nothing cached. `null`
+ * specifically does NOT mean "nothing is planned" - an empty
+ * `campaign_media` array does.
+ *
+ * Schedules no retry of its own; `checkDevice`'s capped backoff owns retrying.
+ *
+ * @param {string} uuid This screen's device identity.
+ * @returns {Promise<object|null>} Fresh payload, cached payload, or null.
+ */
 async function fetchDeviceMedia(uuid) {
   // Try to load cached media first
   const cachedData = MediaStorage.load(uuid);
@@ -384,6 +448,15 @@ function showStatus(text) {
   }
 }
 
+/**
+ * Replaces the contents of `#campaign-container` with the payload's media and
+ * starts the rotation timer, hiding the pairing screen first.
+ *
+ * Does nothing at all when `campaign_media` is absent or empty, which is why
+ * the caller - not this function - is responsible for saying so on screen.
+ *
+ * @param {object} data A device payload with a `campaign_media` array.
+ */
 function displayMediaContent(data) {
   if (data.campaign_media && data.campaign_media.length > 0) {
     const campaignContainer = document.getElementById('campaign-container');
@@ -619,6 +692,17 @@ function displayMediaContent(data) {
   }
 }
 
+/**
+ * Polls `/api/verify-device/{uuid}` until this screen is paired, then takes
+ * over fetching its content.
+ *
+ * Polls forever with a capped backoff rather than giving up after a fixed
+ * number of attempts, and keeps polling once paired if the playlist is empty,
+ * so a screen can notice both its own pairing and content appearing later
+ * without anyone power-cycling the panel.
+ *
+ * @param {string} uuid This screen's device identity.
+ */
 function checkDevice(uuid) {
   let attempt = 0;
   // Was `MAX_ATTEMPTS = 300` with an uncapped `attempt * 1000` backoff: the
@@ -646,6 +730,23 @@ function checkDevice(uuid) {
         headers: { Accept: 'application/json' },
       });
       const data = await response.json();
+
+      // A poll that came back and said "not paired" makes anything already on
+      // the status line untrue: a `Kontrollen misslyckades` from the catch
+      // below (the control just succeeded), a `Kunde inte hämta innehåll`
+      // from fetchDeviceMedia, or an `Ansluten till …` from a pairing since
+      // removed in the portal. Without this, one blip before pairing leaves a
+      // false error standing over the QR screen for as long as the panel is
+      // on, because nothing else writes that line in this state.
+      //
+      // It has to run BEFORE the `data.message` write below, not after the
+      // branch: showStatus() writes `#checkdevice-response` as well as the
+      // status line, so clearing afterwards blanked the `( 👎 ) …` diagnostic
+      // that the INFO panel exists to show. Measured - the field came back
+      // empty. The paired branch writes its own status later and is untouched.
+      if (!data.device_exists) {
+        showStatus('');
+      }
 
       if (data.message) {
         document.getElementById('checkdevice-response').textContent =
@@ -729,10 +830,18 @@ function checkDevice(uuid) {
   check();
 }
 
+/**
+ * Writes the device identity into the INFO panel.
+ *
+ * @param {string} uuid This screen's device identity.
+ */
 function displayUUID(uuid) {
   document.getElementById('device-uuid').textContent = uuid;
 }
 
+/**
+ * Writes the widget's `appVersion` into the INFO panel, if that field exists.
+ */
 function displayAppVersion() {
   const appVersionElement = document.getElementById('app-version-text');
   if (appVersionElement) {
