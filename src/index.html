@@ -1,43 +1,53 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="sv">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Digmi Signage" />
+    <!-- The kiosk profiles on the Pi boxes run Chromium with force-dark, which
+         darkens a page that declares `light` (measured in digmi-rpi-os-live #45:
+         white text on sand, a black frame around the QR). Tizen has no such
+         profile, but the declaration has to agree with signage.digmi.eu, which
+         this screen is now a copy of. No view may declare `light`. -->
+    <meta name="color-scheme" content="dark" />
+
+    <!-- The only origin this page actually talks to. The seven other
+         preconnect hints that used to stand here - unpkg, jsdelivr, two
+         Sentry CDNs, Google Analytics and two Google storage hosts - named
+         origins nothing on this page ever fetched from. A preconnect to an
+         origin you never use is a DNS lookup and a TLS handshake spent on
+         nothing, on a screen whose whole job at this moment is to come up. -->
     <link
         href="https://portal.digmi.eu"
         rel="preconnect"
     />
+
+    <!-- Self-hosted, both of them, and preloaded because the activation text
+         is the first thing anyone reads on this screen. No font CDN: a salon
+         with bad DNS must still get a readable page, which is the same reason
+         qrcode.min.js is vendored below.
+
+         The ?v= here must match the one brand.css asks for EXACTLY. It did
+         not at first, and a preload whose URL differs by a query string is a
+         different resource: the browser fetched each font twice and warned
+         that the preload went unused. Bump these with brand.css, not with
+         this widget's own version. -->
     <link
-        href="https://unpkg.com"
-        rel="preconnect"
+        rel="preload"
+        href="fonts/instrument-sans-latin.woff2?v=1.1.1"
+        as="font"
+        type="font/woff2"
+        crossorigin
     />
     <link
-        href="https://cdn.jsdelivr.net"
-        rel="preconnect"
-    />
-    <link
-        href="https://storage.googleapis.com"
-        rel="preconnect"
-    />
-    <link
-        href="https://browser.sentry-cdn.com"
-        rel="preconnect"
-    />
-    <link
-        href="https://js-de.sentry-cdn.com"
-        rel="preconnect"
-    />
-    <link
-        href="https://region1.google-analytics.com"
-        rel="preconnect"
-    />
-    <link
-        href="https://firebasestorage.googleapis.com"
-        rel="preconnect"
+        rel="preload"
+        href="fonts/instrument-serif-italic-latin.woff2?v=1.1.1"
+        as="font"
+        type="font/woff2"
+        crossorigin
     />
 
-    <title>Digmi Signage - Probably the best signage in the world</title>
+    <title>Digmi Signage</title>
     <script type="text/javascript" src="$B2BAPIS/b2bapis/b2bapis.js"></script>
     <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
 
@@ -49,51 +59,190 @@
          code instead of a blank pairing screen. -->
     <script src="js/vendor/qrcode.min.js"></script>
 
-    <link type="text/css" href="css/style.css" rel="stylesheet" />
+    <!-- brand.css is a byte-for-byte copy of production/css/brand.css on
+         DigmiMarketing main (1.1.1), the stylesheet signage.digmi.eu serves.
+         It is written for Chrome 63 - every min()/cqi value has a plain
+         fallback on the line above, and flex spacing uses margins, not gap -
+         which is what makes it usable here at all. Keep it a copy: edit it in
+         DigmiMarketing and copy it over, or the two screens drift apart. -->
+    <link type="text/css" href="css/brand.css?v=1.0.11" rel="stylesheet" />
+    <link type="text/css" href="css/style.css?v=1.0.11" rel="stylesheet" />
+    <script src="js/brand.js?v=1.0.11"></script>
 </head>
 
 <body>
-    <img
-        id="logo"
-        src="https://firebasestorage.googleapis.com/v0/b/digmi-d34ea.appspot.com/o/customers%2FDigmi%2FLogo%2FDigmiWhite.png?alt=media&token=55af51fb-866d-44da-8047-b78a882586b6"
-        alt="Logo"
-    />
-    <div id="content" class="prose">
-        <img
-            id="image-banner"
-            src="https://firebasestorage.googleapis.com/v0/b/digmi-d34ea.appspot.com/o/customers%2FDigmi%2FDigmiSignage%2Fthe%20seasons.png?alt=media&token=9e7ccc3d-1195-4b8f-bcd9-247960063251"
-            alt="The Seasons Banner"
-        />
-
-        <div id="qrcode"></div>
-
-        <h2 id="qr-text">Scan the QR-code to connect this TV<br/>to your location at DIGMI.</h2>
-        <p id="status-line"></p>
-        <div class="device-info">
-            <p>App Version: <span id="app-version-text"></span></p>
-            <p>Model: <span id="device-model"></span></p>
-            <p>tizenid: <span id="device-systeminfo-caps"></span></p>
-            <p>DUID: <span id="device-duid"></span></p>
-            <p>uuID: <span id="device-uuid"></span></p>
-            <p>Response: <span id="checkdevice-response"></span></p>
-            <p>Playing: <span id="media-playing-info"></span></p>
-            <p>Stage: <span id="stage-geometry"></span></p>
-            <p>Next check in: <span id="check-countdown">0</span> seconds</p>
-        </div>
-    </div>
-    <img
-        id="background-image"
-        src="https://firebasestorage.googleapis.com/v0/b/digmi-d34ea.appspot.com/o/customers%2FDigmi%2FDigmiSignage%2Fbackground.png?alt=media&token=f0e07b0f-f555-4ae5-9245-d6890b8f5ae3"
-        alt="Background Image"
-    />
-    <div id="reload-modal" style="display: none">
-        <div class="p-8 text-center text-4xl text-white">
+    <!-- The activation screen. One element, hidden as one unit the moment a
+         campaign arrives - see hideRegistrationScreen() in js/main.js, which
+         hides THIS id. It used to hide five separate ids, and anything added
+         to the screen without being added to that list stayed on top of the
+         customer's campaign. -->
+    <div
+        class="digmi-page digmi-reg"
+        id="content-reg"
+    >
+        <header class="digmi-topbar">
+            <div class="digmi-wordmark">digmi<sup>&trade;</sup></div>
             <div
-                class="mb-4 inline-block h-16 w-16 animate-spin rounded-full border-4 border-white border-t-transparent"
-            ></div>
-            <p>Reloading...</p>
+                class="digmi-eyebrow"
+                data-i18n="eyebrow"
+            >digmi Signage</div>
+        </header>
+
+        <main class="digmi-stage">
+            <div class="digmi-qr-column">
+                <!-- No step indicator and no "QR-kod 3" here. Those belong to
+                     a Pi box arriving from its own onboarding, which hands the
+                     page ?src=box; a panel has never seen codes 1 and 2, so
+                     claiming it is on step 3 of 3 would be a lie to the one
+                     person standing in front of it. brand.js hides every
+                     [data-box-only] element when src=box is absent. -->
+                <div class="digmi-qr-box">
+                    <div
+                        class="digmi-qr-fill"
+                        id="qrcode"
+                    ></div>
+                </div>
+            </div>
+
+            <div class="digmi-copy">
+                <h1 class="digmi-title">
+                    <span data-i18n="reg.title.generic">Aktivera skärmen</span>
+                    <em data-i18n="reg.title_em.generic">med mobilen.</em>
+                </h1>
+                <p
+                    class="digmi-lead"
+                    data-i18n="reg.body"
+                >Skanna med mobilens kamera eller digmi Marketing-appen. Logga in i digmi-portalen – har du inget konto
+                    skapar du ett där – och lägg till skärmen. Den startar av sig själv när den är aktiverad.</p>
+                <p
+                    class="digmi-help"
+                    data-i18n="reg.help"
+                >Behöver du hjälp? Ring <a
+                        data-i18n-slot="phone"
+                        data-i18n="reg.phone_display"
+                        href="tel:+46101821033"
+                    >010-182 10 33</a> eller gå till <a
+                        data-i18n-slot="url"
+                        href="https://digmi.se/support"
+                    >digmi.se/support</a>.</p>
+            </div>
+        </main>
+    </div>
+
+    <!-- OUTSIDE #content-reg, deliberately. showStatus() writes here, and the
+         line has to survive hideRegistrationScreen(): a screen that is paired
+         but has nothing planned shows no campaign and no activation view, so
+         this chip is the only thing left that can say why. Putting it inside
+         the activation view would have hidden it at exactly that moment -
+         the old stylesheet said so in a comment, which is the only reason
+         this is not a bug now. Empty and display:none until it speaks. -->
+    <div
+        class="digmi-chip digmi-chip--info digmi-chip--bottom-left"
+        id="status-line"
+        style="display: none"
+    ></div>
+
+    <!-- The debug panel. Same content and the same ids as before: it is a
+         diagnostic tool and nothing about what it reports changes here, only
+         how it looks. Toggled by the key handler, not by the brand layer. -->
+    <div class="device-info digmi-font">
+        <div class="device-info-title">Device</div>
+        <div class="device-info-container">
+            <div class="device-info-grid">
+                <div class="device-info-card">
+                    <div class="device-info-card-header">
+                        <h3 class="device-info-card-title">Device</h3>
+                    </div>
+                    <dl class="device-info-card-body">
+                        <div class="device-info-item">
+                            <dt class="device-info-item-label">App version</dt>
+                            <dd
+                                class="device-info-item-value"
+                                id="app-version-text"
+                            ></dd>
+                        </div>
+                        <div class="device-info-item">
+                            <dt class="device-info-item-label">Model</dt>
+                            <dd
+                                class="device-info-item-value"
+                                id="device-model"
+                            ></dd>
+                        </div>
+                        <div class="device-info-item">
+                            <dt class="device-info-item-label">Tizen id</dt>
+                            <dd
+                                class="device-info-item-value"
+                                id="device-systeminfo-caps"
+                            ></dd>
+                        </div>
+                        <div class="device-info-item">
+                            <dt class="device-info-item-label">DUID</dt>
+                            <dd
+                                class="device-info-item-value"
+                                id="device-duid"
+                            ></dd>
+                        </div>
+                        <div class="device-info-item">
+                            <dt class="device-info-item-label">uuID</dt>
+                            <dd
+                                class="device-info-item-value"
+                                id="device-uuid"
+                            ></dd>
+                        </div>
+                    </dl>
+                </div>
+
+                <div class="device-info-card">
+                    <div class="device-info-card-header">
+                        <h3 class="device-info-card-title">Status</h3>
+                    </div>
+                    <dl class="device-info-card-body">
+                        <div class="device-info-item">
+                            <dt class="device-info-item-label">Response</dt>
+                            <dd
+                                class="device-info-item-value"
+                                id="checkdevice-response"
+                            ></dd>
+                        </div>
+                        <div class="device-info-item">
+                            <dt class="device-info-item-label">Playing</dt>
+                            <dd
+                                class="device-info-item-value"
+                                id="media-playing-info"
+                            ></dd>
+                        </div>
+                        <div class="device-info-item">
+                            <dt class="device-info-item-label">Stage</dt>
+                            <dd
+                                class="device-info-item-value"
+                                id="stage-geometry"
+                            ></dd>
+                        </div>
+                        <div class="device-info-item">
+                            <dt class="device-info-item-label">Next check in</dt>
+                            <dd class="device-info-item-value"><span id="check-countdown">0</span> s</dd>
+                        </div>
+                    </dl>
+                </div>
+            </div>
         </div>
     </div>
+
+    <div
+        class="digmi-font"
+        id="reload-modal"
+        style="display: none"
+    >
+        <div class="digmi-center">
+            <div class="digmi-dots"><span></span><span></span><span></span></div>
+            <p
+                class="digmi-status"
+                data-i18n="loading.reloading"
+            >Startar om…</p>
+        </div>
+    </div>
+
+    <!-- Untouched: the customer's campaign player. -->
     <div class="media-container">
         <div id="campaign-container"></div>
     </div>

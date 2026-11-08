@@ -12,16 +12,6 @@ html {
   overflow: hidden;
 }
 
-#content {
-  height: 100%;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  padding: 20px;
-}
 
 .media-container {
   position: fixed;
@@ -67,92 +57,89 @@ html {
   filter: blur(10px);
 }
 
-#qrcode {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background-color: white;
-  border-radius: 20px;
-  box-shadow: 0 8px 12px rgba(0, 0, 0, 0.2);
-  border: 5px solid #c293d0;
-  padding: 20px;
-  z-index: 20;
-}
+/* The activation view, the debug panel and the reload modal are styled by
+   css/brand.css, which is a copy of the stylesheet signage.digmi.eu serves.
+   What is left here is the layout brand.css does not carry: on the signage
+   page that came from Tailwind utility classes in the markup, and this widget
+   has no Tailwind. Keep it to positioning and boxes - colours, type and
+   spacing belong in brand.css so the two screens cannot drift apart. */
 
-#qr-text {
-  margin-top: 36px;
-  text-align: center;
-  font-size: 40px;
-  width: 100%;
-  z-index: 20;
-}
-
-#logo {
-  position: absolute;
-  top: 50px;
-  left: 50px;
-  width: 150px;
+/* brand.css positions .digmi-page but sets no z-index: on signage.digmi.eu
+   that comes from a Tailwind `z-20` class in the markup, and this widget has
+   no Tailwind. Without it the activation view is z-index auto while
+   `.media-player video` is 10, so a campaign starting before
+   hideRegistrationScreen() runs would paint OVER the QR rather than under
+   it - and the screen would look activated while still showing nothing to
+   scan. Above the player, below the debug panel and the reload modal. */
+#content-reg {
   z-index: 20;
 }
 
 /* Opened with INFO or the red button — see the keydown handler in main.js. */
+.device-info {
+  display: none;
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 100;
+  max-height: 60vh;
+  padding: 2.4vmin;
+}
+
 .device-info.visible {
   display: block;
 }
 
-.device-info {
-  display: none;
-  margin-top: 2rem;
-  font-size: 24px;
-  padding: 2rem;
-  background-color: rgba(0, 0, 0, 0.8);
-  z-index: 20;
+.device-info-container {
+  width: 100%;
+  max-height: 48vh;
+  overflow: auto;
 }
 
-.device-info p {
-  margin: 0.5rem 0;
+/* Two cards side by side where there is room, stacked where there is not.
+   A plain media query rather than auto-fit/minmax: this has to behave the
+   same on a portrait panel, where one column is the right answer and a
+   fractional track would give two cramped ones. */
+.device-info-grid {
+  display: block;
 }
 
-/* Survives hideRegistrationScreen() on purpose: when a screen is paired but
-   has nothing planned, this line is the only thing that says so. */
-#status-line {
-  display: none;
-  margin-top: 24px;
-  max-width: 80%;
-  text-align: center;
-  font-size: 28px;
-  opacity: 0.75;
-  z-index: 20;
+@media (min-width: 900px) {
+  .device-info-grid {
+    display: flex;
+  }
+
+  .device-info-card {
+    flex: 1 1 0;
+  }
+
+  /* Margin, not gap: flex gap is the one thing in this file that a very old
+     webview would drop silently, and the result would be two cards touching
+     rather than a broken layout you would notice. */
+  .device-info-card + .device-info-card {
+    margin-left: 2.4vmin;
+  }
 }
 
+/* The scrim lives here, not in brand.css. brand.css dresses the signage
+   page's `#loading-modal`; this widget's element is `#reload-modal`, so that
+   rule simply does not match - and the old stylesheet's own
+   `rgba(0, 0, 0, 0.8)` went out with it. Without a background this modal is
+   transparent, so "Startar om…" would be drawn straight onto the customer's
+   playing campaign. Same colour as the debug panel's, so the two dark
+   surfaces on this screen match. */
 #reload-modal {
   position: fixed;
-  inset: 0;
-  background-color: rgba(0, 0, 0, 0.8);
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 30;
   display: none;
   align-items: center;
   justify-content: center;
-  z-index: 30;
-  width: 100%;
-  height: 100%;
-}
-
-#reload-modal .text-center {
-  text-align: center;
-  color: white;
-  font-size: 2rem;
-  padding: 2rem;
-}
-
-.animate-spin {
-  animation: spin 1s linear infinite;
-  display: inline-block;
-  width: 4rem;
-  height: 4rem;
-  border: 4px solid white;
-  border-top-color: transparent;
-  border-radius: 50%;
-  margin-bottom: 1rem;
+  background: rgba(26, 23, 20, 0.94);
 }
 
 .fade-in {
@@ -160,11 +147,10 @@ html {
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes spin {
+  from {
+    opacity: 0;
+  }
   to {
-    transform: rotate(360deg);
+    opacity: 1;
   }
 }
