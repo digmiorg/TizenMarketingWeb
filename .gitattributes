@@ -1,0 +1,11 @@
+# Bench instruments are not part of the published site. `git archive HEAD` is
+# what the Pages workflows extract into _site/, so export-ignore keeps lab/
+# out at the source, in every workflow and every future one.
+#
+# The workflows also `rm -rf _site/lab`. Both are LITERAL-PATH rules, so a
+# rename of this directory defeats both at once and silently: `rm -rf` on a
+# missing path exits 0, and the attribute stops matching. Verified by doing
+# it — `git mv lab bench` puts every file back in the archive, with no error
+# anywhere. Rename this directory and you must change both, or add a
+# positive `test ! -d _site/lab` to the workflows.
+lab/ export-ignore

@@ -1,0 +1,7 @@
+# Fetched at build time, never committed: customer media, tens of megabytes.
+.media-cache/
+# The signed package.
+*.wgt
+# The bucket and the object names. This repo is public and these point at real
+# customer media; clips.env.example carries the shape with placeholders.
+clips.env

@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Digmi AVPlay probe</title>
+    <!--
+      Both scripts, in this order, exactly as src/index.html does. The B2B
+      script is what puts `webapis.b2bapis` on the page: without it every
+      signage call reports "not available" and the probe answers its own
+      second question with a false no.
+
+      Package-local paths. This is also why AVPlay cannot be reached from a
+      page served off a remote origin, and therefore why the signage app has
+      to be packaged rather than loaded over https on a Samsung panel.
+    -->
+    <script type="text/javascript" src="$B2BAPIS/b2bapis/b2bapis.js"></script>
+    <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
+    <style>
+      /* Transparent, not blue. Measured on a QB43C: AVPlay draws on its own
+         plane BEHIND the web page — the opposite of HTML5 <video>, which is
+         composited into the page. An opaque background hid the picture
+         completely while the audio played. Only the two readout panels stay
+         opaque, so the video shows between them. */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: monospace;
+      }
+      /* Was blue, to tell "plane up and empty" from "plane gone" by colour.
+         The blue is gone — body is transparent (above) and this layer is
+         #000 — so BOTH states now read as black and the distinction is not
+         observable from a recording. Said here rather than left as a rule
+         for a colour nobody will find. */
+      #mask {
+        position: fixed;
+        /* Longhand, not `inset: 0`. The shorthand needs Chromium 87 and
+           config.xml declares a webview floor far below that; where it is
+           dropped the layer becomes `position: fixed` with no offsets,
+           shrink-to-fit, and covers NOTHING — and the probe would then
+           report that no DOM layer can hide the gap, which is false. */
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        z-index: 1;
+        background-color: #000;
+        background-position: center;
+        background-repeat: no-repeat;
+        /* Not `cover`: that CROPS to fill, while AVPlay stretches the video
+           into setDisplayRect. The mismatch showed on the bench as the still
+           being slightly zoomed in compared with the frame it replaced. */
+        background-size: 100% 100%;
+        opacity: 0;
+        pointer-events: none;
+        /* No fade IN: that would be black for the first frames, which is the
+           thing being covered. Only the removal fades. */
+        transition: opacity 160ms linear;
+      }
+      #mask.on {
+        transition: none;
+        opacity: 1;
+      }
+      /* A still in the playlist. It is opaque and in the DOM, so it covers
+         the video plane by itself — which is why a mixed playlist needs no
+         freeze and no poster for the seams that involve it. z-index above
+         #mask: when a video starts behind a still, the still is the cover,
+         and a mask underneath it would only be in the way. */
+      #card {
+        position: fixed;
+        /* Longhand, not `inset: 0`. The shorthand needs Chromium 87 and
+           config.xml declares a webview floor far below that; where it is
+           dropped the layer becomes `position: fixed` with no offsets,
+           shrink-to-fit, and covers NOTHING — and the probe would then
+           report that no DOM layer can hide the gap, which is false. */
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        z-index: 2;
+        display: none;
+        background-color: #000;
+        background-position: center;
+        background-repeat: no-repeat;
+        /* Same reason as #mask: AVPlay stretches into setDisplayRect, so a
+           still that CROPS would not line up with the video it replaces. */
+        background-size: 100% 100%;
+        color: #fff;
+        font-family:
+          "SamsungOne", "Helvetica Neue", Helvetica, Arial, sans-serif;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 0 8vw;
+        box-sizing: border-box;
+      }
+      #card.on {
+        display: flex;
+      }
+      #card .kicker {
+        font-size: 3.2vh;
+        letter-spacing: 0.32em;
+        text-transform: uppercase;
+        opacity: 0.75;
+      }
+      #card .big {
+        font-size: 9vh;
+        line-height: 1.05;
+        font-weight: 700;
+        margin: 3vh 0;
+      }
+      /* Deliberately large: whether this firmware has a colour emoji font at
+         all, or falls back to tofu boxes, is readable from across the room
+         only at this size. */
+      #card .emoji {
+        font-size: 6vh;
+        letter-spacing: 0.1em;
+      }
+      /* Hidden in the fullscreen states: the readouts overlay the video, and
+         a transition is hard to judge in the strip left over. */
+      .hud-off #caps,
+      .hud-off #log,
+      .hud-min #caps {
+        display: none;
+      }
+      .hud-min #log {
+        height: auto;
+        max-height: 2.6em;
+        font-size: 15px;
+        opacity: 0.85;
+      }
+      #caps {
+        position: fixed;
+        /* Same reason as #log: #card also sits at z-index 2, so DOM order
+           decided which one won and the card covered the capability panel
+           during a run — the panel you read the answer off. */
+        z-index: 3;
+        left: 0;
+        right: 0;
+        top: 0;
+        max-height: 38vh;
+        margin: 0;
+        padding: 6px 10px;
+        background: #000;
+        color: #ff0;
+        font-size: 17px;
+        line-height: 1.2;
+        overflow: hidden;
+        white-space: pre-wrap;
+      }
+      /* The capability answer is written once and never scrolls. The event
+         log below it is the part that churns. */
+      #log {
+        position: fixed;
+        /* Above #card: a positive z-index paints over every z-index:auto
+           layer whatever the DOM order, so the card was hiding the readout
+           for exactly the seams the readout is there to measure. */
+        z-index: 3;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 30vh;
+        margin: 0;
+        padding: 6px 10px;
+        background: #000;
+        color: #0f0;
+        font-size: 17px;
+        line-height: 1.2;
+        overflow: hidden;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- AVPlay's video surface. Samsung's own sample declares one per player;
+         without them prepare()/play() has nowhere to draw and the probe would
+         report "AVPlay does not help here" for want of them.
+         TWO, though this build uses ONE player (see the avplaystore note in
+         js/main.js): the pair is what Samsung's mixer sample declares, and
+         removing the second would make a future mixer attempt look like a
+         missing surface rather than a refused mode. It costs nothing. -->
+    <object id="av-player-1" type="application/avplayer"></object>
+    <object id="av-player-2" type="application/avplayer"></object>
+    <!-- Covers the video plane during a teardown. Only possible because
+         AVPlay draws behind the page on this panel. -->
+    <div id="mask"></div>
+    <div id="card"></div>
+    <pre id="caps">capabilities: waiting for webapis…</pre>
+    <pre id="log">booting…</pre>
+    <script src="js/main.js"></script>
+  </body>
+</html>
