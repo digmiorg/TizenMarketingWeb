@@ -100,16 +100,22 @@ html {
 /* The two-card layout belongs to brand.css and is deliberately not restated
    here. `.device-info-container > div` (a class plus a type, specificity
    0,1,1) sets `display: grid` with `grid-template-columns: 1fr 1fr` and drops
-   to a single column under 480px -- and `.device-info-grid` IS that direct
+   to a single column below 481px -- and `.device-info-grid` IS that direct
    child. A `.device-info-grid` rule in this file (0,1,0) therefore loses to
    it whatever the source order, and a media query adds no specificity, so the
-   block that used to sit here was dead code apart from one `margin-left` on
-   the second card that applied on top of the grid's own 6vmin column gap.
-   Measured before deleting it, at 1920x1080 and at 1080x1920: `display`
-   resolved to `grid` either way, and the cards came out 901px against 875px
-   -- a visible 26px asymmetry. Matching the signage page is the whole point
-   of this rebrand, and brand.css is what the boxes already run, so the fix is
-   to let it own the layout rather than to raise specificity and fight it. */
+   block that used to sit here did nothing *while brand.css loads* apart from
+   one `margin-left` on the second card, which applied on top of the grid's
+   own 6vmin column gap.
+
+   Measured before deleting it: `display` resolved to `grid` at both 1920x1080
+   and 1080x1920, and the stray margin was 25.92px in both. The card widths
+   are per-resolution -- 901px against 875px in landscape, 481px against 455px
+   in portrait -- so it is the 26px asymmetry, not that pair of widths, that
+   held either way. (vmin is 1080 in both, which is why the margin matches.)
+
+   Matching the signage page is the whole point of this rebrand, and brand.css
+   is what the boxes already run, so the fix is to let it own the layout
+   rather than to raise specificity and fight it. */
 
 /* The scrim lives here, not in brand.css. brand.css dresses the signage
    page's `#loading-modal`; this widget's element is `#reload-modal`, so that

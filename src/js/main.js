@@ -136,10 +136,14 @@ function generateUUID() {
 }
 
 /**
- * Reads the panel's Tizen device id, preferring the `tizenid` capability and
- * falling back to the legacy `getCapabilities().duid`.
+ * Reads the panel's Tizen device id from the `tizenid` capability.
  *
- * Never rejects: a panel that answers neither way yields the literal string
+ * The legacy `getCapabilities().duid` below it is near-unreachable: it is only
+ * tried when `getCapability` RESOLVES falsy, and a panel without the
+ * capability throws instead, which goes straight to the catch. Documented as
+ * found, not as intended.
+ *
+ * Never rejects: anything that fails yields the literal string
  * 'Not available', which is what the INFO panel then displays.
  *
  * @returns {Promise<string>} The device id, or 'Not available'.
@@ -198,9 +202,12 @@ async function getUUID() {
  * segment when Tizen will not report one, because a QR that pairs without a
  * model beats no QR at all.
  *
- * Re-renders only when the encoded URL actually changed, guarded by
- * `lastGeneratedUrl`: the caller polls, and rebuilding the canvas on every
- * poll made the code visibly flash.
+ * The `lastGeneratedUrl` guard around the re-render is vestigial: both call
+ * sites are in `window.onload`, in a then/catch pair, so this runs exactly
+ * once per page load. The guard is still evaluated and always lets that one
+ * render through (`null !== qrUrl`); what it can never do is suppress a
+ * re-render, because there is never a second one. Left in place rather than
+ * removed in a commit about review findings.
  *
  * @returns {Promise<void>}
  */
@@ -242,7 +249,11 @@ async function generateQRCode() {
  * Promisifies Tizen's callback-style `getPropertyValue('BUILD')` to read the
  * panel's model name.
  *
- * @returns {Promise<string>} The model name; rejects if the Tizen API throws.
+ * @returns {Promise<string>} The model name. Rejects if the call itself
+ * throws - but never settles at all if Tizen's success callback does not
+ * fire, or if reading `build.model` throws inside it, since by then the `try`
+ * has already returned. `generateQRCode` awaits this, so that case draws no
+ * QR at all.
  */
 function getDeviceModel() {
   return new Promise((resolve, reject) => {
@@ -291,15 +302,20 @@ const MediaStorage = {
 };
 
 /**
- * Fetches this screen's planned content, displaying the cached payload first
- * so a slow network does not leave the panel blank, then caching and
- * displaying the fresh one.
+ * Fetches this screen's planned content, displaying any cached payload first,
+ * then caching and displaying the fresh one.
+ *
+ * How much that cache covers is limited: `MediaStorage.TTL` is 10 seconds
+ * despite its `1 hours` comment, so after a cold boot `load()` has almost
+ * always expired it and returns null. Treat the first display as a bonus, not
+ * as cover for a slow network.
  *
  * The return value distinguishes three outcomes the caller has to tell apart:
- * the fresh payload, the cached payload when the request failed but something
- * is still playable, and `null` when it failed with nothing cached. `null`
- * specifically does NOT mean "nothing is planned" - an empty
- * `campaign_media` array does.
+ * the fresh payload, the cached payload when the request failed, and `null`
+ * when it failed with nothing cached. A cached payload is not a promise of
+ * anything playable - its `campaign_media` may be empty too. What `null`
+ * specifically does NOT mean is "nothing is planned"; an empty
+ * `campaign_media` array means that.
  *
  * Schedules no retry of its own; `checkDevice`'s capped backoff owns retrying.
  *
@@ -422,6 +438,30 @@ function hideRegistrationScreen() {
   const screen = document.getElementById('content-reg');
   if (screen) {
     screen.style.display = 'none';
+  }
+}
+
+/**
+ * Brings the pre-pairing screen back and takes the campaign container down
+ * with it.
+ *
+ * Clears the inline `display` rather than setting a value, so the layout comes
+ * from the stylesheet and this function does not have to know which one.
+ *
+ * Hiding the container matters as much as showing the view: media from a
+ * pairing that no longer exists would otherwise keep playing behind the
+ * activation screen. The content poll that `displayMediaContent` installed
+ * does keep running - it predates this function and is left alone here.
+ */
+function showRegistrationScreen() {
+  const screen = document.getElementById('content-reg');
+  if (screen) {
+    screen.style.display = '';
+  }
+
+  const campaignContainer = document.getElementById('campaign-container');
+  if (campaignContainer) {
+    campaignContainer.style.display = 'none';
   }
 }
 
@@ -729,23 +769,54 @@ function checkDevice(uuid) {
         method: 'GET',
         headers: { Accept: 'application/json' },
       });
+
+      // verify-device sits behind its own nginx rate limit, and a 429 or a 500
+      // still answers with a JSON body - `{"message":"Too Many Attempts."}`.
+      // Unchecked, that body fell through as a successful poll carrying no
+      // `device_exists`, and the clear below then wiped the only explanation
+      // readable from across the salon, leaving it in the INFO panel where it
+      // needs someone standing at the screen with a remote. Throwing hands it
+      // to the catch, which puts it on the status line instead.
+      if (!response.ok) {
+        throw new Error('HTTP ' + response.status);
+      }
+
       const data = await response.json();
 
-      // A poll that came back and said "not paired" makes anything already on
-      // the status line untrue: a `Kontrollen misslyckades` from the catch
-      // below (the control just succeeded), a `Kunde inte hämta innehåll`
-      // from fetchDeviceMedia, or an `Ansluten till …` from a pairing since
-      // removed in the portal. Without this, one blip before pairing leaves a
-      // false error standing over the QR screen for as long as the panel is
-      // on, because nothing else writes that line in this state.
-      //
-      // It has to run BEFORE the `data.message` write below, not after the
-      // branch: showStatus() writes `#checkdevice-response` as well as the
-      // status line, so clearing afterwards blanked the `( 👎 ) …` diagnostic
-      // that the INFO panel exists to show. Measured - the field came back
-      // empty. The paired branch writes its own status later and is untouched.
-      if (!data.device_exists) {
+      // `=== false`, not `!data.device_exists`: only a poll that explicitly
+      // answers "not paired" may clear the screen. A payload with no such
+      // field is not an answer about pairing at all, and treating it as one is
+      // exactly how a rate-limited poll blanked the status line.
+      if (data.device_exists === false) {
+        // Anything already on the status line is now untrue: a
+        // `Kontrollen misslyckades` from the catch below, a `Kunde inte hämta
+        // innehåll` from fetchDeviceMedia, or an `Ansluten till …` from a
+        // pairing since removed in the portal. Without this, one blip before
+        // pairing leaves a false error standing over the QR screen for as long
+        // as the panel is on, because nothing else writes that line here.
+        //
+        // BEFORE the `data.message` write below, not after the branch:
+        // showStatus() writes `#checkdevice-response` as well as the status
+        // line, so clearing afterwards blanked the `( 👎 ) …` diagnostic that
+        // the INFO panel exists to show.
         showStatus('');
+
+        // And put the pairing view back, which nothing used to do.
+        // hideRegistrationScreen() runs the moment a screen pairs and had no
+        // counterpart, so a screen later removed in the portal kept the
+        // activation view hidden for good: an empty campaign container, and -
+        // once the line above clears - nothing on the panel at all. Restoring
+        // it gives the salon a QR to scan instead of a black screen.
+        //
+        // Nothing is re-rendered. The code already in the DOM encodes this
+        // uuid and is still the right pairing URL - UNLESS getDeviceModel()
+        // never settled, in which case the module-level placeholder is still
+        // in the box and encodes bare `baseUrl`, sending a scan to the portal
+        // front page. Re-rendering would not help, because generateQRCode()
+        // would hang on the same await; see scheduleQrRetry, still not
+        // ported (lines 40-46). Measured: with a getPropertyValue that never
+        // calls back, the two QR bitmaps differ.
+        showRegistrationScreen();
       }
 
       if (data.message) {
