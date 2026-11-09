@@ -12,7 +12,6 @@ html {
   overflow: hidden;
 }
 
-
 .media-container {
   position: fixed;
   inset: 0;
@@ -55,6 +54,50 @@ html {
   width: 100%;
   object-fit: cover;
   filter: blur(10px);
+}
+
+/* AVPlay draws BEHIND the web page, the opposite of an HTML5 <video>, which
+   punches a hole in the graphics plane and sits in front. So while a clip is
+   on the video plane every opaque layer over it has to get out of the way --
+   starting with the page's own background colour, which would otherwise hide
+   the video completely and show a dark grey screen that looks like a fault.
+
+   Only while a clip is actually playing. With nothing on the plane a
+   transparent page shows whatever the panel last had, so the colour comes
+   straight back for stills and for the pairing screen. */
+html.avplay-video,
+html.avplay-video body {
+  background-color: transparent;
+}
+
+/* The surface AVPlay composites against. Taken OUT of the flow deliberately:
+   .media-container is a flex row, and an <object> is a replaced element with
+   an intrinsic 300x150 box, so in the flow it asks for 300px of the row and
+   flex-shrinks #campaign-container to make room. .media-player is a fixed
+   100vw inside that, so it would overflow its own parent and the absolutely
+   positioned slide inside it would be laid out against a box whose position
+   came from flex distribution. That is the same class of fault as the
+   bottom-right slide on a QH43C in 2026-09-04, which the comment on
+   `.media-player video` above records.
+
+   The probe put its <object> elements directly in <body>, outside every flex
+   container, and that is the only arrangement its 482 seams measured. This
+   rule does not reproduce that arrangement -- it reproduces the property that
+   matters, which is not taking part in the flex row.
+
+   One pixel rather than `inset: 0`: the video's size and position come from
+   setDisplayRect, never from this box, so the element needs no area at all.
+   The probe's was 300x150 (the intrinsic size of a replaced element) and
+   showed no artefact, which is evidence for a small box and not for a
+   full-screen one. If this element ever paints anything of its own, a pixel
+   in the corner is the whole blast radius. */
+#av-player {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  z-index: 0;
 }
 
 /* The activation view, the debug panel and the reload modal are styled by

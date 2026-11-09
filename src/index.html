@@ -65,9 +65,9 @@
          fallback on the line above, and flex spacing uses margins, not gap -
          which is what makes it usable here at all. Keep it a copy: edit it in
          DigmiMarketing and copy it over, or the two screens drift apart. -->
-    <link type="text/css" href="css/brand.css?v=1.0.11" rel="stylesheet" />
-    <link type="text/css" href="css/style.css?v=1.0.11" rel="stylesheet" />
-    <script src="js/brand.js?v=1.0.11"></script>
+    <link type="text/css" href="css/brand.css?v=1.0.13" rel="stylesheet" />
+    <link type="text/css" href="css/style.css?v=1.0.13" rel="stylesheet" />
+    <script src="js/brand.js?v=1.0.13"></script>
 </head>
 
 <body>
@@ -270,7 +270,17 @@
     <!-- Untouched: the customer's campaign player. -->
     <div class="media-container">
         <div id="campaign-container"></div>
+        <!-- The surface AVPlay composites its video plane against. Samsung's
+             first step in Playing Media is to create it, and the note under
+             setDisplayRect ties the rect to this element.
+
+             Without it open/prepare/play can all answer OK and nothing is
+             drawn — every clip a black screen, with no error to find and
+             dlogutil silent on this panel. js/avplay.js refuses to start
+             without it for exactly that reason. -->
+        <object id="av-player" type="application/avplayer"></object>
     </div>
+    <script src="js/avplay.js"></script>
     <script src="js/keyTizen.js"></script>
     <script src="js/main.js"></script>
 </body>

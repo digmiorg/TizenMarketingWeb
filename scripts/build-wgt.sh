@@ -106,6 +106,13 @@ find "$STAGE_DIR" -mindepth 1 \( -name '.*' -o -name Build -o -name Debug \) \
 # nested tizen5.wgt, so a stray package inside the source tree is not
 # hypothetical here. A .wgt inside a .wgt is dead weight that gets signed.
 find "$STAGE_DIR" -name '*.wgt' -delete
+
+# Tests live beside the code they test, which is the right place for them and
+# the wrong place to leave them at packaging time: they are CommonJS, they
+# `require()` modules the panel has no loader for, and they would be signed and
+# shipped to every screen. Caught by reading the staged file list after
+# avplay.test.js appeared in it.
+find "$STAGE_DIR" -name '*.test.js' -delete
 rm -f "$STAGE_DIR/author-signature.xml" "$STAGE_DIR/signature1.xml"
 
 [ -f "$STAGE_DIR/config.xml" ] || die "config.xml missing from the staged package"

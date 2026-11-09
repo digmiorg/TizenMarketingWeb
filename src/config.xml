@@ -19,7 +19,7 @@
   reports, and that is a site visit per screen. The store build rewrites the
   id in a staged copy and never touches an installed sideload.
 -->
-<widget xmlns:tizen="http://tizen.org/ns/widgets" xmlns="http://www.w3.org/ns/widgets" id="https://portal.digmi.eu" version="1.0.12" height="1920" width="1080" viewmodes="fullscreen">
+<widget xmlns:tizen="http://tizen.org/ns/widgets" xmlns="http://www.w3.org/ns/widgets" id="https://portal.digmi.eu" version="1.0.13" height="1920" width="1080" viewmodes="fullscreen">
     <access origin="*" subdomains="true"></access>
     <!-- 5.0, matching the package Seller Office accepted. This file said 4.0
          until 2026-11-09, on the reasoning that a lower value admits more
@@ -64,6 +64,33 @@
     <!-- Required by tizen.tvinputdevice.registerKey(), which src/js/main.js
          calls so that INFO reaches the keydown handler at all. -->
     <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
+    <!-- Declared for tizen.tvaudiocontrol, which js/avplay.js uses to play
+         silently. The <video> element it replaced carried `muted`, scoped to
+         the element; AVPlay has no equivalent, and setSelectTrack chooses
+         BETWEEN audio tracks rather than none. Without a working mute the
+         screen plays its adverts OUT LOUD in the customer's salon.
+
+         ⚠️ WHETHER THIS LINE IS NEEDED IS NOT MEASURED, and the
+         documentation argues it is not: Samsung's TVAudioControl reference
+         marks the SecurityError these methods raise without the privilege as
+         "deprecated since Tizen 5.0", and marks the privilege itself (public
+         level) deprecated since 5.0. This widget declares
+         required_version="5.0" and the model groups it is served to run
+         Tizen 8.0, so on every panel it can reach that error path is
+         abolished and the call most likely works without this line.
+
+         It is kept because nobody has held a clip with a soundtrack against
+         the panel's speaker with the line removed, and an audible salon is a
+         worse outcome than an extra privilege.
+
+         ⚠️ It is also the FIRST privilege this package declares that the
+         accepted 1.0.11 package does not — the rest of the list was kept
+         deliberately diff-identical to the package that passed the Seller
+         Office pre-test. The ten-minute experiment that settles it: sideload
+         a build without this line and listen. Mute still works → delete the
+         line and the diff goes away. Mute stops working → keep it and
+         replace this comment with the measurement and its date. -->
+    <tizen:privilege name="http://tizen.org/privilege/tv.audio"/>
     <tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
     <tizen:privilege name="http://tizen.org/privilege/filesystem.read"/>
     <tizen:privilege name="http://tizen.org/privilege/filesystem.write"/>

@@ -186,6 +186,10 @@ cp -R "$SRC_DIR"/. "$STAGE_DIR"/
 find "$STAGE_DIR" -mindepth 1 \( -name '.*' -o -name Build -o -name Debug \) \
     -prune -exec rm -rf {} +
 find "$STAGE_DIR" -name '*.wgt' -delete
+# Tests sit beside the code they test. They are CommonJS, the panel has no
+# loader for them, and in this channel they would travel all the way into a
+# Samsung store listing. Same strip as build-wgt.sh.
+find "$STAGE_DIR" -name '*.test.js' -delete
 rm -f "$STAGE_DIR/author-signature.xml" "$STAGE_DIR/signature1.xml"
 
 [ -f "$STAGE_DIR/config.xml" ] || die "config.xml missing from the staged package"
