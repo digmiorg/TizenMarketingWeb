@@ -991,7 +991,15 @@ function checkDevice(uuid) {
   // and clearInterval(undefined) is a no-op. It matters more now than it looks:
   // the chain no longer ends when a campaign starts, so a second checkDevice()
   // would poll forever alongside the first and this guard would not stop it.
-  // Nothing calls checkDevice() twice today (one call site, in window.onload).
+  // Nothing calls checkDevice() twice today, but NOT because there is only one
+  // call site - there are two. window.onload calls it, and so does
+  // generateQRCode() when `localStorage.getItem('myUUID')` is falsy. The second
+  // is unreachable in practice for a different reason: getUUID() writes
+  // `myUUID` to localStorage before it returns, and window.onload awaits it
+  // before calling generateQRCode(), so by the time that read happens the key
+  // is set. Reorder window.onload and the second call becomes live - two
+  // chains polling forever, which this guard cannot stop. The conclusion is
+  // sound; the reason it used to give was not.
   if (checkInterval) {
     clearInterval(checkInterval);
   }
