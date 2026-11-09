@@ -450,8 +450,8 @@ function hideRegistrationScreen() {
  *
  * Hiding the container matters as much as showing the view: media from a
  * pairing that no longer exists would otherwise keep playing behind the
- * activation screen. The content poll that `displayMediaContent` installed
- * does keep running - it predates this function and is left alone here.
+ * activation screen - and the rotation chain has to be stopped as well as
+ * hidden, or it keeps rendering and keeps polling for a pairing that is gone.
  */
 function showRegistrationScreen() {
   const screen = document.getElementById('content-reg');
@@ -462,6 +462,36 @@ function showRegistrationScreen() {
   const campaignContainer = document.getElementById('campaign-container');
   if (campaignContainer) {
     campaignContainer.style.display = 'none';
+  }
+
+  // Stop the playlist, don't just cover it. displayMediaContent() puts a timer
+  // in `window.rotationInterval` whose every tick re-renders the current item
+  // and, at the end of a loop, calls checkDeviceDataChanges() against
+  // /api/v1/devices/{uuid}. Behind a hidden container that is rendering and
+  // traffic for a pairing that no longer exists. Each tick clears the handle
+  // and reschedules itself, so clearing it here breaks the chain.
+  //
+  // Documented as found, not as intended: a tick already awaiting
+  // checkDeviceDataChanges() when this runs can still reach its
+  // startRotationTimer() and start a new chain. The next pairing poll - 30 s
+  // at the backoff cap - comes back through here and takes that one down too.
+  if (window.rotationInterval) {
+    clearInterval(window.rotationInterval);
+    window.rotationInterval = null;
+  }
+
+  // And pause whatever frame the rotation was left on. The elements stay in
+  // the hidden container on purpose - fetchDeviceMedia() renders the cache
+  // before it fetches, so a re-pairing rebuilds them either way - but a
+  // `display: none` ancestor is not a promise that the decoder stops. Whether
+  // it does is per-browser and per-platform and is NOT measured on Tizen, so
+  // this says so explicitly instead of relying on it: an unpaired panel can
+  // sit like this for days.
+  if (campaignContainer) {
+    const videos = campaignContainer.querySelectorAll('video');
+    for (let i = 0; i < videos.length; i++) {
+      videos[i].pause();
+    }
   }
 }
 
@@ -745,6 +775,10 @@ function displayMediaContent(data) {
  */
 function checkDevice(uuid) {
   let attempt = 0;
+  // Set once a non-empty playlist is on screen. The poll keeps running after
+  // that - see the branch that sets it - but must not fetch the playlist
+  // again, or every poll would re-render and restart the campaign from item 1.
+  let playing = false;
   // Was `MAX_ATTEMPTS = 300` with an uncapped `attempt * 1000` backoff: the
   // interval grew without bound and the client stopped asking entirely after
   // ~12.5 h. A screen that had been parked on the QR page could not notice its
@@ -816,14 +850,30 @@ function checkDevice(uuid) {
         // would hang on the same await; see scheduleQrRetry, still not
         // ported (lines 40-46). Measured: with a getPropertyValue that never
         // calls back, the two QR bitmaps differ.
+        // Whatever was playing is not this device's content any more, so let
+        // a later poll fetch a playlist again if the portal re-pairs it.
+        playing = false;
+
         showRegistrationScreen();
       }
 
+      // Unguarded on purpose, now that this poll outlives the campaign's
+      // start: it keeps a live pairing indicator in the panel on a playing
+      // screen, where there is nothing to lose. fetchDeviceMedia() does write
+      // `Connected to {location}` there, but displayMediaContent() calls
+      // showStatus('') immediately afterwards and showStatus writes BOTH the
+      // status line and this field - so on a playing screen the panel is
+      // empty today. Measured: `( 👍 ) Device registered` replaces an empty
+      // string, not a location. That wipe is its own bug, tracked separately;
+      // when it is fixed, revisit whether this write should yield to it.
       if (data.message) {
         document.getElementById('checkdevice-response').textContent =
           (data.device_exists ? '( 👍 ) ' : '( 👎 ) ') + data.message;
       }
-      if (data.device_exists) {
+      // `!playing`: while a campaign is on screen this poll is only here to
+      // notice an unpairing. Fetching the playlist again would re-render it and
+      // restart it from the first item on every poll.
+      if (data.device_exists && !playing) {
         // Start fetching and displaying media
         const media = await fetchDeviceMedia(uuid);
 
@@ -852,23 +902,44 @@ function checkDevice(uuid) {
             // customer's screen, on top of their campaign, until someone
             // power-cycles the panel.
             showStatus('');
-            // Vestigial: `checkInterval` is declared and never assigned -
-            // the backoff is a setTimeout chain, not an interval. Left in
-            // place rather than removed in this commit, which is about the
-            // pairing screen; clearInterval(undefined) is a no-op. The
-            // `return` is what actually stops the polling.
-            clearInterval(checkInterval);
 
-            return;
+            // Keep asking whether this screen is still paired. This used to
+            // `return`, ending the backoff chain for good, and that is why an
+            // unpairing was invisible to a playing screen: the only poll left
+            // alive was checkDeviceDataChanges(), which asks what to play, not
+            // whether this device still exists. showRegistrationScreen() was
+            // unreachable in precisely the state a salon would call about.
+            //
+            // The cost is one unauthenticated GET per screen per 30 s at the
+            // backoff cap. verify-device is throttled 60/min per deviceId in
+            // Laravel and sits on prod nginx's 30 r/s zone per IP, so a
+            // nine-panel store behind one NAT address contributes 0.3 r/s.
+            playing = true;
+          } else {
+            // `else`, now that the branch above no longer returns. Measured
+            // without it: a screen playing a two-item campaign had "inget
+            // innehåll är planerat för den här skärmen än" written across it
+            // on the first poll - the exact sentence that says the opposite of
+            // what the screen is doing, over a paying customer's content.
+            //
+            // Clear whatever an earlier playlist left rendered.
+            // fetchDeviceMedia() renders the cache before it fetches, and
+            // displayMediaContent() does nothing at all for an empty payload,
+            // so a screen whose campaign was unplanned kept the old campaign's
+            // last frame with the chip below contradicting it. Measured: the
+            // container `block` with 2 stale children under "inget innehåll är
+            // planerat". checkDeviceDataChanges() already clears for this same
+            // case; the poll that lands here did not.
+            campaignContainer.innerHTML = '';
+
+            // Paired, but nothing planned yet. Keep asking: the media poll is
+            // set up inside displayMediaContent(), which only runs when there
+            // is media, so a screen that paired into an empty playlist had
+            // nothing watching for content to appear. That is the state
+            // Hair & Co's TV sat in.
+            showStatus('Ansluten till ' + (media.location || 'DIGMI') +
+              ' — inget innehåll är planerat för den här skärmen än.');
           }
-
-          // Paired, but nothing planned yet. Keep asking: the media poll is set
-          // up inside displayMediaContent(), which only runs when there is
-          // media, so a screen that paired into an empty playlist had nothing
-          // watching for content to appear. That is the state Hair & Co's TV
-          // sat in.
-          showStatus('Ansluten till ' + (media.location || 'DIGMI') +
-            ' — inget innehåll är planerat för den här skärmen än.');
         }
       }
     } catch (error) {
