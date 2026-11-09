@@ -25,6 +25,7 @@ Everything is on `window.__t`:
 | field | meaning |
 |---|---|
 | `paired` | what `verify-device` answers in `device_exists` |
+| `reason` | what the unpaired answer carries as `reason`. `null` leaves the key out entirely, which is the pre-#1649 payload |
 | `fail` | `true` makes `verify-device` answer **429** with a JSON body |
 | `media` | the `campaign_media` array `/api/v1/devices/{uuid}` returns |
 | `verify`, `devices` | request counters per endpoint |
@@ -58,6 +59,31 @@ Each one is a bug that reached a customer or was caught in review.
    content again — a flag instead of a derived state left it silent forever,
    which is the Hair & Co state reached through its commonest door.
 6. **`media = [...]` again.** Picked up with no reload.
+
+6b. **`reason` through its values, with `paired = false`.** The activation view
+   has two faces. The QR code belongs to `unknown`, to no `reason` at all, and
+   to an empty string — `pairingWouldHelp()` treats anything that is not a
+   definite other reason as "nobody has paired this", because a portal from
+   before the field sends nothing and the QR was the whole behaviour. Every
+   other non-empty *string* hides it: the branch is
+   `typeof reason !== 'string'`, so a number, a boolean, `{}` or `[]` all show
+   the QR code.
+
+   Measured from here rather than by calling the function, which matters:
+   `__t.reason` goes through `JSON.stringify`, so only values that survive
+   that as non-strings can be driven through the probe. A boxed
+   `new String('switched-off')` is the one trap — JSON flattens it to a
+   primitive, so the probe hides the QR where a direct call would show it.
+
+   Check the COMPUTED font size of `#reg-lead`, not just which face is up.
+   Removing the QR column from the landscape grid collapses `.digmi-copy` to
+   ~60 px and drives the title to 7.5 px and the lead to 2.5 px, because
+   `.digmi-copy` is a size container with no intrinsic width. That renders the
+   message unreadable while every check on `display` and `textContent` still
+   passes. Measured at 1920x1080; portrait is unaffected, so run landscape.
+
+   Worth a pass each: `switched-off` and `suspended` (QR hidden), an empty
+   string and `null` (QR shown), and the way back to `unknown`.
 
 7. **The in-flight race.** Unpair while a `/api/v1/devices` request is in the
    air, then re-pair, and let the old request resolve. A stale rotation
