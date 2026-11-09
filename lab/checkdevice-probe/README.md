@@ -67,6 +67,17 @@ Each one is a bug that reached a customer or was caught in review.
    `mediaLength` still reads 2. Watch `currentMediaIndex` over several slide
    durations instead — if it stops advancing, the chain is dead.
 
+7b. **The same race, through the change branch.** Phase 7 only drives
+   `checkDeviceDataChanges()`'s "nothing changed" path. Its *change* path is a
+   separate hazard — it clears and nulls the rotation handle 27 lines above
+   where it re-renders — and it is the one that runs in production:
+   `MediaStorage.TTL` is 10 s while real slides are 10 s+, so the cache has
+   almost always expired by the time the request resolves. To reach it, clear
+   `localStorage` while the request is held, then release. A stale resolver
+   must not touch the live chain.
+
 Image requests 404 in this harness; those console errors are expected. Any
-other console error is not — and phase 7 shows that the absence of one proves
-nothing.
+other console error is not — and phases 7 and 7b show that the absence of one
+proves nothing. Neither does a green phase 7: these two differ only in whether
+the cache is warm, and the first version of the guard passed 7 while leaving
+7b broken.

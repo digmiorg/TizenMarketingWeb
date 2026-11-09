@@ -693,6 +693,35 @@ function displayMediaContent(data) {
               return response.json();
             })
             .then(currentData => {
+              // The NINTH continuation, and the last one. This handler runs
+              // after a network round trip too, and its change branch is its
+              // own hazard: it clears and nulls `window.rotationInterval`
+              // (which by then holds the CURRENT generation's handle) and then
+              // calls window.displayMedia(0) + startRotationTimer() out of a
+              // stale closure, where the guard returns early. The pattern
+              // continueRotation() replaced is not present here -- the clear
+              // sits 27 lines above the render -- which is exactly why
+              // searching for that pattern missed it.
+              //
+              // `return true`, not false: false means "nothing changed, carry
+              // on rotating" to the caller, and a stale generation must not say
+              // that about a playlist it no longer owns.
+              //
+              // Measured before this guard: an unpairing while this request was
+              // in flight, with the cache expired so the change branch ran,
+              // left `rotationInterval` null on a live generation and stalled
+              // the screen for 8.6 s - and up to the 30 s backoff cap on a
+              // screen that had been paired for hours - before the
+              // rotation-liveness gate re-fetched and rebuilt the chain. Bounded
+              // and self-healing, because of that gate, but the campaign also
+              // jumped back to slide 1. And this branch is the NORMAL case in
+              // production, not the rare one: MediaStorage.TTL is 10 s while
+              // real slides are 10 s+, so the cache has almost always expired
+              // by the time this resolves.
+              if (!isCurrentGeneration()) {
+                return true;
+              }
+
               // Load cached data
               const cachedData = MediaStorage.load(uuid);
 
@@ -784,18 +813,30 @@ function displayMediaContent(data) {
         }
 
         window.displayMedia(window.currentMediaIndex);
+
+        // Null it, not just clear it. If startRotationTimer() returns without
+        // building a chain - its own generation guard, or a throw - the handle
+        // would otherwise keep a cleared timer id, and a cleared id is still a
+        // number, so playlistIsOnScreen() would report a live playlist and the
+        // self-healing re-fetch would never happen. Nulling makes that healing
+        // an invariant instead of a coincidence. Same argument as the key
+        // handler.
         clearInterval(window.rotationInterval);
+        window.rotationInterval = null;
+
         startRotationTimer();
       };
 
       // Set up rotation interval
       function startRotationTimer() {
-        // Second line of defence, not the only one. continueRotation() above
-        // is what actually guards the continuations; this catches a direct
-        // call from a stale generation (the `loadedmetadata` path) and stops
-        // it building a chain. An earlier comment here claimed this single
-        // check was sufficient for every continuation. It was not -- see
-        // continueRotation().
+        // Second line of defence, not the only one. continueRotation() guards
+        // the rotation continuations and checkDeviceDataChanges() guards its
+        // own resolver; this catches a direct call from a stale generation --
+        // the `loadedmetadata` path, and the change branch inside
+        // checkDeviceDataChanges() -- and stops it building a chain. Catching
+        // that second one is why a missed guard there stalled the screen
+        // rather than freezing it for good. An earlier comment here claimed
+        // this single check was sufficient for every continuation; it was not.
         if (!isCurrentGeneration()) {
           return;
         }
@@ -855,8 +896,11 @@ function displayMediaContent(data) {
                             continueRotation();
                           }
                         })
-                        .catch(error => {
-                          // Continue with normal rotation despite error
+                        .catch(() => {
+                          // Continue with normal rotation despite the error.
+                          // Deliberately swallowed and unnamed: the only thing
+                          // this level can do about a failed content poll is
+                          // keep showing what is already on screen.
                           continueRotation();
                         });
                     } else {
@@ -898,8 +942,9 @@ function displayMediaContent(data) {
                   continueRotation();
                 }
               })
-              .catch(error => {
-                // Continue with normal rotation despite error
+              .catch(() => {
+                // Continue with normal rotation despite the error.
+                // Deliberately swallowed and unnamed - see the sibling handler.
                 continueRotation();
               });
           } else {
