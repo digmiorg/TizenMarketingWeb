@@ -2,7 +2,12 @@
   try { localStorage.clear(); } catch (e) {}
   window.__t = {
     paired: true, verify: 0, devices: 0, fail: false,
-    liveIntervals: 0, maxLive: 0, ticks: 0
+    liveIntervals: 0, maxLive: 0, ticks: 0,
+    // What the unpaired answer carries as `reason`. null leaves the key out
+    // entirely, which is the pre-#1649 payload - the QR code must still come
+    // up for it. Set it to 'unknown' or 'switched-off' to drive the two
+    // faces of the activation view.
+    reason: null
   };
   // Short durations so a full playlist loop (which is what calls
   // checkDeviceDataChanges) completes inside a test run.
@@ -47,9 +52,15 @@
         return Promise.resolve(new Response(JSON.stringify({ message: 'Too Many Attempts.' }),
           { status: 429, headers: { 'Content-Type': 'application/json' } }));
       }
-      var body = window.__t.paired
-        ? { device_exists: true, message: 'Device registered' }
-        : { device_exists: false, message: 'Device not registered' };
+      var body;
+      if (window.__t.paired) {
+        body = { device_exists: true, message: 'Device registered' };
+      } else {
+        body = { device_exists: false, message: 'Device not registered' };
+        if (window.__t.reason !== null) {
+          body.reason = window.__t.reason;
+        }
+      }
       return Promise.resolve(new Response(JSON.stringify(body),
         { status: 200, headers: { 'Content-Type': 'application/json' } }));
     }

@@ -88,8 +88,14 @@
             >digmi Signage</div>
         </header>
 
-        <main class="digmi-stage">
-            <div class="digmi-qr-column">
+        <main
+            class="digmi-stage"
+            id="reg-stage"
+        >
+            <div
+                class="digmi-qr-column"
+                id="reg-qr-column"
+            >
                 <!-- No step indicator and no "QR-kod 3" here. Those belong to
                      a Pi box arriving from its own onboarding, which hands the
                      page ?src=box; a panel has never seen codes 1 and 2, so
@@ -105,13 +111,32 @@
             </div>
 
             <div class="digmi-copy">
+                <!-- The three ids below are how checkDevice() swaps this view
+                     between its two faces at runtime: the pairing copy with
+                     the QR code, and the switched-off copy without it. The
+                     markup carries the pairing face, which is what a screen
+                     nobody has paired should see.
+
+                     The data-i18n attributes name the PAIRING keys, so a
+                     second applyBrandTexts() run would put the pairing text
+                     back while the QR stays hidden. Nothing calls it twice
+                     today (main.js has the single call in window.onload); if
+                     anything ever does, it has to re-run
+                     renderActivationCopy() after it. -->
                 <h1 class="digmi-title">
-                    <span data-i18n="reg.title.generic">Aktivera skärmen</span>
-                    <em data-i18n="reg.title_em.generic">med mobilen.</em>
+                    <span
+                        data-i18n="reg.title.generic"
+                        id="reg-title"
+                    >Aktivera skärmen</span>
+                    <em
+                        data-i18n="reg.title_em.generic"
+                        id="reg-title-em"
+                    >med mobilen.</em>
                 </h1>
                 <p
                     class="digmi-lead"
                     data-i18n="reg.body"
+                    id="reg-lead"
                 >Skanna med mobilens kamera eller digmi Marketing-appen. Logga in i digmi-portalen – har du inget konto
                     skapar du ett där – och lägg till skärmen. Den startar av sig själv när den är aktiverad.</p>
                 <p

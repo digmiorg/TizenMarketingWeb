@@ -533,6 +533,150 @@ function playlistIsOnScreen() {
 }
 
 /**
+ * The screen's language, re-resolved rather than remembered.
+ *
+ * window.onload resolves it from the same two inputs and keeps no copy of it.
+ * resolveLanguage() is pure, so asking again gives the same answer without
+ * adding a global.
+ *
+ * The Swedish fallback is belt-and-braces and not reached from the caller
+ * below, which has already returned if the brand layer is absent. It would
+ * take a DigmiBrand carrying `t` but not `resolveLanguage`, which the
+ * module's own export literal rules out - and `t()` falls back to the Swedish
+ * table anyway.
+ *
+ * @returns {string} One of the brand layer's language codes.
+ */
+function currentLanguage() {
+  if (!window.DigmiBrand || typeof window.DigmiBrand.resolveLanguage !== 'function') {
+    return 'sv';
+  }
+
+  return window.DigmiBrand.resolveLanguage(window.location.search, navigator.language);
+}
+
+/**
+ * Whether a QR code is the right answer to this `verify-device` reply.
+ *
+ * `device_exists: false` covers both a screen nobody has paired and one whose
+ * account the portal has switched off, and scanning a code only helps with
+ * the first. The portal now says which through `reason`
+ * (digmi-web-admin#1649), where `unknown` is the one value meaning "nobody
+ * has paired this".
+ *
+ * Anything that is not a definite other reason keeps the QR: a portal from
+ * before the field sends no `reason` at all, and the QR was the only
+ * behaviour there was. Any OTHER non-empty string hides it - not just the
+ * `switched-off` this widget can see today. It sends no bearer to
+ * verify-device (see `apiAuthorization`), so the portal withholds which
+ * switch-off it was; should that change, `suspended` and the two billing
+ * reasons arrive here instead, and a code helps with none of them.
+ *
+ * @param {unknown} reason The payload's `reason`, in whatever shape it arrived.
+ * @returns {boolean} True when the activation view should show its QR code.
+ */
+function pairingWouldHelp(reason) {
+  if (typeof reason !== 'string' || reason === '') {
+    return true;
+  }
+
+  return reason === 'unknown';
+}
+
+/**
+ * Points the activation view at either its pairing face or its switched-off
+ * face, and hides the QR code for the latter.
+ *
+ * Both faces keep the help line with the phone number and the support URL. On
+ * a switched-off screen that is the only thing on the page that leads
+ * anywhere, and it is the one thing the salon actually needs.
+ *
+ * Re-run on every poll that reaches showRegistrationScreen(), and reversible
+ * on purpose. Not because a resumed account comes back through here - that
+ * one answers `device_exists: true` and never reaches this function at all -
+ * but because a screen can be switched off and THEN deleted in the portal,
+ * which answers `unknown`. The QR has to come back for that without anyone
+ * power-cycling the panel.
+ *
+ * @param {unknown} reason The payload's `reason`, passed straight through.
+ */
+function renderActivationCopy(reason) {
+  // Without the brand layer there are no strings to swap in, and half a
+  // switch - the QR hidden with "Aktivera skärmen" still written above the
+  // gap - reads worse than today's behaviour. Leave the view as the markup
+  // has it. t() returns the KEY for anything it cannot find, so a missing
+  // layer would otherwise write `off.title` across the screen.
+  if (!window.DigmiBrand || typeof window.DigmiBrand.t !== 'function') {
+    return;
+  }
+
+  const pairing = pairingWouldHelp(reason);
+  const lang = currentLanguage();
+
+  // The `hidden` attribute, like every other toggle on this page
+  // (brand.js setHidden, the [data-box-only] pair). It beats
+  // .digmi-qr-column's `display: flex` not by luck but because brand.css
+  // carries an author rule for exactly this - `.digmi-page [hidden]`,
+  // specificity (0,2,0) against (0,1,0) - put there with a comment saying
+  // why. That makes it deterministic in the Chrome 63 the panels run, not
+  // only in a desktop browser.
+  const qrColumn = document.getElementById('reg-qr-column');
+  const stage = document.getElementById('reg-stage');
+
+  // The whole face or none of it. Hiding the column without collapsing the
+  // stage is the unreadable state measured below, and a renamed id in the
+  // markup is all it would take to arrive there silently. Returning leaves
+  // every part of the view as the markup has it, which is the pairing face:
+  // the wrong face for a switched-off screen, but a legible one, and that is
+  // the better of the two failures. Swapping only the text would read as a
+  // screen that says it shows nothing while offering a code that cannot help.
+  if (!qrColumn || !stage) {
+    return;
+  }
+
+  qrColumn.hidden = !pairing;
+
+  // Taking the QR column out of the layout is not enough on its own. In
+  // landscape brand.css gives .digmi-stage `grid-template-columns: auto
+  // minmax(0, 1fr)`, and .digmi-copy is a `container-type: inline-size`
+  // container with no intrinsic width - the trap brand.css spells out at the
+  // .digmi-copy rule. The copy then sits alone in the `auto` track, which
+  // sizes to nothing, and the `cqi` caps on .digmi-title and .digmi-lead take
+  // the text down with it. Measured at 1920x1080: the copy column 616px ->
+  // 60px, #reg-title 77.45px -> 7.51px, #reg-lead 25.86px -> 2.50px. The
+  // message this function exists to show, rendered unreadable.
+  //
+  // One track restores it, and `minmax(0, 1fr)` is the value brand.css already
+  // uses in portrait - one declaration out of that rule, not the rule: the
+  // landscape switched-off face stays left-aligned with its `margin-left:
+  // 6vmin` and does not pick up portrait's centring. Set from here rather
+  // than added to brand.css because
+  // that file is byte-identical to DigmiMarketing's copy (verified by
+  // sha256), and a rule added on one side only would drift the two screens
+  // apart.
+  stage.style.gridTemplateColumns = pairing ? '' : 'minmax(0, 1fr)';
+
+  setBrandText('reg-title', lang, pairing ? 'reg.title.generic' : 'off.title');
+  setBrandText('reg-title-em', lang, pairing ? 'reg.title_em.generic' : 'off.title_em');
+  setBrandText('reg-lead', lang, pairing ? 'reg.body' : 'off.body');
+}
+
+/**
+ * Writes one translated string into one element by id, and does nothing at all
+ * if that element is not on the page.
+ *
+ * @param {string} id The element's id.
+ * @param {string} lang The language code to translate into.
+ * @param {string} key The brand layer's message key.
+ */
+function setBrandText(id, lang, key) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.textContent = window.DigmiBrand.t(lang, key);
+  }
+}
+
+/**
  * Brings the pre-pairing screen back and takes the campaign container down
  * with it.
  *
@@ -545,7 +689,7 @@ function playlistIsOnScreen() {
  * leaves the rotation chain rendering and still polling /api/v1/devices for a
  * pairing that is gone.
  */
-function showRegistrationScreen() {
+function showRegistrationScreen(reason) {
   const screen = document.getElementById('content-reg');
   if (screen) {
     screen.style.display = '';
@@ -555,6 +699,16 @@ function showRegistrationScreen() {
   if (campaignContainer) {
     campaignContainer.style.display = 'none';
   }
+
+  // No ordering subtlety here - this whole function is one synchronous block,
+  // so nothing is painted between the display reset above and this call.
+  //
+  // What DOES show the wrong face is a cold start or a RETURN/EXIT reload:
+  // the markup carries the pairing face, so a switched-off screen shows the
+  // QR code until the first verify-device answer lands, and keeps showing it
+  // for as long as that answer does not come. That is inherent - the screen
+  // cannot know before it asks.
+  renderActivationCopy(reason);
 
   stopPlayback();
 }
@@ -1082,7 +1236,7 @@ function checkDevice(uuid) {
         // because generateQRCode() would hang on the same await; see
         // scheduleQrRetry, still not ported (lines 40-46). Measured: with a
         // getPropertyValue that never calls back, the two QR bitmaps differ.
-        showRegistrationScreen();
+        showRegistrationScreen(data.reason);
       }
 
       // Unguarded on purpose, now that this poll outlives the campaign's
@@ -1106,8 +1260,13 @@ function checkDevice(uuid) {
       }
 
       if (data.message) {
+        // `reason` appended because `message` is byte-identical for all of
+        // them - `deviceMissing()` serves one sentence - so without it
+        // someone holding the remote in front of a screen showing the wrong
+        // face cannot see what the portal actually sent.
         document.getElementById('checkdevice-response').textContent =
-          (data.device_exists ? '( 👍 ) ' : '( 👎 ) ') + data.message;
+          (data.device_exists ? '( 👍 ) ' : '( 👎 ) ') + data.message +
+          (data.reason ? ' [' + data.reason + ']' : '');
       }
       // `!playlistIsOnScreen()`: while a campaign is up, this poll is only
       // here to notice an unpairing. Fetching the playlist again would
