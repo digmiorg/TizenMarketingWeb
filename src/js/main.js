@@ -442,6 +442,75 @@ function hideRegistrationScreen() {
 }
 
 /**
+ * Tears the playlist down and forgets it: the timers, the rendered nodes, the
+ * globals the remote reads, and the generation every rotation chain is stamped
+ * with.
+ *
+ * One function for all of it because the pieces drifted apart when they were
+ * separate. `checkDeviceDataChanges()` cleared `mediaPlayer.innerHTML` and the
+ * interval but left `window.displayMedia` and `window.mediaLength` pointing at
+ * a playlist that no longer existed, so LEFT/RIGHT on the remote still wrote
+ * the previous campaign's name and "(1/2)" into #media-playing-info on a screen
+ * playing nothing -- the debug panel lying to whoever is trying to diagnose the
+ * screen.
+ *
+ * Bumping the generation is what actually stops a chain. Clearing the handle is
+ * not enough on its own: `startRotationTimer()` registers a `loadedmetadata`
+ * listener when a video's duration is not known yet, and that listener builds a
+ * fresh interval when it fires -- after this ran, and pause() does not stop
+ * metadata loading. Every tick, every continuation and that listener check
+ * their captured generation against this counter and return if it moved, so
+ * nothing from a torn-down playlist can resurrect itself or outlive it.
+ */
+function stopPlayback() {
+  window.rotationGeneration = (window.rotationGeneration || 0) + 1;
+
+  if (window.rotationInterval) {
+    clearInterval(window.rotationInterval);
+  }
+  window.rotationInterval = null;
+
+  // `displayMedia` null, not just a stale closure: the remote's LEFT/RIGHT
+  // handler guards on `window.displayMedia` being truthy, so this is what
+  // makes those keys inert instead of rendering into a detached node.
+  window.displayMedia = null;
+  window.mediaLength = 0;
+  window.currentMediaIndex = 0;
+
+  const campaignContainer = document.getElementById('campaign-container');
+  if (campaignContainer) {
+    // Pause before detaching. Whether a `display: none` ancestor or a removed
+    // node stops the decoder is per-platform and NOT measured on Tizen, so
+    // this does not rely on either: an unpaired panel can sit for days.
+    const videos = campaignContainer.querySelectorAll('video');
+    for (let i = 0; i < videos.length; i++) {
+      videos[i].pause();
+    }
+    campaignContainer.innerHTML = '';
+  }
+
+  const playingInfo = document.getElementById('media-playing-info');
+  if (playingInfo) {
+    playingInfo.textContent = '';
+  }
+}
+
+/**
+ * Whether a non-empty playlist is on screen right now.
+ *
+ * Derived from `window.mediaLength` rather than kept as its own flag, because a
+ * flag desynced: `checkDeviceDataChanges()` empties the playlist when a
+ * campaign is unplanned and sets `mediaLength` to 0, but it cannot reach a
+ * local in checkDevice -- so a flag stayed true, the media branch stayed
+ * skipped, and nothing ever looked for content again. That is the Hair & Co
+ * state reached through the commonest door of all: a campaign unplanned on a
+ * screen that was already playing it.
+ */
+function playlistIsOnScreen() {
+  return typeof window.mediaLength === 'number' && window.mediaLength > 0;
+}
+
+/**
  * Brings the pre-pairing screen back and takes the campaign container down
  * with it.
  *
@@ -450,8 +519,9 @@ function hideRegistrationScreen() {
  *
  * Hiding the container matters as much as showing the view: media from a
  * pairing that no longer exists would otherwise keep playing behind the
- * activation screen - and the rotation chain has to be stopped as well as
- * hidden, or it keeps rendering and keeps polling for a pairing that is gone.
+ * activation screen. stopPlayback() is what makes that true - hiding alone
+ * leaves the rotation chain rendering and still polling /api/v1/devices for a
+ * pairing that is gone.
  */
 function showRegistrationScreen() {
   const screen = document.getElementById('content-reg');
@@ -464,35 +534,7 @@ function showRegistrationScreen() {
     campaignContainer.style.display = 'none';
   }
 
-  // Stop the playlist, don't just cover it. displayMediaContent() puts a timer
-  // in `window.rotationInterval` whose every tick re-renders the current item
-  // and, at the end of a loop, calls checkDeviceDataChanges() against
-  // /api/v1/devices/{uuid}. Behind a hidden container that is rendering and
-  // traffic for a pairing that no longer exists. Each tick clears the handle
-  // and reschedules itself, so clearing it here breaks the chain.
-  //
-  // Documented as found, not as intended: a tick already awaiting
-  // checkDeviceDataChanges() when this runs can still reach its
-  // startRotationTimer() and start a new chain. The next pairing poll - 30 s
-  // at the backoff cap - comes back through here and takes that one down too.
-  if (window.rotationInterval) {
-    clearInterval(window.rotationInterval);
-    window.rotationInterval = null;
-  }
-
-  // And pause whatever frame the rotation was left on. The elements stay in
-  // the hidden container on purpose - fetchDeviceMedia() renders the cache
-  // before it fetches, so a re-pairing rebuilds them either way - but a
-  // `display: none` ancestor is not a promise that the decoder stops. Whether
-  // it does is per-browser and per-platform and is NOT measured on Tizen, so
-  // this says so explicitly instead of relying on it: an unpaired panel can
-  // sit like this for days.
-  if (campaignContainer) {
-    const videos = campaignContainer.querySelectorAll('video');
-    for (let i = 0; i < videos.length; i++) {
-      videos[i].pause();
-    }
-  }
+  stopPlayback();
 }
 
 /**
@@ -546,7 +588,27 @@ function displayMediaContent(data) {
       // Make these available globally for keyboard navigation
       window.currentMediaIndex = 0;
       window.mediaLength = data.campaign_media.length;
+
+      // CLEAR before dropping the handle. This used to assign null straight
+      // over a live interval id, which made that chain unreachable forever:
+      // nothing else holds the handle, so every later clearInterval - here, in
+      // checkDeviceDataChanges(), in stopPlayback() - looked at the global and
+      // saw only the newest chain. Two renders in a row therefore left an
+      // immortal interval behind, ticking against the previous playlist's
+      // length while window.displayMedia pointed at the new, shorter one:
+      // campaign_media[4] of a 2-item playlist is undefined, and displayMedia
+      // empties the stage BEFORE it reads `.video`, so the throw landed after
+      // the screen went black and before any clearInterval. One orphan per
+      // unpair/re-pair cycle.
+      clearInterval(window.rotationInterval);
       window.rotationInterval = null;
+
+      // Stamp this playlist. Every tick, continuation and `loadedmetadata`
+      // listener below captures it and bails if the counter has moved on, so a
+      // torn-down playlist cannot rebuild its own interval behind the live one.
+      window.rotationGeneration = (window.rotationGeneration || 0) + 1;
+      const generation = window.rotationGeneration;
+      const isCurrentGeneration = () => generation === window.rotationGeneration;
 
       // Make displayMedia available globally
       window.displayMedia = function(index) {
@@ -639,7 +701,17 @@ function displayMediaContent(data) {
                   // campaign_media[0] without a guard and threw a TypeError
                   // here, which killed the very poll that would have picked the
                   // next campaign up.
-                  mediaPlayer.innerHTML = '';
+                  //
+                  // stopPlayback() rather than `mediaPlayer.innerHTML = ''`:
+                  // emptying that node left `window.displayMedia`,
+                  // `window.mediaLength` and #media-playing-info pointing at a
+                  // playlist that no longer existed, so LEFT/RIGHT on the
+                  // remote still wrote the gone campaign's name and "(2/2)"
+                  // onto a screen playing nothing. Measured: that stale line
+                  // survived here until checkDevice's next poll cleaned it up,
+                  // which at the backoff cap is up to 30 s of a debug panel
+                  // contradicting the screen.
+                  stopPlayback();
                   showStatus('Ansluten till ' + (data.location || 'DIGMI') +
                     ' — inget innehåll är planerat för den här skärmen än.');
 
@@ -660,6 +732,13 @@ function displayMediaContent(data) {
 
       // Set up rotation interval
       function startRotationTimer() {
+        // Every continuation that keeps the chain alive comes back through
+        // here, so this one check is what stops a stale generation from
+        // restarting itself.
+        if (!isCurrentGeneration()) {
+          return;
+        }
+
         const currentMedia = data.campaign_media[window.currentMediaIndex];
         let duration = currentMedia.duration || 10000;
 
@@ -674,6 +753,17 @@ function displayMediaContent(data) {
             } else {
               // Wait for metadata to load to get duration
               videoElement.addEventListener('loadedmetadata', function onMetadataLoaded() {
+                // The generation check has to come first. The same-item guard
+                // below compares against this closure's own `currentMedia`, so
+                // it is still TRUE after a teardown - index untouched, same
+                // closure - and this listener would then build a brand new
+                // interval out of a playlist that is gone. pause() does not
+                // cancel metadata loading, so on a slow salon WLAN this is the
+                // likeliest resurrection path of the lot.
+                if (!isCurrentGeneration()) {
+                  return;
+                }
+
                 // Only update if we're still on the same media item
                 if (data.campaign_media[window.currentMediaIndex] === currentMedia) {
                   clearInterval(window.rotationInterval);
@@ -681,6 +771,14 @@ function displayMediaContent(data) {
 
                   // Set new interval with correct duration
                   window.rotationInterval = setInterval(() => {
+                    // A tick that fires after a teardown must not render, must not
+                    // poll, and must not reschedule. Returning WITHOUT clearing is
+                    // deliberate: stopPlayback() already cleared the handle, and
+                    // clearing here would reach for whatever interval is current now.
+                    if (!isCurrentGeneration()) {
+                      return;
+                    }
+
                     // Check if we're at the last media item before incrementing the index
                     const isLastMediaItem = window.currentMediaIndex === data.campaign_media.length - 1;
 
@@ -722,6 +820,14 @@ function displayMediaContent(data) {
 
         clearInterval(window.rotationInterval);
         window.rotationInterval = setInterval(() => {
+          // A tick that fires after a teardown must not render, must not
+          // poll, and must not reschedule. Returning WITHOUT clearing is
+          // deliberate: stopPlayback() already cleared the handle, and
+          // clearing here would reach for whatever interval is current now.
+          if (!isCurrentGeneration()) {
+            return;
+          }
+
           // Check if we're at the last media item before incrementing the index
           const isLastMediaItem = window.currentMediaIndex === data.campaign_media.length - 1;
 
@@ -775,10 +881,6 @@ function displayMediaContent(data) {
  */
 function checkDevice(uuid) {
   let attempt = 0;
-  // Set once a non-empty playlist is on screen. The poll keeps running after
-  // that - see the branch that sets it - but must not fetch the playlist
-  // again, or every poll would re-render and restart the campaign from item 1.
-  let playing = false;
   // Was `MAX_ATTEMPTS = 300` with an uncapped `attempt * 1000` backoff: the
   // interval grew without bound and the client stopped asking entirely after
   // ~12.5 h. A screen that had been parked on the QR page could not notice its
@@ -787,6 +889,12 @@ function checkDevice(uuid) {
   const MAX_DELAY_MS = 30000;
   const countdownElement = document.getElementById('check-countdown');
 
+  // Vestigial: `checkInterval` is declared and never assigned - the backoff is
+  // a setTimeout chain, not an interval - so this cannot de-duplicate anything,
+  // and clearInterval(undefined) is a no-op. It matters more now than it looks:
+  // the chain no longer ends when a campaign starts, so a second checkDevice()
+  // would poll forever alongside the first and this guard would not stop it.
+  // Nothing calls checkDevice() twice today (one call site, in window.onload).
   if (checkInterval) {
     clearInterval(checkInterval);
   }
@@ -850,30 +958,59 @@ function checkDevice(uuid) {
         // would hang on the same await; see scheduleQrRetry, still not
         // ported (lines 40-46). Measured: with a getPropertyValue that never
         // calls back, the two QR bitmaps differ.
-        // Whatever was playing is not this device's content any more, so let
-        // a later poll fetch a playlist again if the portal re-pairs it.
-        playing = false;
 
+        // Back to a fast poll. The backoff only ever grows, so a screen that
+        // had been paired for hours was sitting at the 30 s cap - and a salon
+        // re-pairing from the portal then stared at the QR for up to another
+        // 30 s after the portal was done. Resetting makes a re-pairing as
+        // responsive as the first one (1 s, 2 s, 3 s ...).
+        attempt = 0;
+
+        // Puts the pairing view back AND tears the playlist down - see
+        // stopPlayback(). Nothing used to do either: hideRegistrationScreen()
+        // runs the moment a screen pairs and had no counterpart, so a screen
+        // removed in the portal kept the activation view hidden for good and
+        // kept playing content it no longer had any right to.
+        //
+        // Nothing is re-rendered here. The code already in the DOM encodes
+        // this uuid and is still the right pairing URL - UNLESS
+        // getDeviceModel() never settled, in which case the module-level
+        // placeholder is still in the box and encodes bare `baseUrl`, sending
+        // a scan to the portal front page. Re-rendering would not help,
+        // because generateQRCode() would hang on the same await; see
+        // scheduleQrRetry, still not ported (lines 40-46). Measured: with a
+        // getPropertyValue that never calls back, the two QR bitmaps differ.
         showRegistrationScreen();
       }
 
       // Unguarded on purpose, now that this poll outlives the campaign's
-      // start: it keeps a live pairing indicator in the panel on a playing
-      // screen, where there is nothing to lose. fetchDeviceMedia() does write
-      // `Connected to {location}` there, but displayMediaContent() calls
-      // showStatus('') immediately afterwards and showStatus writes BOTH the
-      // status line and this field - so on a playing screen the panel is
-      // empty today. Measured: `( 👍 ) Device registered` replaces an empty
-      // string, not a location. That wipe is its own bug, tracked separately;
-      // when it is fixed, revisit whether this write should yield to it.
+      // start: it keeps a live pairing indicator in the panel, which is worth
+      // more than what it replaces. On a freshly paired screen it replaces an
+      // empty string - fetchDeviceMedia() writes `Connected to {location}`
+      // here, but displayMediaContent() then calls showStatus(''), which
+      // writes BOTH the status line and this field, so the location is gone
+      // within the same tick. Measured at initial pairing, and that wipe is
+      // its own bug, tracked separately.
+      //
+      // NOT an empty string in every case, though: checkDeviceDataChanges()
+      // writes `Connected to {location}` straight into this field whenever it
+      // picks up a content change, and does not clear it afterwards. So on a
+      // screen that has had a campaign change, this write does overwrite a
+      // location within 30 s. The field lives in `.device-info`, hidden until
+      // someone opens the panel with the remote, so the cost is a support
+      // detail rather than anything a salon sees.
       if (data.message) {
         document.getElementById('checkdevice-response').textContent =
           (data.device_exists ? '( 👍 ) ' : '( 👎 ) ') + data.message;
       }
-      // `!playing`: while a campaign is on screen this poll is only here to
-      // notice an unpairing. Fetching the playlist again would re-render it and
-      // restart it from the first item on every poll.
-      if (data.device_exists && !playing) {
+      // `!playlistIsOnScreen()`: while a campaign is up, this poll is only
+      // here to notice an unpairing. Fetching the playlist again would
+      // re-render and restart it from the first item every 30 s. Derived from
+      // window.mediaLength rather than a local flag so that a campaign
+      // unplanned mid-playback - which empties the playlist from inside
+      // checkDeviceDataChanges(), out of reach of anything in this function -
+      // puts this branch back in play instead of silencing it forever.
+      if (data.device_exists && !playlistIsOnScreen()) {
         // Start fetching and displaying media
         const media = await fetchDeviceMedia(uuid);
 
@@ -903,18 +1040,24 @@ function checkDevice(uuid) {
             // power-cycles the panel.
             showStatus('');
 
-            // Keep asking whether this screen is still paired. This used to
-            // `return`, ending the backoff chain for good, and that is why an
-            // unpairing was invisible to a playing screen: the only poll left
-            // alive was checkDeviceDataChanges(), which asks what to play, not
-            // whether this device still exists. showRegistrationScreen() was
+            // No `return` here, which is the whole point: this used to end
+            // the backoff chain for good, and that is why an unpairing was
+            // invisible to a playing screen. The only poll left alive was
+            // checkDeviceDataChanges(), which asks what to PLAY, never whether
+            // this device still exists - so showRegistrationScreen() was
             // unreachable in precisely the state a salon would call about.
+            // Falling through to the backoff keeps asking; playlistIsOnScreen()
+            // is now true, so the branch above stops re-fetching the playlist.
             //
             // The cost is one unauthenticated GET per screen per 30 s at the
-            // backoff cap. verify-device is throttled 60/min per deviceId in
-            // Laravel and sits on prod nginx's 30 r/s zone per IP, so a
+            // backoff cap. verify-device is rate-limited 120/min per deviceId
+            // (`RateLimiter::for('verify-device')` in the portal's
+            // AppServiceProvider - its own comment reads "120/min (was 60)"),
+            // so a screen uses 2 of 120. Prod nginx additionally puts the path
+            // on a relaxed 30 r/s-per-IP zone according to the signage client
+            // sync spec; prod nginx is hand-edited and was not read for this,
+            // so treat that figure as the spec's and not as measured. A
             // nine-panel store behind one NAT address contributes 0.3 r/s.
-            playing = true;
           } else {
             // `else`, now that the branch above no longer returns. Measured
             // without it: a screen playing a two-item campaign had "inget
@@ -927,10 +1070,18 @@ function checkDevice(uuid) {
             // displayMediaContent() does nothing at all for an empty payload,
             // so a screen whose campaign was unplanned kept the old campaign's
             // last frame with the chip below contradicting it. Measured: the
-            // container `block` with 2 stale children under "inget innehåll är
-            // planerat". checkDeviceDataChanges() already clears for this same
-            // case; the poll that lands here did not.
-            campaignContainer.innerHTML = '';
+            // container displayed `block` holding its one `.media-player`,
+            // which still held two children (the background img and the main
+            // media element), under "inget innehåll är planerat".
+            //
+            // stopPlayback(), not `campaignContainer.innerHTML = ''`:
+            // checkDeviceDataChanges() handles the same situation by emptying
+            // `mediaPlayer` - a DIFFERENT node, which survives, keeping its
+            // closure valid - so the two are not equivalent and the earlier
+            // comment here claiming they were was wrong. Emptying the
+            // container destroys `mediaPlayer`, which is only safe alongside
+            // clearing the globals that point at it.
+            stopPlayback();
 
             // Paired, but nothing planned yet. Keep asking: the media poll is
             // set up inside displayMediaContent(), which only runs when there
@@ -944,8 +1095,30 @@ function checkDevice(uuid) {
       }
     } catch (error) {
       // This catch used to be empty, which is why a week of this outage left
-      // no trace on the screen at all. Say what went wrong.
-      showStatus('Kontrollen misslyckades: ' + (error && error.message ? error.message : error));
+      // no trace on the screen at all. Say what went wrong - but say it in the
+      // right place.
+      const reason = 'Kontrollen misslyckades: ' + (error && error.message ? error.message : error);
+
+      if (playlistIsOnScreen()) {
+        // Panel only, never the status line, while a campaign is up. The chip
+        // is `position: fixed; z-index: 10000` in brand.css against the video
+        // layer's z-index 10, so it draws ON TOP of a paying customer's
+        // content - and now that this catch outlives the campaign's start,
+        // nothing would ever clear it: a successful poll while playing writes
+        // #checkdevice-response, not the status line. One 429 out of ~2880
+        // polls a day (verify-device IS rate-limited, which is why the
+        // response.ok check above exists at all) would have parked
+        // "Kontrollen misslyckades: HTTP 429" over the campaign until someone
+        // power-cycled the panel, with the panel and the chip contradicting
+        // each other. A transient poll failure on a screen that is playing
+        // correctly is a diagnostic, not something to show the salon.
+        const debugLine = document.getElementById('checkdevice-response');
+        if (debugLine) {
+          debugLine.textContent = '( ⚠️ ) ' + reason;
+        }
+      } else {
+        showStatus(reason);
+      }
     }
 
     attempt++;
