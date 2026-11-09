@@ -59,5 +59,14 @@ Each one is a bug that reached a customer or was caught in review.
    which is the Hair & Co state reached through its commonest door.
 6. **`media = [...]` again.** Picked up with no reload.
 
+7. **The in-flight race.** Unpair while a `/api/v1/devices` request is in the
+   air, then re-pair, and let the old request resolve. A stale rotation
+   continuation must not touch the new chain. This is the one that froze a
+   screen on slide 1 of 2 permanently and silently, and it is invisible to
+   every other phase: `maxLive` stays at 3, no console error is raised, and
+   `mediaLength` still reads 2. Watch `currentMediaIndex` over several slide
+   durations instead — if it stops advancing, the chain is dead.
+
 Image requests 404 in this harness; those console errors are expected. Any
-other console error is not.
+other console error is not — and phase 7 shows that the absence of one proves
+nothing.

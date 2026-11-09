@@ -97,7 +97,14 @@ document.addEventListener('keydown', function (e) {
       break;
     case window.tvKey.LEFT:
       if (window.currentMediaIndex !== undefined && window.displayMedia) {
+        // Null it, don't just clear it. A cleared timer id is still a number,
+        // so playlistIsOnScreen() went on reporting a live playlist and
+        // checkDevice stayed gated - which is why stepping with the remote
+        // used to park the screen on one slide with no content polls at all,
+        // indefinitely. Nulled, the next pairing poll re-fetches and the
+        // rotation resumes within the backoff.
         clearInterval(window.rotationInterval);
+        window.rotationInterval = null;
         window.currentMediaIndex =
           (window.currentMediaIndex - 1 + window.mediaLength) % window.mediaLength;
         window.displayMedia(window.currentMediaIndex);
@@ -106,7 +113,9 @@ document.addEventListener('keydown', function (e) {
       break;
     case window.tvKey.RIGHT:
       if (window.currentMediaIndex !== undefined && window.displayMedia) {
+        // See the LEFT case above for why the handle is nulled.
         clearInterval(window.rotationInterval);
+        window.rotationInterval = null;
         window.currentMediaIndex = (window.currentMediaIndex + 1) % window.mediaLength;
         window.displayMedia(window.currentMediaIndex);
       }
@@ -498,16 +507,29 @@ function stopPlayback() {
 /**
  * Whether a non-empty playlist is on screen right now.
  *
- * Derived from `window.mediaLength` rather than kept as its own flag, because a
- * flag desynced: `checkDeviceDataChanges()` empties the playlist when a
- * campaign is unplanned and sets `mediaLength` to 0, but it cannot reach a
- * local in checkDevice -- so a flag stayed true, the media branch stayed
- * skipped, and nothing ever looked for content again. That is the Hair & Co
- * state reached through the commonest door of all: a campaign unplanned on a
- * screen that was already playing it.
+ * Derived from the globals rather than kept as its own flag, because a flag
+ * desynced: `checkDeviceDataChanges()` empties the playlist when a campaign is
+ * unplanned and sets `mediaLength` to 0, but it cannot reach a local in
+ * checkDevice -- so a flag stayed true, the media branch stayed skipped, and
+ * nothing ever looked for content again. That is the Hair & Co state reached
+ * through the commonest door of all: a campaign unplanned on a screen that was
+ * already playing it.
+ *
+ * A LIVE rotation is part of it, not just a non-empty playlist. Slides that
+ * have stopped advancing are not "on screen" in any sense this gate cares
+ * about, and treating them as such is what made a stalled chain permanent:
+ * the gate kept checkDevice from re-fetching the very content that would have
+ * rebuilt the chain. Measured: pressing LEFT/RIGHT on the remote clears the
+ * rotation without restarting it, and the screen then sat on one slide with
+ * zero content polls for as long as it was watched. With the rotation in the
+ * gate, the next pairing poll re-fetches and the playlist resumes within the
+ * backoff instead of never.
  */
 function playlistIsOnScreen() {
-  return typeof window.mediaLength === 'number' && window.mediaLength > 0;
+  return typeof window.mediaLength === 'number'
+    && window.mediaLength > 0
+    && window.rotationInterval !== null
+    && window.rotationInterval !== undefined;
 }
 
 /**
@@ -676,8 +698,13 @@ function displayMediaContent(data) {
 
               // If data differs from cache or no cache exists, update the data
               if (!cachedData || JSON.stringify(cachedData) !== JSON.stringify(currentData)) {
-                // Update the data object with new media content
-                data.campaign_media = currentData.campaign_media;
+                // `|| []`, because the line below reads `.length` off this.
+                // A 200 without `campaign_media` threw here -- BEFORE the
+                // `mediaLength === 0` branch could run -- which left
+                // `window.mediaLength` at its old value, so
+                // playlistIsOnScreen() stayed true and checkDevice stayed
+                // gated. displayMediaContent() guards this; this did not.
+                data.campaign_media = currentData.campaign_media || [];
 
                 // Update other properties if needed
                 if (currentData.location) {
@@ -730,11 +757,45 @@ function displayMediaContent(data) {
         });
       }
 
+      // One place for "show the next item, then schedule the one after it",
+      // and the ONLY place that is allowed to do it.
+      //
+      // The generation is checked here, at the top, because the four
+      // checkDeviceDataChanges() continuations below cannot lean on
+      // startRotationTimer()'s own guard: the two statements that used to sit
+      // in front of it ran FIRST. A continuation resolving after a teardown
+      // therefore called clearInterval() on `window.rotationInterval` -- which
+      // by then held the handle of the CURRENT generation's live chain -- and
+      // only then hit the guard and returned. The new chain was dead and
+      // nothing restarted it.
+      //
+      // That froze a customer's screen on one slide permanently and silently:
+      // `mediaLength` stayed > 0, so playlistIsOnScreen() stayed true, so
+      // checkDevice refused to re-fetch, and the rotation chain was the only
+      // caller of checkDeviceDataChanges(). Measured in lab/checkdevice-probe:
+      // the index stood still at 0 for 4 s with 700 ms slides and
+      // `rotationInterval` held an already-cleared handle. main did not have
+      // this: there the stale continuation RESTARTED the chain, loudly and
+      // wrongly, with a TypeError. Guarding only startRotationTimer() traded
+      // loud-and-recovering for silent-and-permanent, which is worse.
+      const continueRotation = () => {
+        if (!isCurrentGeneration()) {
+          return;
+        }
+
+        window.displayMedia(window.currentMediaIndex);
+        clearInterval(window.rotationInterval);
+        startRotationTimer();
+      };
+
       // Set up rotation interval
       function startRotationTimer() {
-        // Every continuation that keeps the chain alive comes back through
-        // here, so this one check is what stops a stale generation from
-        // restarting itself.
+        // Second line of defence, not the only one. continueRotation() above
+        // is what actually guards the continuations; this catches a direct
+        // call from a stale generation (the `loadedmetadata` path) and stops
+        // it building a chain. An earlier comment here claimed this single
+        // check was sufficient for every continuation. It was not -- see
+        // continueRotation().
         if (!isCurrentGeneration()) {
           return;
         }
@@ -791,22 +852,16 @@ function displayMediaContent(data) {
                         .then(dataChanged => {
                           // Only continue rotation if data didn't change (which would restart rotation)
                           if (!dataChanged) {
-                            window.displayMedia(window.currentMediaIndex);
-                            clearInterval(window.rotationInterval);
-                            startRotationTimer();
+                            continueRotation();
                           }
                         })
                         .catch(error => {
                           // Continue with normal rotation despite error
-                          window.displayMedia(window.currentMediaIndex);
-                          clearInterval(window.rotationInterval);
-                          startRotationTimer();
+                          continueRotation();
                         });
                     } else {
                       // Normal rotation for non-last items
-                      window.displayMedia(window.currentMediaIndex);
-                      clearInterval(window.rotationInterval);
-                      startRotationTimer();
+                      continueRotation();
                     }
                   }, videoDuration);
                 }
@@ -840,22 +895,16 @@ function displayMediaContent(data) {
               .then(dataChanged => {
                 // Only continue rotation if data didn't change (which would restart rotation)
                 if (!dataChanged) {
-                  window.displayMedia(window.currentMediaIndex);
-                  clearInterval(window.rotationInterval);
-                  startRotationTimer();
+                  continueRotation();
                 }
               })
               .catch(error => {
                 // Continue with normal rotation despite error
-                window.displayMedia(window.currentMediaIndex);
-                clearInterval(window.rotationInterval);
-                startRotationTimer();
+                continueRotation();
               });
           } else {
             // Normal rotation for non-last items
-            window.displayMedia(window.currentMediaIndex);
-            clearInterval(window.rotationInterval);
-            startRotationTimer();
+            continueRotation();
           }
         }, duration);
       }
@@ -881,6 +930,9 @@ function displayMediaContent(data) {
  */
 function checkDevice(uuid) {
   let attempt = 0;
+  // The previous poll's answer, so the backoff is reset on the TRANSITION to
+  // unpaired rather than on every unpaired poll. See where it is read.
+  let wasPaired = false;
   // Was `MAX_ATTEMPTS = 300` with an uncapped `attempt * 1000` backoff: the
   // interval grew without bound and the client stopped asking entirely after
   // ~12.5 h. A screen that had been parked on the QR page could not notice its
@@ -943,28 +995,25 @@ function checkDevice(uuid) {
         // the INFO panel exists to show.
         showStatus('');
 
-        // And put the pairing view back, which nothing used to do.
-        // hideRegistrationScreen() runs the moment a screen pairs and had no
-        // counterpart, so a screen later removed in the portal kept the
-        // activation view hidden for good: an empty campaign container, and -
-        // once the line above clears - nothing on the panel at all. Restoring
-        // it gives the salon a QR to scan instead of a black screen.
+        // Back to a fast poll - but ONLY on the transition from paired to
+        // unpaired. This branch is true on EVERY poll while a screen is
+        // unpaired, so resetting unconditionally disabled the backoff outright:
+        // with `attempt++` in the tail, `attempt` just oscillated 0 -> 1 and
+        // nextDelay was pinned at 1000 ms. Measured: 12 s unpaired produced 9
+        // polls, every delay 1000, never 2000. That is 86 400 verify-device
+        // calls a day for one unpaired screen instead of ~2 880 - 60 of the
+        // limiter's 120/min per deviceId held permanently, for a panel still in
+        // its box or a showroom TV left switched on. This file's own design is
+        // "Poll forever, capped" and the reset undid the cap.
         //
-        // Nothing is re-rendered. The code already in the DOM encodes this
-        // uuid and is still the right pairing URL - UNLESS getDeviceModel()
-        // never settled, in which case the module-level placeholder is still
-        // in the box and encodes bare `baseUrl`, sending a scan to the portal
-        // front page. Re-rendering would not help, because generateQRCode()
-        // would hang on the same await; see scheduleQrRetry, still not
-        // ported (lines 40-46). Measured: with a getPropertyValue that never
-        // calls back, the two QR bitmaps differ.
+        // The reset is still worth having: a screen paired for hours sits at
+        // the 30 s cap, and a salon re-pairing from the portal would otherwise
+        // stare at the QR for another half minute after the portal was done.
+        if (wasPaired) {
+          attempt = 0;
+        }
 
-        // Back to a fast poll. The backoff only ever grows, so a screen that
-        // had been paired for hours was sitting at the 30 s cap - and a salon
-        // re-pairing from the portal then stared at the QR for up to another
-        // 30 s after the portal was done. Resetting makes a re-pairing as
-        // responsive as the first one (1 s, 2 s, 3 s ...).
-        attempt = 0;
+        wasPaired = false;
 
         // Puts the pairing view back AND tears the playlist down - see
         // stopPlayback(). Nothing used to do either: hideRegistrationScreen()
@@ -999,6 +1048,10 @@ function checkDevice(uuid) {
       // location within 30 s. The field lives in `.device-info`, hidden until
       // someone opens the panel with the remote, so the cost is a support
       // detail rather than anything a salon sees.
+      if (data.device_exists) {
+        wasPaired = true;
+      }
+
       if (data.message) {
         document.getElementById('checkdevice-response').textContent =
           (data.device_exists ? '( 👍 ) ' : '( 👎 ) ') + data.message;
