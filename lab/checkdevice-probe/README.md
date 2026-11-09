@@ -61,15 +61,18 @@ Each one is a bug that reached a customer or was caught in review.
 6. **`media = [...]` again.** Picked up with no reload.
 
 6b. **`reason` through its values, with `paired = false`.** The activation view
-   has two faces, and only `unknown` — or no `reason` at all — may show the QR
-   code. Check the COMPUTED font size of `#reg-lead`, not just which face is
-   up: removing the QR column from the landscape grid collapses `.digmi-copy`
+   has two faces. The QR code belongs to `unknown`, to no `reason` at all, and
+   to an empty string — `pairingWouldHelp()` treats anything that is not a
+   definite other reason as "nobody has paired this", because a portal from
+   before the field sends nothing and the QR was the whole behaviour.
+   Every other non-empty value hides it. Check the COMPUTED font size of
+   `#reg-lead`, not just which face is up: removing the QR column from the landscape grid collapses `.digmi-copy`
    to ~60 px and drives the title to 7.5 px and the lead to 2.5 px, because
    `.digmi-copy` is a size container with no intrinsic width. That renders the
    message unreadable while every check on `display` and `textContent` still
    passes. Measured at 1920x1080; portrait is unaffected, so run landscape.
-   `switched-off`, `suspended` and an empty string are each worth a pass, and
-   so is the way back to `unknown`.
+   Worth a pass each: `switched-off` and `suspended` (QR hidden), an empty
+   string and `null` (QR shown), and the way back to `unknown`.
 
 7. **The in-flight race.** Unpair while a `/api/v1/devices` request is in the
    air, then re-pair, and let the old request resolve. A stale rotation

@@ -58,10 +58,42 @@ languages.forEach(function (lang) {
 //    2 to 1. The switched-off face leans on that help line being the only
 //    thing on the page that leads anywhere, so this is the check that keeps
 //    the promise.
+//    Parity alone is relative to `sv`, which leaves one hole: take `{phone}`
+//    out of ALL FIVE languages and every comparison still agrees. Measured -
+//    the run reports `ok` and exits 0 while the `tel:` link is gone from
+//    every screen. The required list below is the floor under that, and it
+//    only has to state `sv`: parity carries the requirement to the other four
+//    from there, so the two checks together are complete.
+//
+//    A list rather than something read out of the `[data-i18n-slot]` children
+//    in the markup. Those slots sit inside the `data-i18n` element, and
+//    pairing them to their key with a regex means guessing where one element
+//    ends - a wrong guess would attribute a slot to the wrong key and pass
+//    quietly, which is the failure this file exists to prevent. One entry is
+//    cheap to extend when a second string gets a slot.
+const required = {
+  'reg.help': ['{phone}', '{url}'],
+};
+
 const placeholders = function (text) {
   const found = text.match(/\{(\w+)\}/g);
   return (found === null ? [] : found).sort();
 };
+
+Object.keys(required).forEach(function (key) {
+  if (!Object.prototype.hasOwnProperty.call(MESSAGES.sv, key)) {
+    problems.push('sv is missing ' + key + ', which has to carry ' + required[key].join(' and '));
+    return;
+  }
+
+  required[key].forEach(function (slot) {
+    if (MESSAGES.sv[key].indexOf(slot) === -1) {
+      problems.push(
+        'sv ' + key + ' must carry ' + slot + ' - fillText() deletes the element it names'
+      );
+    }
+  });
+});
 
 reference.forEach(function (key) {
   const want = placeholders(MESSAGES.sv[key]).join(',');
