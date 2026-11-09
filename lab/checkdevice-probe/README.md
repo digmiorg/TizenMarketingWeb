@@ -65,7 +65,9 @@ Each one is a bug that reached a customer or was caught in review.
    to an empty string — `pairingWouldHelp()` treats anything that is not a
    definite other reason as "nobody has paired this", because a portal from
    before the field sends nothing and the QR was the whole behaviour.
-   Every other non-empty value hides it. Check the COMPUTED font size of
+   Every other non-empty *string* hides it — the branch is
+   `typeof reason !== 'string'`, so a number, a boolean, `{}` or even a
+   `String` object wrapping `'switched-off'` all show the QR code. Measured. Check the COMPUTED font size of
    `#reg-lead`, not just which face is up: removing the QR column from the landscape grid collapses `.digmi-copy`
    to ~60 px and drives the title to 7.5 px and the lead to 2.5 px, because
    `.digmi-copy` is a size container with no intrinsic width. That renders the

@@ -63,14 +63,20 @@ languages.forEach(function (lang) {
 //    the run reports `ok` and exits 0 while the `tel:` link is gone from
 //    every screen. The required list below is the floor under that, and it
 //    only has to state `sv`: parity carries the requirement to the other four
-//    from there, so the two checks together are complete.
+//    from there. Together those two close placeholder loss in the message
+//    texts, for the keys this list names - not more than that, see the two
+//    set checks under 2b.
 //
 //    A list rather than something read out of the `[data-i18n-slot]` children
 //    in the markup. Those slots sit inside the `data-i18n` element, and
 //    pairing them to their key with a regex means guessing where one element
 //    ends - a wrong guess would attribute a slot to the wrong key and pass
-//    quietly, which is the failure this file exists to prevent. One entry is
-//    cheap to extend when a second string gets a slot.
+//    quietly, which is the failure this file exists to prevent.
+//
+//    `reg.qr_label`'s `{n}` is deliberately absent: it is filled by `t()` from
+//    `data-i18n-params`, not by a slot, so losing it costs a digit rather than
+//    a link - and the box markup it belongs to is not in this index.html at
+//    all.
 const required = {
   'reg.help': ['{phone}', '{url}'],
 };
@@ -89,7 +95,8 @@ Object.keys(required).forEach(function (key) {
   required[key].forEach(function (slot) {
     if (MESSAGES.sv[key].indexOf(slot) === -1) {
       problems.push(
-        'sv ' + key + ' must carry ' + slot + ' - fillText() deletes the element it names'
+        'sv ' + key + ' must carry ' + slot +
+          ' - fillText() only puts back the slots the text names'
       );
     }
   });
@@ -112,8 +119,58 @@ reference.forEach(function (key) {
   });
 });
 
-// 3. Every key the page asks for by `data-i18n` is defined.
 const html = fs.readFileSync(path.join(root, 'src', 'index.html'), 'utf8');
+
+// 2b. The markup and the required list name the same slots.
+//
+//    Two flat set comparisons, in both directions. Neither pairs a slot with a
+//    key, so the element-boundary problem above does not apply to them.
+//
+//    Markup -> list closes the mirror image of the hole under 2: leave
+//    `{phone}` in every text but rename the `data-i18n-slot="phone"` attribute
+//    and `fillText()` finds no slot to put back, so it writes the raw
+//    `{phone}` across the screen and the `tel:` link is gone. Measured:
+//    `anchors=1` and the literal `{phone}` in the rendered help line, while
+//    the run still said ok.
+//
+//    List -> markup closes the other way round: someone gives a new key a
+//    slot and does not add it here, which puts that key back in exactly the
+//    state the required list exists to prevent. A human remembering is what
+//    this file is here to replace.
+const slotPattern = /data-i18n-slot="([^"]+)"/g;
+const markupSlots = [];
+let slotMatch = slotPattern.exec(html);
+
+while (slotMatch !== null) {
+  if (markupSlots.indexOf(slotMatch[1]) === -1) {
+    markupSlots.push(slotMatch[1]);
+  }
+  slotMatch = slotPattern.exec(html);
+}
+
+const requiredSlots = [];
+Object.keys(required).forEach(function (key) {
+  required[key].forEach(function (slot) {
+    const name = slot.replace(/[{}]/g, '');
+    if (requiredSlots.indexOf(name) === -1) {
+      requiredSlots.push(name);
+    }
+  });
+});
+
+requiredSlots.forEach(function (name) {
+  if (markupSlots.indexOf(name) === -1) {
+    problems.push('index.html has no [data-i18n-slot="' + name + '"], so {' + name + '} would render as raw text');
+  }
+});
+
+markupSlots.forEach(function (name) {
+  if (requiredSlots.indexOf(name) === -1) {
+    problems.push('index.html declares a slot "' + name + '" that no required list entry names');
+  }
+});
+
+// 3. Every key the page asks for by `data-i18n` is defined.
 const attributeKeys = [];
 const attributePattern = /data-i18n="([^"]+)"/g;
 let match = attributePattern.exec(html);
