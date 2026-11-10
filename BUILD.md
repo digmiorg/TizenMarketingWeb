@@ -509,9 +509,9 @@ row is the honest answer to a question Samsung's own pages leave open for
 sideloaded apps: it does not block the renewal, and it does not pretend the
 renewal is proven. **Watch the first screen take that update.**
 
-None of this is theoretical here. The three published packages carry three
-different keys, not merely three certificates (measured 2026-11-03 with
-`scripts/author-identity.sh`):
+None of this is theoretical here. The published packages carry four
+different keys, not merely four certificates (the first three measured
+2026-11-03, the fourth 2026-11-10, with `scripts/author-identity.sh`):
 
 | Release | Signing key | Author certificate |
 | --- | --- | --- |
@@ -524,8 +524,10 @@ The key changed at every release, which is why the fleet cannot be updated from
 a laptop that happens to have a certificate on it.
 
 The fourth row is served from Pages under `b2b/` and carries a fourth key. All
-four packages share the package id `E1lTJzhcnm`, so none of them can update a
-display that runs another — the display must be emptied first.
+four packages share the package id `E1lTJzhcnm`, so — if Tizen keys the author
+check on the package id, as its package model suggests and no panel has yet
+measured — none of them can update a display that runs another; the display
+must be emptied first.
 
 Every build prints the key, the certificate and the expiry, and warns at 90 and
 then 30 days out — because a certificate that lapses before the next release

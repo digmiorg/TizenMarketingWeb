@@ -42,8 +42,9 @@ USB stick, without a Seller Office review.
 certificate). The first TBM Custom App (URL) run against a panel is still to
 be done; BUILD.md records the channel and what remains unconfirmed.
 
-**Only for panels with no `E1lTJzhcnm` package installed.** Tizen binds the
-author-key check to the *package* id `E1lTJzhcnm`, which every build of this
+**Only for panels with no `E1lTJzhcnm` package installed.** Tizen is expected
+to bind the author-key check to the *package* id `E1lTJzhcnm` (that is its
+package model; not yet measured on a panel), which every build of this
 widget shares — the SSSP build (`E1lTJzhcnm.DigmiMarketing`, old key) **and the
 Seller Office store build the fleet runs (`E1lTJzhcnm.DigmiSignage`, store
 key)**. `b2b/` is signed with the Partner-2026 key, and a display refuses an
@@ -67,6 +68,10 @@ This directory is NOT written by CI. To publish a version, mirror the
    it install and play.
 3. Only then copy the same two files to `b2b/latest/`.
 
+1.0.13 is the first publish and `latest/` was filled in the same commit as
+`1.0.13/`, before any panel test, because no panel followed `b2b/latest/` yet.
+From the second version on, the order above applies.
+
 Check by hand before each commit — no workflow does it for this directory:
 
 ```sh
@@ -76,10 +81,13 @@ scripts/author-identity-gate.sh b2b/<version>/DigmiMarketing.wgt b2b/latest   # 
 cmp b2b/latest/DigmiMarketing.wgt b2b/<version>/DigmiMarketing.wgt            # after step 3
 ```
 
-and after the merge, that Pages serves the bytes you committed:
+and after each merge, that Pages serves the bytes you committed — only the
+version directory after step 1 (`latest/` still advertises the old `<ver>` then,
+and the script would wait on it and fail), both after step 3:
 
 ```sh
-scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <ver> DigmiMarketing b2b/<version>/DigmiMarketing.wgt b2b/latest b2b/<version>
+scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <ver> DigmiMarketing b2b/<version>/DigmiMarketing.wgt b2b/<version>                # after step 1
+scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <ver> DigmiMarketing b2b/<version>/DigmiMarketing.wgt b2b/latest b2b/<version>     # after step 3
 ```
 
 A re-sign of an already published version cannot be rolled out: `<ver>` comes
