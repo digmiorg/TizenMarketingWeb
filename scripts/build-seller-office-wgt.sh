@@ -64,27 +64,46 @@ REF_DIR=".build/seller-office/reference"
 # The directory need not exist yet, so resolve the deepest existing ancestor
 # and re-append the part that does not exist.
 resolve_path() {
-    _rest=""
-    _p="${1%/}"
-    [ -n "$_p" ] || _p="/"
-    while [ ! -d "$_p" ]; do
-        _rest="${_p##*/}${_rest:+/}$_rest"
-        case "$_p" in
-            */*) _p="${_p%/*}"; [ -n "$_p" ] || _p="/" ;;
-            *)   _p="." ;;
+    local p rest
+    rest=""
+    p="${1%/}"
+    [ -n "$p" ] || p="/"
+    while [ ! -d "$p" ]; do
+        rest="${p##*/}${rest:+/}$rest"
+        case "$p" in
+            */*) p="${p%/*}"; [ -n "$p" ] || p="/" ;;
+            *)   p="." ;;
         esac
     done
-    printf '%s\n' "$(cd "$_p" && pwd -P)${_rest:+/$_rest}"
+    # CDPATH= : with a relative argument `cd` searches CDPATH and PRINTS the
+    # directory it picked, so without this the command substitution returns TWO
+    # lines and the guard validates a different tree from the one `rm -rf`
+    # later walks. `--` covers a directory whose name begins with a dash.
+    printf '%s\n' "$(CDPATH= cd -P -- "$p" && pwd -P)${rest:+/$rest}"
 }
 
 assert_under_build() {
-    _label="$1"
-    _given="$2"
-    _root="$(resolve_path .build)"
-    _abs="$(resolve_path "$_given")"
-    case "$_abs" in
-        "$_root"/?*) ;;
-        *) echo "$_label must resolve to a directory strictly beneath $_root; '$_given' resolves to '$_abs'" >&2; exit 1 ;;
+    local label given root abs
+    label="$1"
+    given="$2"
+
+    # Rejected BEFORE resolution, and this is the load-bearing line. resolve_path
+    # resolves the deepest EXISTING ancestor and re-appends the rest verbatim, so
+    # a `..` sitting under a component that does not exist yet is never
+    # normalised -- it survives into the comparison and still matches. Measured:
+    # `.build/a/../../../sibling-repo` was accepted, `mkdir -p` then CREATED
+    # `.build/a` so the path became real, and the dotfile sweep deleted `.git`
+    # and `.env` in a sibling repository with exit 0 and no warning. That is a
+    # worse hole than the string prefix test this guard replaced.
+    case "/$given/" in
+        *'/../'*) echo "$label must not contain a '..' component; got '$given'" >&2; exit 1 ;;
+    esac
+
+    root="$(resolve_path .build)"
+    abs="$(resolve_path "$given")"
+    case "$abs" in
+        "$root"/?*) ;;
+        *) echo "$label must resolve to a directory strictly beneath $root; '$given' resolves to '$abs'" >&2; exit 1 ;;
     esac
 }
 

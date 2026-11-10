@@ -50,9 +50,9 @@ done
 # installed regardless.
 stowaways="$(cd "$WORK/pkg" && find . \( -name '.git*' -o -name '.project' -o -name '.tproject' \
     -o -name '.settings' -o -name 'Build' -o -name 'Debug' -o -name '.sign' \
-    -o -name '*.wgt' \) 2>/dev/null || true)"
+    -o -name '*.wgt' -o -name '*.test.js' \) 2>/dev/null || true)"
 if [ -z "$stowaways" ]; then
-    ok "no IDE or VCS metadata in the package"
+    ok "no IDE or VCS metadata and no test files in the package"
 else
     bad "metadata found in the package:"
     echo "$stowaways" | sed 's/^/          /'
