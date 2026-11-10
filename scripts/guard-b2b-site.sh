@@ -96,6 +96,10 @@ while IFS= read -r dir; do
         "$SITE"/b2b/*) ;;
         *) echo "::error::refusing to remove '$dir': not under $SITE/b2b"; exit 1 ;;
     esac
+    # A listed path that is not there means the list and the site disagree
+    # (a name the list could not carry): withhold everything rather than
+    # report a removal that did not happen.
+    [ -e "$dir" ] || [ -L "$dir" ] || withhold_all "check-b2b.sh listed $dir, which does not exist in the site"
     rm -rf -- "$dir"
     [ ! -e "$dir" ] || { echo "::error::could not remove $dir"; exit 1; }
     dropped+=("${dir#"$SITE"/}")

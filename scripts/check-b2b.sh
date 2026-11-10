@@ -175,19 +175,25 @@ is_failed() {
 # unchecked.
 for n in "$ROOT"/* "$ROOT"/.[!.]* "$ROOT"/..?*; do
     [ -e "$n" ] || [ -L "$n" ] || continue
-    bn="$(basename "$n")"
+    # ${n##*/}, not $(basename): a command substitution strips a trailing
+    # newline, which is exactly the character this must see.
+    bn="${n##*/}"
+    case "$n" in
+        *[[:cntrl:]]*)
+            # A name with a control character cannot be carried by the
+            # newline-delimited failed list, so the guard could not withhold
+            # it by name - and a name like "1.0.13<newline>" would make it
+            # withhold the real 1.0.13 instead. Could not check: the guard
+            # then withholds all of b2b/.
+            echo "cannot check: a control character in the name $(printf '%q' "$n") - it cannot be withheld by name"
+            exit 2 ;;
+    esac
     case "$bn" in
         .*)
             # A dot entry, directory or not: the version loop's glob never
             # sees it, so it would be published unchecked.
             echo "== $n"; echo "  FAIL  a dot entry - nothing hidden belongs under $ROOT/"
             mark_failed "$n"; continue ;;
-        *[[:cntrl:]]*)
-            # A name with a control character cannot be carried by the
-            # newline-delimited failed list, so the guard could not withhold
-            # it by name.
-            echo "== $(printf '%q' "$n")"; echo "  FAIL  a control character in the name"
-            fail=1; continue ;;
     esac
     [ -d "$n" ] && [ ! -L "$n" ] && continue
     echo "== $n"
@@ -210,7 +216,6 @@ for entry in "$ROOT"/*/; do
     # character): it must not join the versions, or it could become latest/'s
     # match or the highest.
     is_failed "$dir" && continue
-    case "$(basename "$dir")" in *[[:cntrl:]]*) continue ;; esac
     name="$(basename "$dir")"
     echo "== $dir"
     [ "$name" = latest ] || candidates+=("$dir")
