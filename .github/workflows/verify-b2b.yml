@@ -1,7 +1,9 @@
 # The hand-published b2b/ channel (see README) has no build workflow, so this
 # is where its descriptors are checked before they can reach Pages: every
-# b2b/<dir>/ with a descriptor passes scripts/verify-wgt.sh, and b2b/latest/
-# is identical to the highest-numbered version directory.
+# b2b/<dir>/ with a descriptor passes scripts/verify-wgt.sh, <ver> matches the
+# package version, every version carries the author key latest/ serves, and
+# b2b/latest/ is one of the version directories (behind the highest is
+# reported, not failed - that is README step 1).
 name: Verify b2b
 on:
   pull_request:

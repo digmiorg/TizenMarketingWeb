@@ -43,7 +43,7 @@ encode() {
 fail=0
 highest=''
 highest_dir=''
-declare -A seen_ver=()
+seen_vers=' '
 versions=()
 
 for cfg in "$ROOT"/*/sssp_config.xml; do
@@ -57,7 +57,13 @@ for cfg in "$ROOT"/*/sssp_config.xml; do
     fi
     [ "$name" = latest ] && continue
 
-    wgt="$(find "$dir" -maxdepth 1 -name '*.wgt' | head -1)"
+    wgts=("$dir"/*.wgt)
+    if [ "${#wgts[@]}" -ne 1 ] || [ ! -f "${wgts[0]}" ]; then
+        echo "  FAIL  expected exactly one .wgt in $dir, found ${#wgts[@]}"
+        fail=1
+        continue
+    fi
+    wgt="${wgts[0]}"
     pkgver="$(package_version "$wgt")"
     if [ "$pkgver" != "$name" ]; then
         echo "  FAIL  directory is $name but the package's config.xml says $pkgver"
@@ -73,11 +79,10 @@ for cfg in "$ROOT"/*/sssp_config.xml; do
         echo "  FAIL  <ver>$ver</ver> is not $pkgver encoded ($(encode "$pkgver"))"
         fail=1
     fi
-    if [ -n "${seen_ver[$ver]:-}" ]; then
-        echo "  FAIL  <ver>$ver</ver> is also advertised by ${seen_ver[$ver]}"
-        fail=1
-    fi
-    seen_ver[$ver]="$dir"
+    case "$seen_vers" in
+        *" $ver "*) echo "  FAIL  <ver>$ver</ver> is advertised by more than one version directory"; fail=1 ;;
+    esac
+    seen_vers="$seen_vers$ver "
     versions+=("$dir")
     if [ -z "$highest" ] || [ "$ver" -gt "$highest" ]; then
         highest="$ver"
@@ -108,13 +113,16 @@ if [ -d "$ROOT/latest" ]; then
             [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice::$ROOT/latest serves $match, not $highest_dir"
         fi
         for dir in "${versions[@]}"; do
-            wgt="$(find "$dir" -maxdepth 1 -name '*.wgt' | head -1)"
-            if "$here/author-identity-gate.sh" "$wgt" "$ROOT/latest" >/dev/null 2>&1; then
-                echo "  ok    $dir carries the author key $ROOT/latest serves"
-            else
-                echo "  FAIL  $dir is signed with a different author key than $ROOT/latest - panels on the channel would refuse it (author-identity-gate.sh exit $?)"
-                fail=1
-            fi
+            wgts=("$dir"/*.wgt)
+            # stdout passes through: a renewal over the same key is a
+            # ::warning:: the gate prints, and it belongs in the CI summary.
+            rc=0
+            "$here/author-identity-gate.sh" "${wgts[0]}" "$ROOT/latest" | sed 's/^/        /' || rc="${PIPESTATUS[0]}"
+            case "$rc" in
+                0) echo "  ok    $dir carries the author key $ROOT/latest serves" ;;
+                2) echo "  FAIL  $dir is signed with a different author key than $ROOT/latest - panels on the channel would refuse it"; fail=1 ;;
+                *) echo "  FAIL  author-identity-gate.sh could not compare $dir with $ROOT/latest (exit $rc)"; fail=1 ;;
+            esac
         done
     fi
 fi
