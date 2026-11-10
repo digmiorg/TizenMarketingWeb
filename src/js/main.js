@@ -140,7 +140,7 @@ document.addEventListener('keydown', function (e) {
   // the AVPlay plane. Takes effect when the next clip starts; the current one
   // is not touched. Survives a playlist change on purpose (that is what a
   // bench measurement needs) and a reload clears it.
-  if (e.keyCode >= 53 && e.keyCode <= 57) {
+  if (e.keyCode >= window.tvKey.NUM_5 && e.keyCode <= window.tvKey.NUM_9) {
     if (e.repeat) {
       return;
     }
@@ -148,7 +148,7 @@ document.addEventListener('keydown', function (e) {
     if (!hud || !hud.classList.contains('visible')) {
       return;
     }
-    window.avplayRotationOverride = [null, 'NONE', '90', '180', '270'][e.keyCode - 53];
+    window.avplayRotationOverride = [null, 'NONE', '90', '180', '270'][e.keyCode - window.tvKey.NUM_5];
     console.log('[avplay] rotation override: ' + (window.avplayRotationOverride || 'automatic') + ' - applies on the next clip');
     updateStageGeometry();
     e.preventDefault();
@@ -164,6 +164,14 @@ document.addEventListener('keydown', function (e) {
         // inline in two separate copies, which silently beats any stylesheet
         // rule and made the panel's state depend on which key opened it.
         deviceInfoElement.classList.toggle('visible');
+        // The rotation override lives exactly as long as the HUD is open.
+        // Set with it open, cleared when it closes: a technician who presses
+        // 8 to look and then closes the panel must not leave every advert
+        // turned 180 degrees with no hint on screen.
+        if (!deviceInfoElement.classList.contains('visible') && window.avplayRotationOverride) {
+          window.avplayRotationOverride = null;
+          console.log('[avplay] rotation override cleared with the HUD - back to automatic on the next clip');
+        }
         updateStageGeometry();
       }
       e.preventDefault();
@@ -499,7 +507,7 @@ function updateStageGeometry() {
     readout.textContent = 'viewport ' + viewport + ', avplay rect ' + (window.avplayRect || '?') +
       ' (letterboxed), rotation ' + (window.avplayRotation || 'unset') +
       (window.avplayRotationOverride ? ', next: ' + window.avplayRotationOverride : ', next: automatic') +
-      ' [5=auto 6=none 7=90 8=180 9=270]';
+      ' [5=auto 6=none 7=90 8=180 9=270; cleared when HUD closes]';
 
     return;
   }
@@ -898,9 +906,15 @@ function getSharedAvplay() {
   sharedAvplay = window.DigmiAvplay.createPlayer({
     log: (line) => console.log('[avplay] ' + line),
     rotation: () => window.avplayRotationOverride || null,
+    // Measured on the bench, never derived. null until a portrait panel that
+    // reports angle 0 (or no orientation API) has been seen and turned by
+    // hand; the QB43C reports its angle and needs none.
+    portraitFallback: null,
     onRotation: (value, source, state, rect) => {
       window.avplayRotation = value + ' (' + source + ', ' + state + ')';
-      window.avplayRect = rect ? rect.width + 'x' + rect.height + ' at ' + rect.x + ',' + rect.y : '?';
+      window.avplayRect = rect
+        ? rect.width + 'x' + rect.height + ' at ' + rect.x + ',' + rect.y + ' (' + rect.state + ')'
+        : '?';
     },
     onStreamCompleted: () => {
       if (avplayHooks.onStreamCompleted) {
@@ -927,6 +941,8 @@ function getSharedAvplay() {
 function closeSharedAvplay() {
   avplayHooks.onStreamCompleted = null;
   avplayHooks.onError = null;
+  // A bench override must not outlive the player it was measured on.
+  window.avplayRotationOverride = null;
   if (sharedAvplay) {
     sharedAvplay.close();
     sharedAvplay = null;

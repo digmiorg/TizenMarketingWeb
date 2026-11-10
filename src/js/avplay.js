@@ -192,12 +192,17 @@
     const rotationOverride = typeof opts.rotation === 'function' ? opts.rotation : () => null;
     const onRotation = typeof opts.onRotation === 'function' ? opts.onRotation : () => {};
     const ROTATIONS = ['NONE', '90', '180', '270'];
-    // What a portrait viewport gets when the web layer reports angle 0 -- a
-    // panel that rotates in its compositor can do exactly that. Set from the
-    // bench with the remote keys, not derived: which way round AVPlay counts
-    // is not knowable from the page. null until measured, and null means
-    // "not turned, say so on the HUD".
-    const PORTRAIT_FALLBACK = null;
+    // What a portrait viewport gets when the web layer reports angle 0 (a
+    // panel that rotates in its compositor) or has no orientation API at all.
+    // An OPTION, not a constant: it is set from a bench measurement, never
+    // derived, and as an option a test can pin it. null means "not turned,
+    // and say which case it is on the HUD".
+    const portraitFallback =
+      ROTATIONS.indexOf(String(opts.portraitFallback)) > 0 ? String(opts.portraitFallback) : null;
+    // The rotation last SENT to this instance, or null. The same player is
+    // reused clip after clip (stop/open, never close), so a turn applied for
+    // one clip stays on the plane for the next unless something sends NONE.
+    let lastSentRotation = null;
 
     /**
      * @param {{width: number, height: number}} viewport
@@ -210,16 +215,20 @@
       }
       const scr = opts.screen || (scope && scope.screen);
       const orientation = scr && scr.orientation;
-      const angle = orientation && typeof orientation.angle === 'number' ? orientation.angle : 0;
-      const byAngle = { 90: '90', 180: '180', 270: '270' };
-      if (byAngle[angle]) {
-        return { value: byAngle[angle], source: 'screen' };
+      const hasApi = !!orientation && typeof orientation.angle === 'number';
+      const angle = hasApi ? String(orientation.angle) : '0';
+      if (ROTATIONS.indexOf(angle) > 0) {
+        return { value: angle, source: 'screen' };
       }
       const portrait = !!viewport && viewport.height > viewport.width;
       if (portrait) {
-        return PORTRAIT_FALLBACK
-          ? { value: PORTRAIT_FALLBACK, source: 'viewport' }
-          : { value: 'NONE', source: 'unmeasured' };
+        if (portraitFallback) {
+          return { value: portraitFallback, source: 'viewport' };
+        }
+        // Two different panels end up here, and a bench has to know which
+        // one it is measuring: one reported angle 0 for a rotated page, the
+        // other reported nothing at all.
+        return { value: 'NONE', source: hasApi ? 'unmeasured' : 'no-orientation-api' };
       }
       return { value: 'NONE', source: 'landscape' };
     }
@@ -550,41 +559,60 @@
       // Defensive: `screen` used to be read only inside attempt(), where a
       // miss was caught. A caller without one must not throw here, after
       // prepare() with the freeze held and no release().
+      if (!screen) {
+        log('play() got no viewport: falling back to a 1920x1080 rect, which is WRONG on a portrait panel');
+      }
       const viewport = screen || { width: 1920, height: 1080 };
       const rotation = resolveRotation(viewport);
+      // A derived NONE is normally not sent at all -- but the same instance
+      // carries the last turn forward, so after an override of 90 a return
+      // to "automatic" would otherwise leave the plane turned while the HUD
+      // reads NONE. Then, and only then, NONE is sent to undo it.
+      const undoing =
+        rotation.value === 'NONE' && rotation.source !== 'override' &&
+        lastSentRotation !== null && lastSentRotation !== 'NONE';
       let turnedState;
-      if (rotation.value === 'NONE' && rotation.source !== 'override') {
+      if (rotation.value === 'NONE' && rotation.source !== 'override' && !undoing) {
         // Landscape, or portrait that nobody has measured yet: the plane is
         // NOT touched. The 482 measured seams ran without this call (the probe
         // sent an invalid value, so it never took), and a landscape fleet
         // must keep the exact sequence that was measured. An override of NONE
         // is different -- it exists to undo an earlier turn, so it is sent.
         turnedState = 'skipped';
-        if (rotation.source === 'unmeasured') {
-          log('portrait viewport but no rotation is known for this panel: press 7 or 9 on the remote with the HUD open');
+        if (rotation.source === 'unmeasured' || rotation.source === 'no-orientation-api') {
+          log('portrait viewport but no rotation is known for this panel (' + rotation.source +
+            '): press 7 or 9 on the remote with the HUD open');
         }
       } else if (typeof p.setDisplayRotation === 'function') {
         const turned = attempt('setDisplayRotation', () =>
           p.setDisplayRotation('PLAYER_DISPLAY_ROTATION_' + rotation.value),
         );
         turnedState = turned.ok ? 'applied' : 'refused';
-        if (!turned.ok) {
+        if (turned.ok) {
+          lastSentRotation = rotation.value;
+        } else {
           log('setDisplayRotation was refused: video will be drawn in the panel\'s PHYSICAL orientation');
         }
       } else {
         turnedState = 'absent';
         log('setDisplayRotation is absent: video will be drawn in the panel\'s PHYSICAL orientation');
       }
-      // The HUD reads this. The state is part of it on purpose: a value that
-      // was refused must not read as a value that took, in the middle of the
-      // one measurement that decides the direction.
-      onRotation(rotation.value, rotation.source, turnedState, {
-        x: 0, y: 0, width: viewport.width, height: viewport.height,
-      });
 
       // The rect, in the space the rotation just defined. Measured in ONE form
       // only, and only in landscape; see the note at the top of this file.
-      attempt('setDisplayRect', () => p.setDisplayRect(0, 0, viewport.width, viewport.height));
+      const placed = attempt('setDisplayRect', () =>
+        p.setDisplayRect(0, 0, viewport.width, viewport.height),
+      );
+
+      // The HUD reads this, AFTER both attempts. The states are part of it on
+      // purpose: a value that was refused must not read as a value that took,
+      // in the middle of the one measurement that decides the direction -- and
+      // the rect is the line that decides whether the rotated space swaps its
+      // axes, so it carries its own outcome too.
+      onRotation(rotation.value, rotation.source, turnedState, {
+        x: 0, y: 0, width: viewport.width, height: viewport.height,
+        state: placed.ok ? 'applied' : 'refused',
+      });
       // Aspect inside that rect. Without it the default fills the area, which
       // stretches a 16:9 clip across a 9:16 panel.
       // Not measured on this panel -- it is not among the methods the probe
