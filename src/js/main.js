@@ -1135,7 +1135,22 @@ function displayMediaContent(data) {
         slotEndsAt = 0;
         const isVideo = !!mediaItem.video;
         const fullsize = mediaItem.fullsize_url || mediaItem.fullsize;
-        const poster = mediaItem.thumbnail_url || mediaItem.thumbnail;
+        // The blurred backdrop behind the slide. It is NOT one source for both
+        // kinds, and collapsing it into one was a regression shipped in 1.0.13:
+        //
+        //   a video -> the thumbnail, because the fullsize is the clip itself
+        //   an image -> the fullsize, the very picture shown in front of it
+        //
+        // A thumbnail is small and often cropped to a different aspect ratio,
+        // so `object-fit: cover` across a 1080x1920 panel lands it at a
+        // different scale AND a different crop than the `contain`-fitted slide
+        // in front. During the fade the slide is translucent, so both are
+        // visible at once -- on a text-heavy slide that reads as the same
+        // heading printed twice in two sizes. Filmed on the bench 2026-11-10;
+        // the version in the field, which uses the fullsize, does not do it.
+        const poster = isVideo
+          ? (mediaItem.thumbnail_url || mediaItem.thumbnail)
+          : fullsize;
         const useAvplay = !!avplay && !avplayFailed;
         // Keyed on whether AVPlay is actually driving, not merely present.
         // On the <video> path there is no video plane to cover, so an image
