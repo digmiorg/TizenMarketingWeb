@@ -177,36 +177,15 @@ document.addEventListener('keydown', function (e) {
       e.preventDefault();
       break;
     case window.tvKey.LEFT:
-      if (window.currentMediaIndex !== undefined && window.displayMedia) {
-        // Null it, don't just clear it: a cleared timer id is still a number,
-        // and playlistIsOnScreen() reads a number as a live playlist. Then
-        // render, then RESTART the timer below. Leaving it null is not a
-        // pause -- it is what the pairing loop reads as a dead playlist, and
-        // its next poll rebuilt the whole playlist from item 1 (bench,
-        // 2026-11-10: "key LEFT -> 15 at 197s >> playlist -> 1 at 200s"). The
-        // re-fetch is the safety net for a chain that died for other reasons,
-        // not the way a key press is meant to resume.
-        clearInterval(window.rotationInterval);
-        window.rotationInterval = null;
-        window.currentMediaIndex =
-          (window.currentMediaIndex - 1 + window.mediaLength) % window.mediaLength;
-        window.displayMedia(window.currentMediaIndex);
-        if (window.restartRotationTimer) {
-          window.restartRotationTimer();
-        }
+      // Through the playlist's own continuation: see window.stepRotation.
+      if (window.stepRotation) {
+        window.stepRotation(-1);
       }
       e.preventDefault();
       break;
     case window.tvKey.RIGHT:
-      if (window.currentMediaIndex !== undefined && window.displayMedia) {
-        // See the LEFT case above for why the handle is nulled.
-        clearInterval(window.rotationInterval);
-        window.rotationInterval = null;
-        window.currentMediaIndex = (window.currentMediaIndex + 1) % window.mediaLength;
-        window.displayMedia(window.currentMediaIndex);
-        if (window.restartRotationTimer) {
-          window.restartRotationTimer();
-        }
+      if (window.stepRotation) {
+        window.stepRotation(1);
       }
       e.preventDefault();
       break;
@@ -459,17 +438,19 @@ async function fetchDeviceMedia(uuid) {
     // Cache the new data
     MediaStorage.save(uuid, data);
 
-    // Render again only if what is RENDERED changed. This compared the whole
-    // payload, and the payload carries fields that differ between two
-    // fetches seconds apart (`playback` does, measured 2026-11-10) -- so a
-    // cache hit followed by the fresh answer rebuilt the playlist from item 1
-    // a few seconds after it had started. Same comparison as the rotation's
-    // own change branch: the media list, and the location when sent.
-    const cachedMedia = cachedData ? JSON.stringify(cachedData.campaign_media || []) : null;
-    const freshMedia = JSON.stringify(data.campaign_media || []);
-    const locationChanged = !!data.location && !!cachedData && data.location !== cachedData.location;
-    if (cachedMedia === null || cachedMedia !== freshMedia || locationChanged) {
+    // Render again only if what is RENDERED changed (renderedPlaylistChanged
+    // says what that is). A location that changed is written into the
+    // playlist that is already on screen -- `cachedData` IS that closure's
+    // `data` -- rather than rebuilding it from item 1 for a status string.
+    if (!cachedData) {
       displayMediaContent(data);
+    } else {
+      if (data.location) {
+        cachedData.location = data.location;
+      }
+      if (renderedPlaylistChanged(cachedData.campaign_media, data.campaign_media)) {
+        displayMediaContent(data);
+      }
     }
 
     return data;
@@ -601,7 +582,7 @@ function stopPlayback() {
   // handler guards on `window.displayMedia` being truthy, so this is what
   // makes those keys inert instead of rendering into a detached node.
   window.displayMedia = null;
-  window.restartRotationTimer = null;
+  window.stepRotation = null;
   window.mediaLength = 0;
   window.currentMediaIndex = 0;
 
@@ -661,6 +642,26 @@ function stopPlayback() {
  * The cost of that design: any path that nulls the handle without restarting
  * is a silent restart from item 1, not a pause.
  */
+/**
+ * Did the part of a device payload that is RENDERED change?
+ *
+ * One answer for both callers -- fetchDeviceMedia() after a cache hit, and the
+ * rotation's wrap-around poll -- so the next field that starts to matter is
+ * added in one place. Only the media list is rendered: `location` feeds a
+ * status string and is updated in place, `playback`/`portrait_mode`/
+ * `keep_screen_on` are not read by this file at all, and `playback` differs
+ * between two fetches seconds apart (measured 2026-11-10), which is how a
+ * whole-payload comparison restarted the playlist from item 1 a few seconds
+ * after it had started.
+ *
+ * @param {Array|undefined} onScreen
+ * @param {Array|undefined} fetched
+ * @returns {boolean}
+ */
+function renderedPlaylistChanged(onScreen, fetched) {
+  return JSON.stringify(onScreen || []) !== JSON.stringify(fetched || []);
+}
+
 function playlistIsOnScreen() {
   return typeof window.mediaLength === 'number'
     && window.mediaLength > 0
@@ -1492,21 +1493,22 @@ function displayMediaContent(data) {
       };
 
       // Initial display
-      // The remote's LEFT/RIGHT re-arm the rotation through this rather than
-      // leaving `rotationInterval` null. A null handle is not "paused": it is
-      // what playlistIsOnScreen() reads as a dead playlist, and the pairing
-      // loop then re-fetches and rebuilds the whole playlist from item 1 --
-      // measured on the bench 2026-11-10, three seconds after a LEFT:
-      //   key LEFT -> 15 at 197s >> playlist -> 1 at 200s
-      // Nulled in stopPlayback() together with displayMedia, so a key pressed
-      // on the pairing screen cannot reach a closure whose stage is gone.
-      window.restartRotationTimer = () => {
-        if (!isCurrentGeneration()) {
+      // The remote's LEFT/RIGHT step through the SAME continuation as the
+      // tick: index, render (with the single-image guard), timer re-armed for
+      // the new item's slot. The keys used to null the timer and leave it --
+      // and a null handle is not "paused", it is what playlistIsOnScreen()
+      // reads as a dead playlist, so the pairing loop rebuilt the whole
+      // playlist from item 1 three seconds later (bench 2026-11-10:
+      // "key LEFT -> 15 at 197s >> playlist -> 1 at 200s"). Nulled in
+      // stopPlayback() with displayMedia, so a key on the pairing screen
+      // cannot reach a closure whose stage is gone.
+      window.stepRotation = (delta) => {
+        if (!isCurrentGeneration() || !window.mediaLength) {
           return;
         }
-        clearInterval(window.rotationInterval);
-        window.rotationInterval = null;
-        startRotationTimer();
+        window.currentMediaIndex =
+          (window.currentMediaIndex + delta + window.mediaLength) % window.mediaLength;
+        continueRotation();
       };
 
       window.displayMedia(0);
@@ -1631,11 +1633,14 @@ function displayMediaContent(data) {
               // 15 s; a reviewer's simulation put 10 of 10 laps through this
               // branch. Only what the branch applies is compared: the media
               // list, and the location when the server sends one.
-              const fetchedMedia = currentData.campaign_media || [];
-              const mediaChanged = JSON.stringify(data.campaign_media) !== JSON.stringify(fetchedMedia);
-              const locationChanged = !!currentData.location && currentData.location !== data.location;
+              // The location is informational: updated in place, never a
+              // reason to restart the playlist from item 1.
+              if (currentData.location && currentData.location !== data.location) {
+                data.location = currentData.location;
+                document.getElementById('checkdevice-response').textContent = `Connected to ${currentData.location}`;
+              }
 
-              if (mediaChanged || locationChanged) {
+              if (renderedPlaylistChanged(data.campaign_media, currentData.campaign_media)) {
                 // `|| []`, because the line below reads `.length` off this.
                 // A 200 without `campaign_media` threw here -- BEFORE the
                 // `mediaLength === 0` branch could run -- which left
@@ -1733,14 +1738,27 @@ function displayMediaContent(data) {
         return !!shown && shown.complete && shown.naturalWidth > 0;
       }
 
-      const continueRotation = () => {
+      /**
+       * Render the current item and re-arm the timer -- the one continuation
+       * every advance goes through: the tick, the remote's LEFT/RIGHT, and
+       * the wrap-around poll's resolver.
+       *
+       * `tokenAtTick`: the poll resolver passes the render token it saw when
+       * the tick fired. If a key (or a loop) rendered while the request was in
+       * flight, the item on screen is already the right one, and rendering
+       * it again would be a second AVPlay seam on the same clip -- so the
+       * render is skipped and only the timer is re-armed, for THIS item's
+       * slot. Undefined means "no poll in between": render as before.
+       */
+      const continueRotation = (tokenAtTick) => {
         if (!isCurrentGeneration()) {
           return;
         }
 
         // The timer is still rearmed below: the wrap-around poll in the tick
         // has to keep running so a switched-off campaign is noticed.
-        if (!singleImageAlreadyShowing()) {
+        const renderedMeanwhile = tokenAtTick !== undefined && renderToken !== tokenAtTick;
+        if (!renderedMeanwhile && !singleImageAlreadyShowing()) {
           window.displayMedia(window.currentMediaIndex);
         }
 
@@ -1837,6 +1855,12 @@ function displayMediaContent(data) {
               duration = clampSlotMs(videoElement.duration * 1000);
             } else {
               // Wait for metadata to load to get duration
+              // The render this listener was armed for. pause() does not cancel
+              // metadata loading, so a listener on an element clearStage()
+              // detached still fires -- and if the viewer has stepped away and
+              // back to the same item, the same-item check below is true again
+              // and it would replace the interval the step just armed.
+              const armedFor = renderToken;
               videoElement.addEventListener('loadedmetadata', function onMetadataLoaded() {
                 // The generation check has to come first. The same-item guard
                 // below compares against this closure's own `currentMedia`, so
@@ -1849,8 +1873,9 @@ function displayMediaContent(data) {
                   return;
                 }
 
-                // Only update if we're still on the same media item
-                if (data.campaign_media[window.currentMediaIndex] === currentMedia) {
+                // Only update if we're still on the same media item, AND on the
+                // same render of it.
+                if (renderToken === armedFor && data.campaign_media[window.currentMediaIndex] === currentMedia) {
                   clearInterval(window.rotationInterval);
                   const videoDuration = clampSlotMs(videoElement.duration * 1000);
 
@@ -1872,11 +1897,15 @@ function displayMediaContent(data) {
 
                     // If we just finished displaying the last item (now looped back to first)
                     if (isLastMediaItem) {
+                      // The render token at the tick: a key pressed while this request is
+                      // in flight renders on its own, and the resolver must then re-arm the
+                      // timer without rendering the same item a second time.
+                      const tokenAtTick = renderToken;
                       checkDeviceDataChanges()
                         .then(dataChanged => {
                           // Only continue rotation if data didn't change (which would restart rotation)
                           if (!dataChanged) {
-                            continueRotation();
+                            continueRotation(tokenAtTick);
                           }
                         })
                         .catch(() => {
@@ -1884,7 +1913,7 @@ function displayMediaContent(data) {
                           // Deliberately swallowed and unnamed: the only thing
                           // this level can do about a failed content poll is
                           // keep showing what is already on screen.
-                          continueRotation();
+                          continueRotation(tokenAtTick);
                         });
                     } else {
                       // Normal rotation for non-last items
@@ -1918,17 +1947,21 @@ function displayMediaContent(data) {
 
           // If we just finished displaying the last item (now looped back to first)
           if (isLastMediaItem) {
+            // The render token at the tick: a key pressed while this request is
+            // in flight renders on its own, and the resolver must then re-arm the
+            // timer without rendering the same item a second time.
+            const tokenAtTick = renderToken;
             checkDeviceDataChanges()
               .then(dataChanged => {
                 // Only continue rotation if data didn't change (which would restart rotation)
                 if (!dataChanged) {
-                  continueRotation();
+                  continueRotation(tokenAtTick);
                 }
               })
               .catch(() => {
                 // Continue with normal rotation despite the error.
                 // Deliberately swallowed and unnamed - see the sibling handler.
-                continueRotation();
+                continueRotation(tokenAtTick);
               });
           } else {
             // Normal rotation for non-last items
