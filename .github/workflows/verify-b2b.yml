@@ -76,6 +76,8 @@ jobs:
           set -euo pipefail
           rm -rf _site && mkdir _site
           git archive HEAD | tar -x -C _site
+          # A tree without b2b/ (the channel retired) has nothing to assert.
+          [ -d _site/b2b ] || { echo "no b2b/ - nothing to assert"; rm -rf _site; exit 0; }
           bash scripts/guard-b2b-site.sh _site
           test -f _site/b2b/latest/sssp_config.xml
           # The version directory latest/ mirrors today, whichever that is.

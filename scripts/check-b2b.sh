@@ -153,6 +153,17 @@ is_failed() {
     return 1
 }
 
+# Nothing but directories belongs directly under the channel root: a stray
+# file or package there is published world-readable, unversioned and
+# unchecked.
+for n in "$ROOT"/* "$ROOT"/.[!.]* "$ROOT"/..?*; do
+    [ -e "$n" ] || [ -L "$n" ] || continue
+    [ -d "$n" ] && [ ! -L "$n" ] && continue
+    echo "== $n"
+    echo "  FAIL  not a directory - nothing but version directories and latest/ belongs directly under $ROOT/"
+    mark_failed "$n"
+done
+
 highest=''
 highest_dir=''
 seen_vers=' '
@@ -184,19 +195,12 @@ for entry in "$ROOT"/*/; do
     fi
     [ "$name" = latest ] && continue
 
-    wgts=("$dir"/*.wgt)
-    if [ "${#wgts[@]}" -ne 1 ] || [ ! -f "${wgts[0]}" ]; then
-        echo "  FAIL  expected exactly one .wgt in $dir, found ${#wgts[@]}"
-        mark_failed "$dir"
-        continue
-    fi
-    wgt="${wgts[0]}"
+    # extra_entries has left exactly the descriptor and <widgetname>.wgt;
+    # the display asks for that file and nothing else.
     widget="$(widgetname_of "$dir/sssp_config.xml")"
-    if [ "$(basename "$wgt")" != "$widget.wgt" ]; then
-        # The display asks for <widgetname>.wgt and nothing else; a package
-        # under any other name is a 404 on Pages and a panel that keeps its
-        # old build without a word.
-        echo "  FAIL  package is $(basename "$wgt") but the descriptor advertises <widgetname>$widget</widgetname>, so a display would fetch $widget.wgt"
+    wgt="$dir/$widget.wgt"
+    if [ ! -f "$wgt" ]; then
+        echo "  FAIL  the descriptor advertises <widgetname>$widget</widgetname> but $widget.wgt is not here, so a display would 404"
         mark_failed "$dir"
         continue
     fi
@@ -339,11 +343,21 @@ fi
 # ---- author key: one reference, every directory against it -------------------
 # The key the fleet runs is the one the base's latest/ carries; without a base
 # it is whatever latest/ carries now. Every directory, latest/ included, is
-# compared with that one key, and whichever differs is the one charged.
+# compared with that one key, and whichever differs is the one charged. A
+# same key under a different certificate is a renewal: allowed, but warned
+# about the way author-identity-gate.sh warns for production/ - nobody has
+# yet watched a display take one over SSSP.
+cert_of() {
+    local c
+    c="$("$here/author-identity.sh" "$1" cert 2>/dev/null || true)"
+    case "$c" in none) c='' ;; esac
+    printf '%s' "$c"
+}
 ref_key=''
+ref_cert=''
 ref_src=''
 if [ -n "$base_key" ]; then
-    ref_key="$base_key"; ref_src="$CHECK_B2B_BASE's $BASE_PATH/latest"
+    ref_key="$base_key"; ref_cert="$(cert_of "$base_wgt_tmp")"; ref_src="$CHECK_B2B_BASE's $BASE_PATH/latest"
 elif [ "$base_has_latest" -eq 1 ]; then
     # The problem is in the base, not in this change: could not check.
     echo "cannot check: could not read the author key $CHECK_B2B_BASE's $BASE_PATH/latest serves"
@@ -351,19 +365,46 @@ elif [ "$base_has_latest" -eq 1 ]; then
 elif [ "$latest_ok" -eq 1 ]; then
     lw=("$ROOT/latest"/*.wgt)
     ref_key="$(key_of "${lw[0]}")"
+    ref_cert="$(cert_of "${lw[0]}")"
     ref_src="$ROOT/latest"
     if [ -z "$ref_key" ]; then
         echo "  FAIL  could not read the author key of $ROOT/latest"
         mark_failed "$ROOT/latest"
     fi
+fi
+if [ -n "$ref_key" ]; then
+    echo "== author key: every directory must carry $ref_key ($ref_src)"
+    to_check=(${versions[@]+"${versions[@]}"})
+    # latest/ is compared too unless it IS the reference (then it would only
+    # be compared with itself).
+    [ "$latest_ok" -eq 1 ] && [ "$ref_src" != "$ROOT/latest" ] && to_check+=("$ROOT/latest")
+    key_fails=0
+    for dir in ${to_check[@]+"${to_check[@]}"}; do
+        is_failed "$dir" && continue
+        dw=("$dir"/*.wgt)
+        key="$(key_of "${dw[0]}")"
+        if [ -z "$key" ]; then
+            echo "  FAIL  could not read the author key of $dir"
+            mark_failed "$dir"
+            key_fails=$((key_fails + 1))
+        elif [ "$key" != "$ref_key" ]; then
+            echo "  FAIL  $dir is signed with author key $key, not $ref_key - panels on the channel would refuse it"
+            mark_failed "$dir"
+            key_fails=$((key_fails + 1))
+        elif [ -n "$ref_cert" ] && [ "$(cert_of "${dw[0]}")" != "$ref_cert" ]; then
+            echo "  warn  $dir: same signing key, a different certificate - a renewal. Samsung says a renewal over the existing key keeps an app updatable, but says it about the Galaxy store; nobody has watched a display take one over SSSP. Watch the FIRST screen take this update."
+            [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::$dir carries a renewed certificate over the same key as $ref_src - watch the first screen take it"
+        fi
+    done
+    [ "$key_fails" -eq 0 ] && echo "  ok    every directory carries it"
 elif [ "${#versions[@]}" -gt 0 ]; then
-    # latest/ cannot serve as the reference (it failed) and there is no
+    # No usable reference (latest/ failed, or its key cannot be read) and no
     # base, so nothing says which key the fleet runs. The version
     # directories must then agree among themselves; if they do not, there
     # is no way to tell the foreign one from the right one, and every one
     # of them is withheld until latest/ is fixed. Safe either way: a
     # withheld directory means panels keep the build they have.
-    echo "== author key: latest/ is not usable as the reference and there is no base - the versions must agree"
+    echo "== author key: no usable reference and no base - the versions must agree"
     first_key=''
     disagree=0
     for dir in ${versions[@]+"${versions[@]}"}; do
@@ -387,29 +428,6 @@ elif [ "${#versions[@]}" -gt 0 ]; then
         echo "  ok    every version directory carries $first_key"
     fi
 fi
-if [ -n "$ref_key" ]; then
-    echo "== author key: every directory must carry $ref_key ($ref_src)"
-    to_check=(${versions[@]+"${versions[@]}"})
-    # latest/ is compared too unless it IS the reference (then it would only
-    # be compared with itself).
-    [ "$latest_ok" -eq 1 ] && [ "$ref_src" != "$ROOT/latest" ] && to_check+=("$ROOT/latest")
-    key_fails=0
-    for dir in ${to_check[@]+"${to_check[@]}"}; do
-        is_failed "$dir" && continue
-        dw=("$dir"/*.wgt)
-        key="$(key_of "${dw[0]}")"
-        if [ -z "$key" ]; then
-            echo "  FAIL  could not read the author key of $dir"
-            mark_failed "$dir"
-            key_fails=$((key_fails + 1))
-        elif [ "$key" != "$ref_key" ]; then
-            echo "  FAIL  $dir is signed with author key $key, not $ref_key - panels on the channel would refuse it"
-            mark_failed "$dir"
-            key_fails=$((key_fails + 1))
-        fi
-    done
-    [ "$key_fails" -eq 0 ] && echo "  ok    every directory carries it"
-fi
 
 # ---- against the base: never backwards, never a new package under an old <ver>
 if [ "$base_has_latest" -eq 1 ] && [ "$latest_ok" -eq 1 ]; then
@@ -426,6 +444,8 @@ if [ "$base_has_latest" -eq 1 ] && [ "$latest_ok" -eq 1 ]; then
             echo "  FAIL  the package in $ROOT/latest changed but <ver>$new_ver</ver> did not - no display would ever download it (a re-sign needs a version bump)"
             mark_failed "$ROOT/latest"
         fi
+    elif ! [[ "$base_ver" =~ ^[0-9]+$ ]]; then
+        echo "  note  $CHECK_B2B_BASE's $BASE_PATH/latest advertises <ver>$base_ver</ver>, not an integer - cannot compare; a display following it has never re-downloaded anyway (served-baseline.sh calls this 'legacy')"
     else
         echo "  ok    <ver>$new_ver</ver> is above $CHECK_B2B_BASE's <ver>$base_ver</ver>"
     fi
