@@ -1573,7 +1573,25 @@ function displayMediaContent(data) {
         }
 
         const currentMedia = data.campaign_media[window.currentMediaIndex];
-        let duration = currentMedia.duration || 10000;
+        // `duration` arrives in SECONDS -- the API builds it from
+        // `secondsForEachImageOnScreensaver`, default 15 -- and setInterval
+        // wants milliseconds. This line used to pass the value straight
+        // through, so every image slot was 15 ms: the stage re-rendered at
+        // ~66 Hz, which a camera integrates into a double exposure and an eye
+        // reads as a strobe. Measured on the bench 2026-11-10 (QB43C, the
+        // Default campaign, HUD open). The bundle in the field (1.0.10 as
+        // uploaded to Seller Office) never read this field at all and so
+        // never showed it; the pass-through came in with 707f5ac on
+        // 2026-09-05 and shipped in 1.0.12, which was never released.
+        // signage.digmi.eu multiplies by 1000; this is the same contract.
+        //
+        // Floor of one second, deliberately: a unit mistake here is not a
+        // cosmetic bug, it is a flashing screen in a salon, and a floor is
+        // the cheapest thing that makes the next one harmless.
+        const apiSeconds = Number(currentMedia.duration);
+        let duration = Number.isFinite(apiSeconds) && apiSeconds > 0
+          ? Math.max(1000, apiSeconds * 1000)
+          : 10000;
 
         // For videos, get the length from the player.
         //
