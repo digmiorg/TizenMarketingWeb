@@ -110,10 +110,9 @@ scripts/served-baseline.sh b2b/latest                    # <ver> the new one has
 ```
 
 `served-baseline.sh` reads the descriptor in the checkout, not Pages: on a
-branch cut from `main` that is what Pages serves, and after the merge
-`check-served.sh` (below) is the check against the live site.
+branch cut from `main` that is what Pages serves.
 
-and after each merge, that Pages serves the bytes you committed — only the
+After each merge, check that Pages serves the bytes you committed — only the
 version directory after step 1 (`latest/` still advertises the old `<ver>` then,
 and the script would wait on it and fail), both after step 3:
 

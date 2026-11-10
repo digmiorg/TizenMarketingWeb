@@ -28,12 +28,19 @@ here="$(cd "$(dirname "$0")" && pwd)"
 
 # The <ver> a directory's descriptor advertises, raw (may be non-numeric).
 ver_of() {
-    sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' "$1/sssp_config.xml" | head -1
+    # `|| true`: head closes the pipe, and under pipefail that SIGPIPE would
+    # take the script down before it could report what it read.
+    sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' "$1/sssp_config.xml" | head -1 || true
+}
+
+# The <widgetname> a directory's descriptor advertises: the file a display asks for.
+widgetname_of() {
+    sed -n 's|.*<widgetname>\(.*\)</widgetname>.*|\1|p' "$1/sssp_config.xml" | head -1 || true
 }
 
 # The version attribute of the <widget> element in a package's config.xml.
 package_version() {
-    unzip -p "$1" config.xml | sed -n 's|.*<widget [^>]*version="\([0-9.]*\)".*|\1|p' | head -1
+    unzip -p "$1" config.xml | sed -n 's|.*<widget [^>]*version="\([0-9.]*\)".*|\1|p' | head -1 || true
 }
 
 # A semver as the integer <ver> build-wgt.sh derives: major*10000+minor*100+patch.
@@ -67,6 +74,14 @@ for cfg in "$ROOT"/*/sssp_config.xml; do
         continue
     fi
     wgt="${wgts[0]}"
+    widget="$(widgetname_of "$dir")"
+    if [ "$(basename "$wgt")" != "$widget.wgt" ]; then
+        # The display asks for <widgetname>.wgt and nothing else; a package
+        # under any other name is a 404 on Pages and a panel that keeps its
+        # old build without a word.
+        echo "  FAIL  package is $(basename "$wgt") but the descriptor advertises <widgetname>$widget</widgetname>, so a display would fetch $widget.wgt"
+        fail=1
+    fi
     pkgver="$(package_version "$wgt")"
     if [ "$pkgver" != "$name" ]; then
         echo "  FAIL  directory is $name but the package's config.xml says $pkgver"
@@ -78,7 +93,21 @@ for cfg in "$ROOT"/*/sssp_config.xml; do
         fail=1
         continue
     fi
-    if [[ "$pkgver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ "$ver" != "$(encode "$pkgver")" ]; then
+    # Same contract as build-wgt.sh: three numeric parts, minor and patch
+    # below 100, or the encoding is ambiguous (1.0.100 and 1.1.0 would both
+    # be 10100). Anything else is refused here, not silently skipped.
+    if ! [[ "$pkgver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "  FAIL  package version '$pkgver' is not major.minor.patch, so <ver> cannot be derived from it"
+        fail=1
+        continue
+    fi
+    IFS=. read -r _ pminor ppatch <<< "$pkgver"
+    if [ "$((10#$pminor))" -ge 100 ] || [ "$((10#$ppatch))" -ge 100 ]; then
+        echo "  FAIL  package version $pkgver has a minor or patch of 100 or more, which collides in the <ver> encoding"
+        fail=1
+        continue
+    fi
+    if [ "$ver" != "$(encode "$pkgver")" ]; then
         echo "  FAIL  <ver>$ver</ver> is not $pkgver encoded ($(encode "$pkgver"))"
         fail=1
     fi
@@ -93,7 +122,13 @@ for cfg in "$ROOT"/*/sssp_config.xml; do
     fi
 done
 
-if [ -d "$ROOT/latest" ]; then
+if [ ! -d "$ROOT/latest" ]; then
+    # Every panel on the channel follows latest/; without it they 404 on
+    # the descriptor, and no version is compared with any other.
+    echo "== $ROOT/latest"
+    echo "  FAIL  $ROOT/latest is missing"
+    fail=1
+else
     echo "== $ROOT/latest"
     if [ "${#versions[@]}" -eq 0 ]; then
         echo "  FAIL  no version directory to compare $ROOT/latest with"
@@ -115,18 +150,18 @@ if [ -d "$ROOT/latest" ]; then
             echo "  note  identical to $match; $highest_dir (<ver>$highest</ver>) is not on latest/ yet (README step 1 - prove it on a panel first)"
             [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice::$ROOT/latest serves $match, not $highest_dir"
         fi
-        for dir in "${versions[@]}"; do
-            wgts=("$dir"/*.wgt)
-            # stdout passes through: a renewal over the same key is a
-            # ::warning:: the gate prints, and it belongs in the CI summary.
-            rc=0
-            "$here/author-identity-gate.sh" "${wgts[0]}" "$ROOT/latest" | sed 's/^/        /' || rc="${PIPESTATUS[0]}"
-            case "$rc" in
-                0) echo "  ok    $dir carries the author key $ROOT/latest serves" ;;
-                2) echo "  FAIL  $dir is signed with a different author key than $ROOT/latest - panels on the channel would refuse it"; fail=1 ;;
-                *) echo "  FAIL  author-identity-gate.sh could not compare $dir with $ROOT/latest (exit $rc)"; fail=1 ;;
-            esac
-        done
+        # One gate call: latest/'s package is the candidate, every version
+        # directory is a served directory, and the gate prints each one's
+        # key. stdout passes through: a renewal over the same key is a
+        # ::warning:: the gate prints, and it belongs in the CI summary.
+        latest_wgts=("$ROOT/latest"/*.wgt)
+        rc=0
+        "$here/author-identity-gate.sh" "${latest_wgts[0]}" "${versions[@]}" | sed 's/^/        /' || rc="${PIPESTATUS[0]}"
+        case "$rc" in
+            0) echo "  ok    every version carries the author key $ROOT/latest serves" ;;
+            2) echo "  FAIL  a version directory is signed with a different author key than $ROOT/latest - panels on the channel would refuse it (see the keys above)"; fail=1 ;;
+            *) echo "  FAIL  author-identity-gate.sh could not compare the versions with $ROOT/latest (exit $rc)"; fail=1 ;;
+        esac
     fi
 fi
 
