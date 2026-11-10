@@ -116,7 +116,12 @@ function showReloadModal() {
  * registration -- nor take the rest of this file down, since this runs at
  * module level.
  */
-const REMOTE_KEYS_TO_REGISTER = ['Info'];
+// With the HUD open, 6-9 turn the video plane (NONE/90/180/270) on the next
+// clip and 5 goes back to automatic -- the probe's own bench control, kept
+// because which way a portrait panel wants is not knowable in advance. Read
+// back on the HUD's Stage line. Only with the HUD open: a customer leaning on
+// the remote must not be able to turn every advert sideways for weeks.
+const REMOTE_KEYS_TO_REGISTER = ['Info', '5', '6', '7', '8', '9'];
 
 REMOTE_KEYS_TO_REGISTER.forEach((keyName) => {
   try {
@@ -131,6 +136,25 @@ REMOTE_KEYS_TO_REGISTER.forEach((keyName) => {
 document.addEventListener('keydown', function (e) {
   let deviceInfoElement;
 
+  // Digits 5-9 with the HUD open: 5 = automatic, 6-9 = NONE/90/180/270 for
+  // the AVPlay plane. Takes effect when the next clip starts; the current one
+  // is not touched. Survives a playlist change on purpose (that is what a
+  // bench measurement needs) and a reload clears it.
+  if (e.keyCode >= window.tvKey.NUM_5 && e.keyCode <= window.tvKey.NUM_9) {
+    if (e.repeat) {
+      return;
+    }
+    const hud = document.querySelector('.device-info');
+    if (!hud || !hud.classList.contains('visible')) {
+      return;
+    }
+    window.avplayRotationOverride = [null, 'NONE', '90', '180', '270'][e.keyCode - window.tvKey.NUM_5];
+    console.log('[avplay] rotation override: ' + (window.avplayRotationOverride || 'automatic') + ' - applies on the next clip');
+    updateStageGeometry();
+    e.preventDefault();
+    return;
+  }
+
   switch (e.keyCode) {
     case window.tvKey.ENTER:
     case window.tvKey.INFO:
@@ -140,6 +164,14 @@ document.addEventListener('keydown', function (e) {
         // inline in two separate copies, which silently beats any stylesheet
         // rule and made the panel's state depend on which key opened it.
         deviceInfoElement.classList.toggle('visible');
+        // The rotation override lives exactly as long as the HUD is open.
+        // Set with it open, cleared when it closes: a technician who presses
+        // 8 to look and then closes the panel must not leave every advert
+        // turned 180 degrees with no hint on screen.
+        if (!deviceInfoElement.classList.contains('visible') && window.avplayRotationOverride) {
+          window.avplayRotationOverride = null;
+          console.log('[avplay] rotation override cleared with the HUD - back to automatic on the next clip');
+        }
         updateStageGeometry();
       }
       e.preventDefault();
@@ -472,7 +504,10 @@ function updateStageGeometry() {
   // because this file no longer chooses one -- it is always the full screen,
   // with setDisplayMethod deciding the letterbox inside it.
   if (window.avplayOnPlane) {
-    readout.textContent = 'viewport ' + viewport + ', avplay full screen (letterboxed)';
+    readout.textContent = 'viewport ' + viewport + ', avplay rect ' + (window.avplayRect || '?') +
+      ' (letterboxed), rotation ' + (window.avplayRotation || 'unset') +
+      (window.avplayRotationOverride ? ', next: ' + window.avplayRotationOverride : ', next: automatic') +
+      ' [5=auto 6=none 7=90 8=180 9=270; cleared when HUD closes]';
 
     return;
   }
@@ -870,6 +905,17 @@ function getSharedAvplay() {
   }
   sharedAvplay = window.DigmiAvplay.createPlayer({
     log: (line) => console.log('[avplay] ' + line),
+    rotation: () => window.avplayRotationOverride || null,
+    // Measured on the bench, never derived. null until a portrait panel that
+    // reports angle 0 (or no orientation API) has been seen and turned by
+    // hand; the QB43C reports its angle and needs none.
+    portraitFallback: null,
+    onRotation: (value, source, state, rect) => {
+      window.avplayRotation = value + ' (' + source + ', ' + state + ')';
+      window.avplayRect = rect
+        ? rect.width + 'x' + rect.height + ' at ' + rect.x + ',' + rect.y + ' (' + rect.state + ')'
+        : '?';
+    },
     onStreamCompleted: () => {
       if (avplayHooks.onStreamCompleted) {
         avplayHooks.onStreamCompleted();
@@ -895,6 +941,8 @@ function getSharedAvplay() {
 function closeSharedAvplay() {
   avplayHooks.onStreamCompleted = null;
   avplayHooks.onError = null;
+  // A bench override must not outlive the player it was measured on.
+  window.avplayRotationOverride = null;
   if (sharedAvplay) {
     sharedAvplay.close();
     sharedAvplay = null;
@@ -1195,6 +1243,13 @@ function displayMediaContent(data) {
             planeHeld = true;
             loopsDisabledUntilNextPlay = false;
             setPlaneVisible(true);
+            // The Stage readout is the line a bench reads to see which
+            // rotation and rect THIS clip got (onRotation has already run
+            // inside play()). Nothing else refreshes it on a clip start, so
+            // with the HUD open it kept showing the previous clip's values
+            // until an image or a key press came along -- stale in exactly
+            // the measurement it exists for.
+            updateStageGeometry();
             onScreenKind = 'video';
             updateCaption();
             return;

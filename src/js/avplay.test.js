@@ -61,6 +61,7 @@ function fakePanel(overrides) {
     play: record('play'),
     close: record('close'),
     setDisplayRect: record('setDisplayRect'),
+    setDisplayRotation: record('setDisplayRotation'),
     setDisplayMethod: record('setDisplayMethod'),
     setVideoStillMode: record('setVideoStillMode'),
     getDuration: () => 15000,
@@ -182,6 +183,210 @@ test('createPlayer: the display rect is the full screen - the only form measured
 
   assert.deepEqual(panel.args.setDisplayRect[0], [0, 0, 1080, 1920]);
   assert.deepEqual(panel.args.setDisplayMethod[0], ['PLAYER_DISPLAY_MODE_LETTER_BOX']);
+});
+
+test('createPlayer: the plane is turned to the web layer\'s angle, and BEFORE the rect', () => {
+  // Samsung: setDisplayRotation "will change the origin of coordinates. So,
+  // Application should call setDisplayRect() again after calling this API."
+  // The web layer on a portrait-mounted panel is rotated by the panel; the
+  // plane is not, so without this every portrait clip comes out sideways --
+  // seen on the bench 2026-11-10. The probe never met it: it only ever ran
+  // with the panel displaying landscape.
+  const panel = fakePanel();
+  panel.scope.screen = { orientation: { angle: 90 } };
+  const player = makePlayer(panel);
+
+  player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+
+  assert.deepEqual(panel.args.setDisplayRotation[0], ['PLAYER_DISPLAY_ROTATION_90']);
+  const prepare = panel.calls.indexOf('prepare');
+  const turned = panel.calls.indexOf('setDisplayRotation');
+  const rect = panel.calls.indexOf('setDisplayRect');
+  assert.ok(prepare < turned, 'the plane was turned before prepare()');
+  assert.ok(turned < rect, 'the rect was set BEFORE the rotation changed its coordinate origin');
+});
+
+test('createPlayer: a landscape viewport leaves the plane untouched - the measured sequence, call for call', () => {
+  // The 482 seams were measured with no rotation call taking effect (the
+  // probe sent PLAYER_DISPLAY_ROTATION_0, which is not a value Samsung
+  // accepts, so it never took). A landscape fleet keeps exactly that
+  // sequence: no new native call between prepare() and the rect. fakePanel
+  // has no `screen`, so there is no orientation API here either.
+  const reported = [];
+  const panel = fakePanel();
+  const player = makePlayer(panel, { onRotation: (v, s, state) => reported.push(v + ':' + s + ':' + state) });
+
+  player.play('http://example/clip.mp4', { width: 1920, height: 1080 });
+
+  assert.equal(panel.calls.indexOf('setDisplayRotation'), -1, 'a landscape panel got a rotation call it was never measured with');
+  assert.deepEqual(reported, ['NONE:landscape:skipped']);
+});
+
+test('createPlayer: a landscape fleet is SILENT about rotation, and the HUD gets the rect verbatim', () => {
+  // The "press 7 or 9" line is for the one unmeasured case. A future change
+  // that logs it on every skipped rotation would nag every landscape seam in
+  // the field; nothing but this test would notice. And the rect handed to
+  // the HUD is the line the bench reads to decide whether the rotated
+  // coordinate space swaps its axes, so it must be the rect that was sent.
+  const lines = [];
+  const rects = [];
+  const panel = fakePanel();
+  panel.scope.screen = { orientation: { angle: 0 } };
+  const player = makePlayer(panel, {
+    log: (line) => lines.push(line),
+    onRotation: (v, s, state, rect) => rects.push(rect),
+  });
+
+  player.play('http://example/clip.mp4', { width: 1920, height: 1080 });
+
+  assert.deepEqual(lines.filter((line) => /portrait|press 7/i.test(line)), [], 'a landscape panel was told to press a key');
+  assert.deepEqual(rects, [{ x: 0, y: 0, width: 1920, height: 1080, state: 'applied' }]);
+  assert.deepEqual(panel.args.setDisplayRect[0], [0, 0, 1920, 1080]);
+});
+
+test('createPlayer: back to automatic after an override UNDOES the turn on the same instance', () => {
+  // The same player carries the last turn into the next clip. Without this
+  // a technician pressing 7 and then 5 leaves the plane at 90 degrees while
+  // the HUD reads "NONE ... skipped". Only the first clip after the override
+  // sends NONE; the ones after it are skipped like any landscape clip.
+  const panel = fakePanel();
+  let forced = '90';
+  const player = makePlayer(panel, { rotation: () => forced });
+
+  player.play('http://example/a.mp4', { width: 1920, height: 1080 });
+  forced = null;
+  player.play('http://example/b.mp4', { width: 1920, height: 1080 });
+  player.play('http://example/c.mp4', { width: 1920, height: 1080 });
+
+  assert.deepEqual(
+    panel.args.setDisplayRotation.map((call) => call[0]),
+    ['PLAYER_DISPLAY_ROTATION_90', 'PLAYER_DISPLAY_ROTATION_NONE'],
+  );
+});
+
+test('createPlayer: the rect the HUD gets is reported AFTER the attempt, with its own outcome', () => {
+  // The rect line is what decides whether the rotated coordinate space swaps
+  // its axes. A rect that the panel refused must not be shown as the rect
+  // that took.
+  const rects = [];
+  const panel = fakePanel({ setDisplayRect: () => { throw new Error('InvalidValuesError'); } });
+  panel.scope.screen = { orientation: { angle: 90 } };
+  const player = makePlayer(panel, { onRotation: (v, s, state, rect) => rects.push(rect.state) });
+
+  const result = player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+
+  assert.equal(result.ok, true, 'a refused rect must not abort the clip');
+  assert.deepEqual(rects, ['refused']);
+  assert.ok(panel.calls.indexOf('setDisplayRect') > -1, 'the rect was never attempted');
+});
+
+test('createPlayer: a portrait panel with NO orientation API is told apart from one reporting angle 0', () => {
+  // Both end up "not turned", but a bench has to know which panel it is
+  // measuring, and the portraitFallback option is how the measured value
+  // comes back in -- as an option, so this test can pin it.
+  const sources = [];
+  const bare = fakePanel();
+  makePlayer(bare, { onRotation: (v, s) => sources.push(s) })
+    .play('http://example/a.mp4', { width: 1080, height: 1920 });
+
+  const zero = fakePanel();
+  zero.scope.screen = { orientation: { angle: 0 } };
+  makePlayer(zero, { onRotation: (v, s) => sources.push(s) })
+    .play('http://example/b.mp4', { width: 1080, height: 1920 });
+
+  const measured = fakePanel();
+  makePlayer(measured, { portraitFallback: '270', onRotation: (v, s) => sources.push(s) })
+    .play('http://example/c.mp4', { width: 1080, height: 1920 });
+
+  assert.deepEqual(sources, ['no-orientation-api', 'unmeasured', 'viewport']);
+  assert.equal(bare.calls.indexOf('setDisplayRotation'), -1);
+  assert.equal(zero.calls.indexOf('setDisplayRotation'), -1);
+  assert.deepEqual(measured.args.setDisplayRotation[0], ['PLAYER_DISPLAY_ROTATION_270']);
+});
+
+test('createPlayer: a portrait viewport with angle 0 is reported as unmeasured, not silently turned', () => {
+  // A panel that rotates in its compositor can report angle 0 for a portrait
+  // page. Until the bench has measured which way AVPlay counts, the honest
+  // answer is "not turned" on the HUD -- not a guess that comes out sideways.
+  const reported = [];
+  const panel = fakePanel();
+  panel.scope.screen = { orientation: { angle: 0 } };
+  const player = makePlayer(panel, { onRotation: (v, s, state) => reported.push(v + ':' + s + ':' + state) });
+
+  player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+
+  assert.equal(panel.calls.indexOf('setDisplayRotation'), -1);
+  assert.deepEqual(reported, ['NONE:unmeasured:skipped']);
+});
+
+test('createPlayer: 180 and 270 map to their own values, and an override of NONE is SENT', () => {
+  // 180/270 pin the mapping (a mutation folding 180 into NONE survived
+  // before this). An override of NONE exists to undo an earlier turn, so
+  // unlike the derived NONE it must reach the panel.
+  const panel = fakePanel();
+  panel.scope.screen = { orientation: { angle: 180 } };
+  let forced = null;
+  const player = makePlayer(panel, { rotation: () => forced });
+
+  player.play('http://example/a.mp4', { width: 1080, height: 1920 });
+  panel.scope.screen.orientation.angle = 270;
+  player.play('http://example/b.mp4', { width: 1080, height: 1920 });
+  forced = 'NONE';
+  player.play('http://example/c.mp4', { width: 1080, height: 1920 });
+
+  assert.deepEqual(
+    panel.args.setDisplayRotation.map((call) => call[0]),
+    ['PLAYER_DISPLAY_ROTATION_180', 'PLAYER_DISPLAY_ROTATION_270', 'PLAYER_DISPLAY_ROTATION_NONE'],
+  );
+});
+
+test('createPlayer: a refused or absent setDisplayRotation still sets the rect and plays, and says so', () => {
+  // The call is new on this firmware. If it throws, the clip must still be
+  // placed and started -- sideways beats black -- and the HUD must not read
+  // a value that never took.
+  const reported = [];
+  const refusing = fakePanel({ setDisplayRotation: () => { throw new Error('InvalidStateError'); } });
+  refusing.scope.screen = { orientation: { angle: 90 } };
+  const a = makePlayer(refusing, { onRotation: (v, s, state) => reported.push(state) });
+  const resultA = a.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+  assert.equal(resultA.ok, true);
+  ['setDisplayRect', 'setDisplayMethod', 'play'].forEach((name) => {
+    assert.ok(refusing.calls.indexOf(name) > refusing.calls.indexOf('setDisplayRotation'), name + ' did not run after the refusal');
+  });
+
+  const absent = fakePanel();
+  delete absent.player.setDisplayRotation;
+  absent.scope.screen = { orientation: { angle: 90 } };
+  const b = makePlayer(absent, { onRotation: (v, s, state) => reported.push(state) });
+  const resultB = b.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+  assert.equal(resultB.ok, true);
+  assert.ok(absent.calls.indexOf('play') > -1);
+
+  assert.deepEqual(reported, ['refused', 'absent']);
+});
+
+test('createPlayer: a rotation override wins over the screen angle, and an invalid one does not', () => {
+  // Which way round AVPlay counts is not knowable in advance; Samsung's own
+  // sample binds remote keys for the same reason. The override is how the
+  // bench finds out, so it has to win -- and a stray value must not.
+  const reported = [];
+  const panel = fakePanel();
+  panel.scope.screen = { orientation: { angle: 90 } };
+  let forced = '270';
+  const player = makePlayer(panel, {
+    rotation: () => forced,
+    onRotation: (value, source) => reported.push(value + ':' + source),
+  });
+
+  player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+  forced = '45';
+  player.play('http://example/clip2.mp4', { width: 1080, height: 1920 });
+
+  assert.deepEqual(
+    panel.args.setDisplayRotation.map((call) => call[0]),
+    ['PLAYER_DISPLAY_ROTATION_270', 'PLAYER_DISPLAY_ROTATION_90'],
+  );
+  assert.deepEqual(reported, ['270:override', '90:screen']);
 });
 
 test('createPlayer: without the avplayer <object> it refuses rather than playing nothing', () => {
