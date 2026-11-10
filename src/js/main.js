@@ -323,7 +323,7 @@ function getDeviceModel() {
 
 const MediaStorage = {
   STORAGE_KEY: 'digmi_cached_media',
-  TTL: 10000, // 1 hours
+  TTL: 10000, // 10 s, not an hour: a cold-start accelerator, not a change detector
 
   save: function(uuid, data) {
     const storage = {
@@ -1153,9 +1153,9 @@ function displayMediaContent(data) {
           : fullsize;
         const useAvplay = !!avplay && !avplayFailed;
         // Keyed on whether AVPlay is actually driving, not merely present.
-        // On the <video> path there is no video plane to cover, so an image
-        // arriving after a clip should keep its fade rather than snapping in
-        // to hide a teardown that cannot happen.
+        // On the <video> path there is no video plane, so the plan carries no
+        // freeze and nothing to cover. (The fade this once protected is gone
+        // from the image path; see the className note below.)
         const seam = useAvplay
           ? window.DigmiAvplay.seamPlan(onScreenKind, isVideo ? 'video' : 'image')
           : { freeze: false, coverMustBePainted: false };
@@ -1432,11 +1432,23 @@ function displayMediaContent(data) {
                 return true;
               }
 
-              // Load cached data
-              const cachedData = MediaStorage.load(uuid);
+              // Compared against what is ON SCREEN -- this closure's `data`,
+              // which the branch below mutates in place -- and not against
+              // MediaStorage. That cache has a 10 s TTL while slides are
+              // 10 s or longer, so by the time this resolved it had almost
+              // always expired and answered null, which read as "changed":
+              // every lap re-rendered slide 0 from scratch and reset the
+              // index, and a one-picture campaign went the whole
+              // decode-and-swap every slot. The single-image guard in
+              // continueRotation() was never even consulted at the default
+              // 15 s; a reviewer's simulation put 10 of 10 laps through this
+              // branch. Only what the branch applies is compared: the media
+              // list, and the location when the server sends one.
+              const fetchedMedia = currentData.campaign_media || [];
+              const mediaChanged = JSON.stringify(data.campaign_media) !== JSON.stringify(fetchedMedia);
+              const locationChanged = !!currentData.location && currentData.location !== data.location;
 
-              // If data differs from cache or no cache exists, update the data
-              if (!cachedData || JSON.stringify(cachedData) !== JSON.stringify(currentData)) {
+              if (mediaChanged || locationChanged) {
                 // `|| []`, because the line below reads `.length` off this.
                 // A 200 without `campaign_media` threw here -- BEFORE the
                 // `mediaLength === 0` branch could run -- which left
@@ -1558,6 +1570,27 @@ function displayMediaContent(data) {
         startRotationTimer();
       };
 
+      /**
+       * Every slot length passes through here before it reaches setInterval.
+       *
+       * Floor 1 s: a unit mistake upstream is a flashing screen in a salon,
+       * and this is the cheapest thing that makes the next one harmless.
+       * Ceiling 1 h: setInterval stores its delay as a 32-bit integer, so a
+       * value past 2^31-1 ms wraps and fires at once -- a strobe again, from
+       * the other direction. Non-finite: a live stream reports Infinity for
+       * `videoElement.duration`, and Infinity * 1000 is Infinity, which
+       * setInterval treats as 0.
+       *
+       * @param {number} ms
+       * @return {number}
+       */
+      function clampSlotMs(ms) {
+        if (!Number.isFinite(ms) || ms <= 0) {
+          return 10000;
+        }
+        return Math.min(3600000, Math.max(1000, ms));
+      }
+
       // Set up rotation interval
       function startRotationTimer() {
         // Second line of defence, not the only one. continueRotation() guards
@@ -1588,10 +1621,7 @@ function displayMediaContent(data) {
         // Floor of one second, deliberately: a unit mistake here is not a
         // cosmetic bug, it is a flashing screen in a salon, and a floor is
         // the cheapest thing that makes the next one harmless.
-        const apiSeconds = Number(currentMedia.duration);
-        let duration = Number.isFinite(apiSeconds) && apiSeconds > 0
-          ? Math.max(1000, apiSeconds * 1000)
-          : 10000;
+        let duration = clampSlotMs(Number(currentMedia.duration) * 1000);
 
         // For videos, get the length from the player.
         //
@@ -1603,9 +1633,9 @@ function displayMediaContent(data) {
         // The fallback when AVPlay will not say a length is NOT the <video>
         // branch below -- that branch looks for a `.media-player video`
         // element, and on the AVPlay path there never is one, so it always
-        // reaches `currentMedia.duration || 10000`. A 45 s clip with no
-        // server-side duration is therefore cut at 10 s. Worth knowing before
-        // trusting the number.
+        // keeps the server-side `duration` (in seconds, clamped above). A 45 s
+        // clip with no server-side duration is therefore cut at the 10 s
+        // default. Worth knowing before trusting the number.
         const avplayMs = window.avplayDurationMs ? window.avplayDurationMs() : null;
         if (currentMedia.video && avplayMs) {
           duration = avplayMs;
@@ -1621,7 +1651,7 @@ function displayMediaContent(data) {
           if (videoElement) {
             // Check if duration is already available
             if (videoElement.duration && videoElement.duration > 0) {
-              duration = videoElement.duration * 1000; // Convert to milliseconds
+              duration = clampSlotMs(videoElement.duration * 1000);
             } else {
               // Wait for metadata to load to get duration
               videoElement.addEventListener('loadedmetadata', function onMetadataLoaded() {
@@ -1639,7 +1669,7 @@ function displayMediaContent(data) {
                 // Only update if we're still on the same media item
                 if (data.campaign_media[window.currentMediaIndex] === currentMedia) {
                   clearInterval(window.rotationInterval);
-                  const videoDuration = videoElement.duration * 1000;
+                  const videoDuration = clampSlotMs(videoElement.duration * 1000);
 
                   // Set new interval with correct duration
                   window.rotationInterval = setInterval(() => {
