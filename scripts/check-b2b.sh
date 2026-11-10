@@ -42,7 +42,7 @@
 #
 # Usage: scripts/check-b2b.sh [b2b-dir]   (default: b2b)
 
-set -euo pipefail
+set -Eeuo pipefail
 
 ROOT="${1:-b2b}"
 BASE_PATH="${CHECK_B2B_BASE_PATH:-b2b}"
@@ -51,6 +51,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # Anything this script did not plan for - a tool failing, a path that is not
 # there - is "could not check", never "broken": the publish guard must not
 # withhold a correct b2b/ because of a runner fault.
+# -E: the trap is inherited into functions too.
 trap 'echo "cannot check: unexpected error at line $LINENO"; exit 2' ERR
 
 for tool in unzip openssl python3 sed diff cmp mktemp find basename git; do
@@ -293,8 +294,9 @@ ref_src=''
 if [ -n "$base_key" ]; then
     ref_key="$base_key"; ref_src="$CHECK_B2B_BASE's $BASE_PATH/latest"
 elif [ "$base_has_latest" -eq 1 ]; then
-    echo "  FAIL  could not read the author key $CHECK_B2B_BASE's $BASE_PATH/latest serves"
-    fail=1
+    # The problem is in the base, not in this change: could not check.
+    echo "cannot check: could not read the author key $CHECK_B2B_BASE's $BASE_PATH/latest serves"
+    exit 2
 elif [ "$latest_ok" -eq 1 ]; then
     lw=("$ROOT/latest"/*.wgt)
     ref_key="$(key_of "${lw[0]}")"
@@ -308,6 +310,7 @@ if [ -n "$ref_key" ]; then
     echo "== author key: every directory must carry $ref_key ($ref_src)"
     to_check=("${versions[@]}")
     [ "$latest_ok" -eq 1 ] && to_check+=("$ROOT/latest")
+    key_fails=0
     for dir in "${to_check[@]}"; do
         is_failed "$dir" && continue
         dw=("$dir"/*.wgt)
@@ -315,12 +318,14 @@ if [ -n "$ref_key" ]; then
         if [ -z "$key" ]; then
             echo "  FAIL  could not read the author key of $dir"
             mark_failed "$dir"
+            key_fails=$((key_fails + 1))
         elif [ "$key" != "$ref_key" ]; then
             echo "  FAIL  $dir is signed with author key $key, not $ref_key - panels on the channel would refuse it"
             mark_failed "$dir"
+            key_fails=$((key_fails + 1))
         fi
     done
-    [ "$fail" -eq 0 ] && echo "  ok    every directory carries it"
+    [ "$key_fails" -eq 0 ] && echo "  ok    every directory carries it"
 fi
 
 # ---- against the base: never backwards, never a new package under an old <ver>

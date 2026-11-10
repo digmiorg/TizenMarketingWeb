@@ -43,7 +43,7 @@ rc=0
 CHECK_B2B_FAILED_LIST="$list" CHECK_B2B_BASE_PATH=b2b "$here/check-b2b.sh" "$SITE/b2b" || rc=$?
 case "$rc" in
     0) rm -f "$list"; exit 0 ;;
-    2) rm -f "$list"; echo "::error::check-b2b.sh could not run (a tool is missing on this runner) - refusing to guess whether b2b/ is good"; exit 1 ;;
+    2) rm -f "$list"; echo "::error::check-b2b.sh could not check b2b/ (see its output above) - refusing to guess whether b2b/ is good"; exit 1 ;;
 esac
 
 dropped=''
