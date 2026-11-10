@@ -116,7 +116,10 @@ function showReloadModal() {
  * registration -- nor take the rest of this file down, since this runs at
  * module level.
  */
-const REMOTE_KEYS_TO_REGISTER = ['Info'];
+// 6-9 turn the video plane (NONE/90/180/270) on the next clip -- the probe's
+// own bench control, kept because which way a portrait panel wants is not
+// knowable in advance. Read back on the HUD's Stage line.
+const REMOTE_KEYS_TO_REGISTER = ['Info', '6', '7', '8', '9'];
 
 REMOTE_KEYS_TO_REGISTER.forEach((keyName) => {
   try {
@@ -130,6 +133,16 @@ REMOTE_KEYS_TO_REGISTER.forEach((keyName) => {
 
 document.addEventListener('keydown', function (e) {
   let deviceInfoElement;
+
+  // Digits 6-9: rotation override for the AVPlay plane. Takes effect when the
+  // next clip starts; the current one is not touched.
+  if (e.keyCode >= 54 && e.keyCode <= 57) {
+    window.avplayRotationOverride = ['NONE', '90', '180', '270'][e.keyCode - 54];
+    console.log('[avplay] rotation override set to ' + window.avplayRotationOverride + ' - applies on the next clip');
+    updateStageGeometry();
+    e.preventDefault();
+    return;
+  }
 
   switch (e.keyCode) {
     case window.tvKey.ENTER:
@@ -472,7 +485,9 @@ function updateStageGeometry() {
   // because this file no longer chooses one -- it is always the full screen,
   // with setDisplayMethod deciding the letterbox inside it.
   if (window.avplayOnPlane) {
-    readout.textContent = 'viewport ' + viewport + ', avplay full screen (letterboxed)';
+    readout.textContent = 'viewport ' + viewport + ', avplay full screen (letterboxed), rotation ' +
+      (window.avplayRotation || 'unset') +
+      (window.avplayRotationOverride ? ', next: ' + window.avplayRotationOverride + ' (keys 6-9)' : ' (keys 6-9 to override)');
 
     return;
   }
@@ -870,6 +885,10 @@ function getSharedAvplay() {
   }
   sharedAvplay = window.DigmiAvplay.createPlayer({
     log: (line) => console.log('[avplay] ' + line),
+    rotation: () => window.avplayRotationOverride || null,
+    onRotation: (value, source) => {
+      window.avplayRotation = value + ' (' + source + ')';
+    },
     onStreamCompleted: () => {
       if (avplayHooks.onStreamCompleted) {
         avplayHooks.onStreamCompleted();

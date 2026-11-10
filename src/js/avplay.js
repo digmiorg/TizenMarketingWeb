@@ -64,6 +64,17 @@
  * window.innerHeight)`, which is what the probe called on every seam of that
  * run, from the same 1080x1920 `config.xml` this app declares.
  *
+ * And measured ONLY WITH THE PANEL DISPLAYING LANDSCAPE. The probe's own
+ * readout said `screen 1920x1080`; the 482 seams never saw a rotated web
+ * layer. On the bench with the panel set to portrait (2026-11-10) every
+ * portrait clip came out sideways: the page is rotated by the panel, the
+ * plane behind it is not. `setDisplayRotation` (Samsung, since 4.0) turns the
+ * plane, and it has to come BEFORE the rect because it moves the coordinate
+ * origin. The angle is taken from the web layer (`screen.orientation.angle`);
+ * whether AVPlay counts the same way round is being measured with the remote
+ * keys 6-9 as this is written. Samsung also lists a B2B-only
+ * `setStreamingProperty('PORTRAIT_MODE', ...)` (since 3.0) -- untried.
+ *
  * That matters, because Samsung's guide says the parameters are interpreted
  * in a space that "is always treated as 1920x1080 px, regardless of the
  * application resolution", and that an app at another resolution "must
@@ -156,6 +167,35 @@
     const opts = options || {};
     const scope = opts.scope || root;
     const doc = opts.doc || (root && root.document);
+    // Rotation of the video plane. The web layer follows the panel's
+    // orientation setting; AVPlay draws behind the page and does NOT, so on a
+    // portrait-mounted panel a clip comes out sideways unless the plane is
+    // turned to match. Seen on the bench 2026-11-10: every portrait clip
+    // landscape. The probe never hit this -- it only ever ran on a panel
+    // displaying landscape (its own readout: `screen 1920x1080`), where NONE
+    // happens to be right, and the value it sent by default
+    // (`PLAYER_DISPLAY_ROTATION_0`) is not even one Samsung accepts.
+    //
+    // Derived from the web layer's own angle (`screen.orientation.angle`),
+    // because that is the rotation the panel applied to the page. Whether
+    // AVPlay counts the same way round is NOT measured: Samsung's own sample
+    // binds remote keys for exactly that reason, so `opts.rotation` may
+    // return an override ('NONE' | '90' | '180' | '270') and wins when it does.
+    const rotationOverride = typeof opts.rotation === 'function' ? opts.rotation : () => null;
+    const onRotation = typeof opts.onRotation === 'function' ? opts.onRotation : () => {};
+    const ROTATIONS = ['NONE', '90', '180', '270'];
+
+    function resolveRotation() {
+      const forced = rotationOverride();
+      if (forced && ROTATIONS.indexOf(String(forced)) > -1) {
+        return { value: String(forced), source: 'override' };
+      }
+      const scr = opts.screen || (scope && scope.screen);
+      const orientation = scr && scr.orientation;
+      const angle = orientation && typeof orientation.angle === 'number' ? orientation.angle : 0;
+      const byAngle = { 0: 'NONE', 90: '90', 180: '180', 270: '270' };
+      return { value: byAngle[angle] || 'NONE', source: orientation ? 'screen' : 'default' };
+    }
     const log = opts.log || function () {};
     const api = {};
 
@@ -476,8 +516,25 @@
         return { ok: false, durationMs: null };
       }
 
-      // The ONE form measured on this panel. See the note at the top of this
-      // file about the coordinate space.
+      // Rotation BEFORE the rect. Samsung: "This API call will change the
+      // origin of coordinates. So, Application should call setDisplayRect()
+      // again after calling this API." Allowed in IDLE/READY/PLAYING/PAUSED;
+      // after prepare() the player is READY. Since 4.0.
+      const rotation = resolveRotation();
+      if (typeof p.setDisplayRotation === 'function') {
+        const turned = attempt('setDisplayRotation', () =>
+          p.setDisplayRotation('PLAYER_DISPLAY_ROTATION_' + rotation.value),
+        );
+        if (!turned.ok) {
+          log('setDisplayRotation was refused: video will be drawn in the panel\'s PHYSICAL orientation');
+        }
+      } else {
+        log('setDisplayRotation is absent: video will be drawn in the panel\'s PHYSICAL orientation');
+      }
+      onRotation(rotation.value, rotation.source);
+
+      // The rect, in the space the rotation just defined. Measured in ONE form
+      // only, and only in landscape; see the note at the top of this file.
       attempt('setDisplayRect', () => p.setDisplayRect(0, 0, screen.width, screen.height));
       // Aspect inside that rect. Without it the default fills the area, which
       // stretches a 16:9 clip across a 9:16 panel.

@@ -61,6 +61,7 @@ function fakePanel(overrides) {
     play: record('play'),
     close: record('close'),
     setDisplayRect: record('setDisplayRect'),
+    setDisplayRotation: record('setDisplayRotation'),
     setDisplayMethod: record('setDisplayMethod'),
     setVideoStillMode: record('setVideoStillMode'),
     getDuration: () => 15000,
@@ -135,6 +136,7 @@ test('createPlayer: the native calls run in Samsung order, release between prepa
     'open',
     'setListener',
     'prepare',
+    'setDisplayRotation',
     'setDisplayRect',
     'setDisplayMethod',
     'isMute',
@@ -182,6 +184,64 @@ test('createPlayer: the display rect is the full screen - the only form measured
 
   assert.deepEqual(panel.args.setDisplayRect[0], [0, 0, 1080, 1920]);
   assert.deepEqual(panel.args.setDisplayMethod[0], ['PLAYER_DISPLAY_MODE_LETTER_BOX']);
+});
+
+test('createPlayer: the plane is turned to the web layer\'s angle, and BEFORE the rect', () => {
+  // Samsung: setDisplayRotation "will change the origin of coordinates. So,
+  // Application should call setDisplayRect() again after calling this API."
+  // The web layer on a portrait-mounted panel is rotated by the panel; the
+  // plane is not, so without this every portrait clip comes out sideways --
+  // seen on the bench 2026-11-10. The probe never met it: it only ever ran
+  // with the panel displaying landscape.
+  const panel = fakePanel();
+  panel.scope.screen = { orientation: { angle: 90 } };
+  const player = makePlayer(panel);
+
+  player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+
+  assert.deepEqual(panel.args.setDisplayRotation[0], ['PLAYER_DISPLAY_ROTATION_90']);
+  const prepare = panel.calls.indexOf('prepare');
+  const turned = panel.calls.indexOf('setDisplayRotation');
+  const rect = panel.calls.indexOf('setDisplayRect');
+  assert.ok(prepare < turned, 'the plane was turned before prepare()');
+  assert.ok(turned < rect, 'the rect was set BEFORE the rotation changed its coordinate origin');
+});
+
+test('createPlayer: with no orientation API the value is NONE - the one Samsung accepts, not the probe\'s _0', () => {
+  // The probe sent PLAYER_DISPLAY_ROTATION_0 by default. That is not among
+  // the four values Samsung lists (NONE/90/180/270), so the call was refused
+  // and swallowed on every run -- harmless on a landscape panel, and invisible.
+  const panel = fakePanel();
+  delete panel.scope.screen;
+  const player = makePlayer(panel);
+
+  player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+
+  assert.deepEqual(panel.args.setDisplayRotation[0], ['PLAYER_DISPLAY_ROTATION_NONE']);
+});
+
+test('createPlayer: a rotation override wins over the screen angle, and an invalid one does not', () => {
+  // Which way round AVPlay counts is not knowable in advance; Samsung's own
+  // sample binds remote keys for the same reason. The override is how the
+  // bench finds out, so it has to win -- and a stray value must not.
+  const reported = [];
+  const panel = fakePanel();
+  panel.scope.screen = { orientation: { angle: 90 } };
+  let forced = '270';
+  const player = makePlayer(panel, {
+    rotation: () => forced,
+    onRotation: (value, source) => reported.push(value + ':' + source),
+  });
+
+  player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+  forced = '45';
+  player.play('http://example/clip2.mp4', { width: 1080, height: 1920 });
+
+  assert.deepEqual(
+    panel.args.setDisplayRotation.map((call) => call[0]),
+    ['PLAYER_DISPLAY_ROTATION_270', 'PLAYER_DISPLAY_ROTATION_90'],
+  );
+  assert.deepEqual(reported, ['270:override', '90:screen']);
 });
 
 test('createPlayer: without the avplayer <object> it refuses rather than playing nothing', () => {
