@@ -120,36 +120,41 @@ fi
 # same key. Which of the two a display actually binds on is argued, with
 # sources, at the top of scripts/author-identity.sh.
 # The signatures have to COVER the package, not merely exist: every file a
-# signature references must hash to the digest it states, and every file in
-# the package (except the signature files themselves) must be referenced by
-# the author signature. A package whose signature was copied from another
-# build - which is what a hand-produced, externally re-signed package can
-# be - has files with no digest, or digests for other bytes, and a display
-# refuses it at install. This is a direct check of the <Reference> list, not
-# a verification of the <SignatureValue> itself (that needs the certificate
-# chain a display holds); it is what tells a borrowed signature from a real
-# one.
+# signature references must hash to the digest it states, and every file the
+# signature is responsible for must be referenced - all files for the author
+# signature, all files plus author-signature.xml for the distributor's. A
+# package whose signature was copied from another build - which is what a
+# hand-produced, externally re-signed package can be - has files with no
+# digest, or digests for other bytes, and a display refuses it at install.
+# This is a direct check of the <Reference> list, not a verification of the
+# <SignatureValue> itself (that needs the certificate chain a display holds);
+# it is what tells a borrowed signature from a real one.
 for sig in author-signature.xml signature1.xml; do
     [ -f "$WORK/pkg/$sig" ] || continue
-    # -I: the package being verified is untrusted input.
+    # -I: the package being verified is untrusted input, and so is every
+    # URI in the signature - a reference that points outside the package is
+    # refused, never followed.
     if python3 -I - "$WORK/pkg" "$sig" <<'PY'
 import base64, hashlib, os, re, sys, urllib.parse
 pkg, sig = sys.argv[1], sys.argv[2]
 xml = open(os.path.join(pkg, sig)).read()
-refs = re.findall(r'<Reference URI="([^"]*)">.*?<DigestMethod Algorithm="([^"]*)".*?<DigestValue>(.*?)</DigestValue>', xml, re.S)
-# Every <Reference> must have been understood: a signer that writes the
-# element another way (other attributes, single quotes) would otherwise
-# leave signature1.xml with no references and a false 'covers'.
-if len(refs) != xml.count('<Reference '):
-    print('        has %d <Reference> elements but %d could be parsed' % (xml.count('<Reference '), len(refs)))
-    sys.exit(1)
-algos = {'sha1': hashlib.sha1, 'sha256': hashlib.sha256, 'sha384': hashlib.sha384, 'sha512': hashlib.sha512}
+# <Reference URI="...">, however the element is spaced; every <Reference
+# element must be one of these, or the signer writes it in a way this does
+# not understand and the verdict would be a guess.
+refs = re.findall(r'<Reference\s+URI="([^"]*)"\s*>.*?<DigestMethod\s+Algorithm="([^"]*)".*?<DigestValue>(.*?)</DigestValue>', xml, re.S)
+elements = len(re.findall(r'<Reference[\s>]', xml))
 problems = []
+if elements != len(refs):
+    problems.append('has %d <Reference> elements but %d could be parsed' % (elements, len(refs)))
+algos = {'sha1': hashlib.sha1, 'sha256': hashlib.sha256, 'sha384': hashlib.sha384, 'sha512': hashlib.sha512}
 referenced = set()
 for uri, alg, dv in refs:
     if uri.startswith('#'):
         continue
-    name = urllib.parse.unquote(uri)
+    name = os.path.normpath(urllib.parse.unquote(uri))
+    if os.path.isabs(name) or name == '..' or name.startswith('..' + os.sep):
+        problems.append('references %s, which is outside the package' % uri)
+        continue
     referenced.add(name)
     path = os.path.join(pkg, name)
     if not os.path.isfile(path):
@@ -161,14 +166,19 @@ for uri, alg, dv in refs:
         continue
     if base64.b64encode(h(open(path, 'rb').read()).digest()).decode() != re.sub(r'\s', '', dv):
         problems.append('states a digest for %s that does not match its bytes' % name)
-if sig == 'author-signature.xml':
-    for root, _, files in os.walk(pkg):
-        for f in files:
-            rel = os.path.relpath(os.path.join(root, f), pkg)
-            if rel == 'author-signature.xml' or re.match(r'signature\d+\.xml$', rel):
-                continue
-            if rel not in referenced:
-                problems.append('does not cover %s' % rel)
+if not referenced:
+    problems.append('references no file at all')
+expected = set()
+for root, _, files in os.walk(pkg):
+    for f in files:
+        rel = os.path.relpath(os.path.join(root, f), pkg)
+        if re.match(r'signature\d+\.xml$', rel):
+            continue
+        if rel == 'author-signature.xml' and sig == 'author-signature.xml':
+            continue
+        expected.add(rel)
+for rel in sorted(expected - referenced):
+    problems.append('does not cover %s' % rel)
 for p in problems:
     print('        ' + p)
 sys.exit(1 if problems else 0)
@@ -180,13 +190,10 @@ PY
     fi
 done
 
-if [ -f "$WORK/pkg/author-signature.xml" ]; then
-    # Written out rather than piped so the expiry check below can read the same
-    # bytes without extracting them a second time.
-    # -I: the package being verified is untrusted input, and an interpreter
-    # that searches the current directory for its imports is one planted
-    # json.py away from running someone else's code.
-    python3 -I - "$WORK/pkg/author-signature.xml" "$WORK/author.der" <<'PY' || true
+# The first certificate in a signature's <KeyInfo>, as DER, or no file when
+# there is none.
+extract_first_cert() {
+    python3 -I - "$1" "$2" <<'PY' || true
 import base64, re, sys
 xml = open(sys.argv[1]).read()
 certs = re.findall(r'<[^>]*X509Certificate>\s*([A-Za-z0-9+/=\s]+?)\s*</[^>]*X509Certificate>', xml)
@@ -194,13 +201,31 @@ if certs:
     with open(sys.argv[2], 'wb') as f:
         f.write(base64.b64decode(re.sub(r'\s', '', certs[0])))
 PY
+}
+
+# A warning at 90 and then 30 days before a certificate lapses. -checkend
+# is also true for a certificate that lapsed long ago, so the message says
+# both rather than promising it is still valid today.
+warn_expiry() {
+    local der="$1" message="$2" days
+    for days in 30 90; do
+        if ! openssl x509 -inform DER -in "$der" -checkend $(( days * 86400 )) -noout >/dev/null 2>&1; then
+            warn "$message expires within $days days, or already has - $3"
+            break
+        fi
+    done
+}
+
+if [ -f "$WORK/pkg/author-signature.xml" ]; then
+    # Written out rather than piped so the expiry check below can read the same
+    # bytes without extracting them a second time.
+    extract_first_cert "$WORK/pkg/author-signature.xml" "$WORK/author.der"
 
     if [ ! -f "$WORK/author.der" ]; then
         # A signature with no certificate in it is one no display can bind
         # an author to, and one no gate here can compare.
         bad "author-signature.xml carries no X509Certificate"
-    fi
-    if [ -f "$WORK/author.der" ]; then
+    else
         # Both numbers, the same way round as everywhere else: the key is the
         # identity, the certificate is the label. Computed here rather than
         # through scripts/author-identity.sh, which answers for one at a time
@@ -228,16 +253,8 @@ PY
         # updatable, but it has to be done FROM that key, and the key only
         # opens with a password that has no reset. Miss the window and the next
         # release is signed by a new key, which a display refuses as a
-        # different author — a site visit per screen.
-        # -checkend is also true for a certificate that lapsed long ago, so
-        # say both rather than promising it is still valid today.
-        for days in 30 90; do
-            if ! openssl x509 -inform DER -in "$WORK/author.der" \
-                 -checkend $(( days * 86400 )) -noout >/dev/null 2>&1; then
-                warn "the author certificate expires within $days days, or already has — renew it from the existing key (Certificate Manager: 'Use an existing author certificate'); a renewal over a new key is a different author, which means a manual reinstall on every installed screen"
-                break
-            fi
-        done
+        # different author - a site visit per screen.
+        warn_expiry "$WORK/author.der" "the author certificate" "renew it from the existing key (Certificate Manager: 'Use an existing author certificate'); a renewal over a new key is a different author, which means a manual reinstall on every installed screen"
     fi
 fi
 
@@ -247,25 +264,14 @@ fi
 # that expired 2022-10-27 and installs - but a re-sign after the expiry needs
 # a version bump either way. A warning, like the author's.
 if [ -f "$WORK/pkg/signature1.xml" ]; then
-    python3 -I - "$WORK/pkg/signature1.xml" "$WORK/distributor.der" <<'PY' || true
-import base64, re, sys
-xml = open(sys.argv[1]).read()
-certs = re.findall(r'<[^>]*X509Certificate>\s*([A-Za-z0-9+/=\s]+?)\s*</[^>]*X509Certificate>', xml)
-if certs:
-    with open(sys.argv[2], 'wb') as f:
-        f.write(base64.b64decode(re.sub(r'\s', '', certs[0])))
-PY
-    if [ -f "$WORK/distributor.der" ]; then
+    extract_first_cert "$WORK/pkg/signature1.xml" "$WORK/distributor.der"
+    if [ ! -f "$WORK/distributor.der" ]; then
+        bad "signature1.xml carries no X509Certificate"
+    else
         printf '  info  distributor certificate\n'
         openssl x509 -inform DER -in "$WORK/distributor.der" -noout -subject -enddate \
             2>/dev/null | sed 's/^/          /' || true
-        for days in 30 90; do
-            if ! openssl x509 -inform DER -in "$WORK/distributor.der" \
-                 -checkend $(( days * 86400 )) -noout >/dev/null 2>&1; then
-                warn "the distributor certificate expires within $days days, or already has - a package re-signed after that needs a version bump, or displays never download it"
-                break
-            fi
-        done
+        warn_expiry "$WORK/distributor.der" "the distributor certificate" "a package re-signed after that needs a version bump, or displays never download it"
     fi
 fi
 

@@ -94,8 +94,8 @@ Before each commit, by hand:
 
 ```sh
 scripts/verify-wgt.sh b2b/<version>                      # descriptor vs package, every signature digest, certificates
-scripts/author-identity-gate.sh b2b/<version>/DigmiMarketing.wgt b2b/latest \
-  || echo 'DIFFERENT AUTHOR KEY - do not publish'        # 0 same, 2 different, 1 broken
+scripts/author-identity-gate.sh b2b/<version>/DigmiMarketing.wgt b2b/latest    # verdict = exit status:
+case $? in 2) echo 'DIFFERENT AUTHOR KEY - do not publish';; 1) echo 'b2b/latest is broken - fix it first';; esac
 cmp b2b/latest/DigmiMarketing.wgt b2b/<version>/DigmiMarketing.wgt            # after step 3
 ```
 
