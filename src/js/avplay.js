@@ -70,10 +70,15 @@
  * portrait clip came out sideways: the page is rotated by the panel, the
  * plane behind it is not. `setDisplayRotation` (Samsung, since 4.0) turns the
  * plane, and it has to come BEFORE the rect because it moves the coordinate
- * origin. The angle is taken from the web layer (`screen.orientation.angle`);
- * whether AVPlay counts the same way round is being measured with the remote
- * keys 6-9 as this is written. Samsung also lists a B2B-only
- * `setStreamingProperty('PORTRAIT_MODE', ...)` (since 3.0) -- untried.
+ * origin. The angle is taken from the web layer (`screen.orientation.angle`).
+ * MEASURED 2026-11-10 on the bench QB43C set to portrait: with no override,
+ * twelve portrait clips (606x1080 .. 1080x1920) came out upright, so on
+ * this panel AVPlay counts the same way round as the web layer and the
+ * derived value is the right one. The remote keys 5-9 (HUD open) remain for
+ * a panel that reports angle 0 or counts the other way; neither has been
+ * seen. The rect space after a turn was not cropped on that run. Samsung
+ * also lists a B2B-only `setStreamingProperty('PORTRAIT_MODE', ...)` (since
+ * 3.0) -- untried, unneeded so far.
  *
  * Samsung's guide says the parameters are interpreted in a space that "is
  * always treated as 1920x1080 px, regardless of the application resolution".
