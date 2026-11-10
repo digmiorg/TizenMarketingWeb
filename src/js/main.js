@@ -189,6 +189,9 @@ document.addEventListener('keydown', function (e) {
         window.currentMediaIndex =
           (window.currentMediaIndex - 1 + window.mediaLength) % window.mediaLength;
         window.displayMedia(window.currentMediaIndex);
+        if (window.restartRotationTimer) {
+          window.restartRotationTimer();
+        }
       }
       e.preventDefault();
       break;
@@ -199,6 +202,9 @@ document.addEventListener('keydown', function (e) {
         window.rotationInterval = null;
         window.currentMediaIndex = (window.currentMediaIndex + 1) % window.mediaLength;
         window.displayMedia(window.currentMediaIndex);
+        if (window.restartRotationTimer) {
+          window.restartRotationTimer();
+        }
       }
       e.preventDefault();
       break;
@@ -585,6 +591,7 @@ function stopPlayback() {
   // handler guards on `window.displayMedia` being truthy, so this is what
   // makes those keys inert instead of rendering into a detached node.
   window.displayMedia = null;
+  window.restartRotationTimer = null;
   window.mediaLength = 0;
   window.currentMediaIndex = 0;
 
@@ -1471,6 +1478,23 @@ function displayMediaContent(data) {
       };
 
       // Initial display
+      // The remote's LEFT/RIGHT re-arm the rotation through this rather than
+      // leaving `rotationInterval` null. A null handle is not "paused": it is
+      // what playlistIsOnScreen() reads as a dead playlist, and the pairing
+      // loop then re-fetches and rebuilds the whole playlist from item 1 --
+      // measured on the bench 2026-11-10, three seconds after a LEFT:
+      //   key LEFT -> 15 at 197s >> playlist -> 1 at 200s
+      // Nulled in stopPlayback() together with displayMedia, so a key pressed
+      // on the pairing screen cannot reach a closure whose stage is gone.
+      window.restartRotationTimer = () => {
+        if (!isCurrentGeneration()) {
+          return;
+        }
+        clearInterval(window.rotationInterval);
+        window.rotationInterval = null;
+        startRotationTimer();
+      };
+
       window.displayMedia(0);
       updateStageGeometry();
 
