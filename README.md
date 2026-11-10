@@ -155,7 +155,9 @@ uninstalled on it (see above), so a rotation is a site visit per panel, not a
 deploy. While the file names `latest/`'s key, the directories still on the one
 older key are kept for the panels not yet re-pointed; once the base's
 `latest/` carries the new key they may be removed. Remove them in the same
-pull request as the accept file, or they fail from then on.
+pull request as the accept file, or they fail from then on — and remove the
+accept file once the leftovers are gone: a second rotation needs the first
+one's leftovers removed first, since only one older key may remain.
 
 A re-sign of an already published version cannot be rolled out: `<ver>` comes
 from the semver, so displays would not download it again — and `check-b2b.sh`

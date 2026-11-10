@@ -454,22 +454,23 @@ if [ -n "$ref_key" ]; then
     # not yet re-pointed, as long as they are what the base already serves
     # (pull-request mode) or, without a base, as long as they agree on ONE
     # older key. A second older key is nobody's channel.
+    # One older key at most, in both modes - a second rotation needs the
+    # first one's leftovers removed first - and, with a base, only the
+    # directories the base already serves.
+    several_old=0
+    [ "$(printf '%s' "$old_keys" | wc -w | tr -d ' ')" -gt 1 ] && several_old=1
     for dir in ${old_dirs[@]+"${old_dirs[@]}"}; do
         name="$(basename "$dir")"
-        if [ "$base_has_latest" -eq 1 ]; then
-            if git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/sssp_config.xml" 2>/dev/null; then
-                echo "  ok    $dir still carries an older key - kept for panels not yet re-pointed ($CHECK_B2B_BASE serves it)"
-            else
-                echo "  FAIL  $dir carries an older key and $CHECK_B2B_BASE does not serve it - a new directory must carry the accepted key"
-                mark_failed "$dir"
-                key_fails=$((key_fails + 1))
-            fi
-        elif [ "$(printf '%s' "$old_keys" | wc -w | tr -d ' ')" -le 1 ]; then
-            echo "  ok    $dir still carries the older key - kept for panels not yet re-pointed"
-        else
-            echo "  FAIL  $dir carries one of several older keys - nothing says which one panels run; only one older key may remain"
+        if [ "$several_old" -eq 1 ]; then
+            echo "  FAIL  $dir carries one of several older keys - nothing says which one panels run; only one older key may remain (remove the earlier rotation's leftovers first)"
             mark_failed "$dir"
             key_fails=$((key_fails + 1))
+        elif [ "$base_has_latest" -eq 1 ] && ! git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/sssp_config.xml" 2>/dev/null; then
+            echo "  FAIL  $dir carries an older key and $CHECK_B2B_BASE does not serve it - a new directory must carry the accepted key"
+            mark_failed "$dir"
+            key_fails=$((key_fails + 1))
+        else
+            echo "  ok    $dir still carries the older key - kept for panels not yet re-pointed"
         fi
     done
     [ "$key_fails" -eq 0 ] && echo "  ok    every directory carries it"
