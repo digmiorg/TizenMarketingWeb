@@ -1228,10 +1228,19 @@ function displayMediaContent(data) {
         // An image. Decode first, swap second: the stage is not touched until
         // there is something opaque to put on it.
         //
-        // No fade when this image is covering a video teardown -- a fading
-        // image is translucent for the length of the fade, and the plane
-        // underneath is exactly what it is there to hide.
-        const className = seam.coverMustBePainted ? 'main-media' : 'main-media fade-in';
+        // No `fade-in`, ever, on this path. The version in the field has the
+        // class, but there it is applied to an <img> that is appended BEFORE it
+        // has loaded, so the 0.5 s animation runs on an empty box and the
+        // picture arrives opaque once the bytes do: the fade is never seen.
+        // Decoding first moves the insertion to AFTER the bytes, so the same
+        // class fades a finished picture -- and for that half second the slide
+        // is translucent over its own blurred `object-fit: cover` backdrop,
+        // which sits at a different scale and crop. On a text slide that reads
+        // as the heading printed twice. Filmed on the bench 2026-11-10
+        // (IMG_4494/4495); the field build, same CSS, does not show it. The
+        // decoded swap is already instantaneous, which is the effect the fade
+        // was there to soften.
+        const className = 'main-media';
         Promise.all([
           decodedImage(fullsize, className),
           poster ? decodedImage(poster, 'background') : Promise.resolve(null),
@@ -1508,12 +1517,33 @@ function displayMediaContent(data) {
       // this: there the stale continuation RESTARTED the chain, loudly and
       // wrongly, with a TypeError. Guarding only startRotationTimer() traded
       // loud-and-recovering for silent-and-permanent, which is worse.
+      /**
+       * True when the one slide of a single-item playlist is an image that is
+       * already on screen and loaded. Repainting it would re-run the whole
+       * decode-and-swap for nothing -- on the bench that was a visible blink
+       * every 15 s on a one-picture campaign (2026-11-10), the same fault
+       * signage.digmi.eu fixed in its own rotation. A video is excluded: it
+       * has to be restarted to loop. An image that failed to load is excluded
+       * too, so a screen that started offline still heals itself.
+       */
+      function singleImageAlreadyShowing() {
+        if (data.campaign_media.length !== 1 || data.campaign_media[0].video) {
+          return false;
+        }
+        const shown = mediaPlayer.querySelector('img.main-media');
+        return !!shown && shown.complete && shown.naturalWidth > 0;
+      }
+
       const continueRotation = () => {
         if (!isCurrentGeneration()) {
           return;
         }
 
-        window.displayMedia(window.currentMediaIndex);
+        // The timer is still rearmed below: the wrap-around poll in the tick
+        // has to keep running so a switched-off campaign is noticed.
+        if (!singleImageAlreadyShowing()) {
+          window.displayMedia(window.currentMediaIndex);
+        }
 
         // Null it, not just clear it. If startRotationTimer() returns without
         // building a chain - its own generation guard, or a throw - the handle
