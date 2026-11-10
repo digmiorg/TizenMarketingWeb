@@ -18,8 +18,9 @@ Releases are built, signed and published by the **Release widget** workflow, and
 rolled out to the fleet by **Promote release**, which copies an already-proven
 version rather than rebuilding it — see [BUILD.md](BUILD.md).
 
-Do not hand-edit a `production/` descriptor. The naming rules below are
-necessary but not sufficient: `<ver>` has to be an **integer** that increases, or a display never
+Do not hand-edit a descriptor; the one exception is `<size>` in a `b2b/`
+descriptor, derived with `wc -c` as that section says. The naming rules below
+are necessary but not sufficient: `<ver>` has to be an **integer** that increases, or a display never
 re-downloads, and `<size>`, where stated, has to be the package's exact byte
 count. The descriptors already committed here say `<ver>1.0.7</ver>` and omit
 `<size>` — that is the format the workflow exists to replace, not an example to
@@ -57,28 +58,36 @@ way. Whether TBM can do that uninstall remotely is not known yet.
 This directory is NOT written by CI. To publish a version, mirror the
 `production/` flow (prove on one panel first, then widen):
 
-1. Upload the `scripts/build-wgt.sh` output (`.build/out/DigmiMarketing.wgt`)
-   to the Samsung tool and commit the result as `b2b/<version>/DigmiMarketing.wgt`
-   only, with `.build/out/sssp_config.xml` copied next to it and `<size>` set
-   to the re-signed file's byte count. `<ver>` stays the integer
+1. Build with the profile the channel already serves —
+   `scripts/build-wgt.sh Digmi_Samsung_Partner_2026` — upload
+   `.build/out/DigmiMarketing.wgt` to the Samsung tool and commit the result as
+   `b2b/<version>/DigmiMarketing.wgt` only, with `.build/out/sssp_config.xml`
+   copied next to it and `<size>` replaced by
+   `wc -c < b2b/<version>/DigmiMarketing.wgt`. Any other profile has another
+   author key, and panels already on `b2b/` would refuse the update. `<ver>` stays the integer
    `build-wgt.sh` derived (1.0.13 → `10013`); `<widgetname>` must equal
    config.xml `<name>` and the .wgt file name (`verify-wgt.sh` checks the
    former, the display needs the latter).
 2. Point one panel at `b2b/<version>/` through TBM Custom App (URL) and watch
    it install and play.
-3. Only then copy the same two files to `b2b/latest/`.
+3. Only then copy the same two files to `b2b/latest/`, descriptor included.
 
 1.0.13 is the first publish and `latest/` was filled in the same commit as
 `1.0.13/`, before any panel test, because no panel followed `b2b/latest/` yet.
 From the second version on, the order above applies.
 
-Check by hand before each commit — no workflow does it for this directory:
+`scripts/check-b2b.sh` runs on every pull request that touches `b2b/` (the
+**Verify b2b** workflow): `verify-wgt.sh` on each directory with a descriptor,
+and `b2b/latest/` identical to the highest-numbered version directory. What it
+cannot see is the author key and the `<ver>` to beat, so run these by hand
+before the commit — the gate's verdict is its **exit status**, it prints no
+FAIL text of its own:
 
 ```sh
-scripts/verify-wgt.sh b2b/<version>                     # descriptor vs package
-scripts/served-baseline.sh b2b/latest                   # <ver> to beat
-scripts/author-identity-gate.sh b2b/<version>/DigmiMarketing.wgt b2b/latest   # same author key as already served
-cmp b2b/latest/DigmiMarketing.wgt b2b/<version>/DigmiMarketing.wgt            # after step 3
+scripts/check-b2b.sh b2b                                 # what CI will run
+scripts/served-baseline.sh b2b/latest                    # <ver> to beat
+scripts/author-identity-gate.sh b2b/<version>/DigmiMarketing.wgt b2b/latest \
+  || echo 'DIFFERENT AUTHOR KEY - do not publish'        # 0 same, 2 different, 1 broken
 ```
 
 and after each merge, that Pages serves the bytes you committed — only the

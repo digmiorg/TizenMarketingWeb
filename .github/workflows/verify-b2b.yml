@@ -1,0 +1,21 @@
+# The hand-published b2b/ channel (see README) has no build workflow, so this
+# is where its descriptors are checked before they can reach Pages: every
+# b2b/<dir>/ with a descriptor passes scripts/verify-wgt.sh, and b2b/latest/
+# is identical to the highest-numbered version directory.
+name: Verify b2b
+on:
+  pull_request:
+    paths:
+      - 'b2b/**'
+      - 'scripts/check-b2b.sh'
+      - 'scripts/verify-wgt.sh'
+      - '.github/workflows/verify-b2b.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - run: scripts/check-b2b.sh b2b

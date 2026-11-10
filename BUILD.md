@@ -1,9 +1,11 @@
 # Building and releasing DigmiMarketing
 
-The widget's source lives in `src/`. Everything under `production/` and
-`staging/` is build output.
+The widget's source lives in `src/`. Everything under `production/`,
+`staging/` and `b2b/` is build output.
 
-Releases go through two workflows, not a laptop. **Release widget** builds,
+Releases to `production/` go through two workflows, not a laptop (`b2b/` is the
+exception: built by `scripts/build-wgt.sh`, re-signed by Samsung's tool and
+committed by hand — see README). **Release widget** builds,
 signs and publishes `production/<version>/`. **Promote release** copies an
 already-published version into the two directories the fleet follows, and never
 builds or signs anything. Before they existed the package was built by hand in
@@ -11,10 +13,10 @@ Tizen Studio, which is how `production/latest/` came to serve 1.0.7 while 1.0.9
 sat unreleased beside it — the fleet follows `latest/`, so no screen ever saw
 it.
 
-## Two channels, and this file mostly describes one of them
+## Three channels, and this file mostly describes one of them
 
-A screen can get this widget two different ways, and until 2026-11-09 only the
-first was written down here.
+A screen can get this widget three different ways; until 2026-11-09 only the
+first was written down here, and the third arrived on 2026-11-10.
 
 | | **SSSP** (`production/`) | **TV Seller Office** (the store) | **TBM Custom App (URL)** (`b2b/`) |
 | --- | --- | --- | --- |
