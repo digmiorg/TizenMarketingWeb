@@ -38,17 +38,22 @@ jobs:
       # The <ver> latest/ served before this change, so the gate can refuse a
       # latest/ that goes backwards. On a pull request that is the base
       # branch; on a push to main it is the parent of the push.
-      - name: Fetch the base to compare latest/'s <ver> against
+      - name: Fetch the base to compare latest/'s <ver> and author key against
         id: base
+        env:
+          # Through env, not interpolated into the script: a refname may hold
+          # shell metacharacters.
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = pull_request ]; then
-            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            git fetch --no-tags --depth=1 origin "$BASE_REF"
             echo "ref=FETCH_HEAD" >> "$GITHUB_OUTPUT"
           else
             # The state of main before this push - not HEAD~1, which is only
             # that for a single-commit push. A new branch has no before.
-            before="${{ github.event.before }}"
+            before="$BEFORE_SHA"
             if [ "$before" = "0000000000000000000000000000000000000000" ]; then
               echo "no before-sha (new branch) - skipping the backwards check"
               echo "ref=" >> "$GITHUB_OUTPUT"

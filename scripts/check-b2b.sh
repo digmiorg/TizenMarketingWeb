@@ -82,6 +82,14 @@ mark_failed() {
     fail=1
 }
 
+# Take a directory back out of the failed list (fail itself stays set).
+unmark_failed() {
+    failed_dirs=" $failed_dirs "
+    failed_dirs="${failed_dirs// $1 / }"
+    failed_dirs="${failed_dirs# }"
+    failed_dirs="${failed_dirs% }"
+}
+
 highest=''
 highest_dir=''
 seen_vers=' '
@@ -194,31 +202,40 @@ else
         # charged - latest/ is the fleet's path and keeps serving, and a good
         # version beside a bad one keeps serving too. author-identity.sh
         # prints the package's signing-key hash (what a display binds on).
+        # author-identity.sh prints 'none' (exit 0) for a package whose
+        # author signature it cannot read, so that word is "unreadable" here,
+        # never a key to compare with.
         latest_key="$("$here/author-identity.sh" "${latest_wgts[0]}" 2>/dev/null || true)"
-        if [ -z "$latest_key" ]; then
-            echo "  FAIL  could not read the author key of $ROOT/latest"
-            mark_failed "$ROOT/latest"
-        else
-            differing=0
-            for dir in "${versions[@]}"; do
-                vwgts=("$dir"/*.wgt)
-                key="$("$here/author-identity.sh" "${vwgts[0]}" 2>/dev/null || true)"
-                if [ "$key" = "$latest_key" ]; then
-                    continue
-                fi
-                echo "  FAIL  $dir is signed with author key ${key:-?} but $ROOT/latest serves $latest_key - panels on the channel would refuse it"
-                mark_failed "$dir"
-                differing=$((differing + 1))
-            done
-            if [ "$differing" -eq 0 ]; then
-                echo "  ok    every version carries the author key $ROOT/latest serves ($latest_key)"
-            elif [ "$differing" -eq "${#versions[@]}" ]; then
-                # Every version differs from latest/: more likely latest/ is
-                # the one that changed key. Say so; the versions are still
-                # the ones withheld, because latest/ is what the fleet follows.
-                echo "  note  $ROOT/latest differs from every version directory - if latest/ is the one that changed key, that is the directory to fix"
-            fi
-        fi
+        case " $failed_dirs " in
+            *" $ROOT/latest "*)
+                echo "  skip  $ROOT/latest already failed above - not charging version directories against its key" ;;
+            *)
+                case "$latest_key" in
+                    ''|none)
+                        echo "  FAIL  could not read the author key of $ROOT/latest"
+                        mark_failed "$ROOT/latest" ;;
+                    *)
+                        differing=0
+                        version_keys=''
+                        for dir in "${versions[@]}"; do
+                            vwgts=("$dir"/*.wgt)
+                            key="$("$here/author-identity.sh" "${vwgts[0]}" 2>/dev/null || true)"
+                            version_keys="$version_keys$dir=$key "
+                            case "$key" in
+                                ''|none)
+                                    echo "  FAIL  could not read the author key of $dir"
+                                    mark_failed "$dir"; continue ;;
+                            esac
+                            if [ "$key" = "$latest_key" ]; then
+                                continue
+                            fi
+                            echo "  FAIL  $dir is signed with author key $key but $ROOT/latest serves $latest_key - panels on the channel would refuse it"
+                            mark_failed "$dir"
+                            differing=$((differing + 1))
+                        done
+                        [ "$differing" -eq 0 ] && echo "  ok    every version carries the author key $ROOT/latest serves ($latest_key)" ;;
+                esac ;;
+        esac
     fi
 
     # latest/ must never advertise a lower <ver> than it did before: a
@@ -232,6 +249,37 @@ else
             || { echo "cannot check: base $CHECK_B2B_BASE does not resolve to a commit"; exit 2; }
         base_cfg="$(git show "$CHECK_B2B_BASE:$ROOT/latest/sssp_config.xml" 2>/dev/null || true)"
         if [ -n "$base_cfg" ]; then
+            # latest/ may not change author key either: the versions are
+            # compared against latest/ above, so a latest/ that swapped key
+            # together with a matching new version would otherwise pass and
+            # charge the OLD, good directories. The base's latest/ is the
+            # key the fleet actually runs.
+            base_wgt="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<widgetname>\(.*\)</widgetname>.*|\1|p' | head -1 || true).wgt"
+            base_tmp="$(mktemp)"
+            if git show "$CHECK_B2B_BASE:$ROOT/latest/$base_wgt" > "$base_tmp" 2>/dev/null; then
+                base_key="$("$here/author-identity.sh" "$base_tmp" 2>/dev/null || true)"
+                case "$base_key" in
+                    ''|none) echo "  FAIL  could not read the author key $CHECK_B2B_BASE's $ROOT/latest serves"; mark_failed "$ROOT/latest" ;;
+                    "$latest_key") echo "  ok    $ROOT/latest keeps the author key $CHECK_B2B_BASE serves" ;;
+                    *)
+                        echo "  FAIL  $ROOT/latest changes author key from $base_key ($CHECK_B2B_BASE) to ${latest_key:-?} - every panel on the channel would refuse it"
+                        mark_failed "$ROOT/latest"
+                        # The version directories that still carry the
+                        # base's key are the good ones; they were charged
+                        # above only for differing from a latest/ that is
+                        # itself the fault. Give them back.
+                        for pair in ${version_keys:-}; do
+                            if [ "${pair#*=}" = "$base_key" ]; then
+                                unmark_failed "${pair%%=*}"
+                                echo "  ok    ${pair%%=*} carries the base's key - not withheld"
+                            fi
+                        done ;;
+                esac
+            else
+                echo "  FAIL  $CHECK_B2B_BASE has a $ROOT/latest descriptor but no $base_wgt beside it"
+                mark_failed "$ROOT/latest"
+            fi
+            rm -f "$base_tmp"
             base_ver="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' | head -1 || true)"
             new_ver="$(ver_of "$ROOT/latest/sssp_config.xml")"
             if [[ "$base_ver" =~ ^[0-9]+$ ]] && [[ "$new_ver" =~ ^[0-9]+$ ]] && [ "$new_ver" -lt "$base_ver" ]; then
