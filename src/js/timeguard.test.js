@@ -1,0 +1,517 @@
+// Run: node --test src/js/timeguard.test.js
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const guard = require('./timeguard.js');
+
+/** A WebAPIException stand-in: the Timer API throws objects with a `name`. */
+function webApiError(name) {
+  return { name: name, code: 0, message: 'Unable to Set' };
+}
+
+/** A fake webapis.timer whose setNTP refuses by a rule and remembers every call. */
+function fakeTimer(options) {
+  const opts = options || {};
+  const calls = [];
+
+  return {
+    calls: calls,
+    getNTP: () => {
+      if (opts.getThrows) {
+        throw webApiError(opts.getThrows);
+      }
+
+      return opts.ntp;
+    },
+    setNTP: (info) => {
+      calls.push(info);
+      const refusal = opts.refuse ? opts.refuse(info, calls.length) : null;
+      if (refusal) {
+        throw webApiError(refusal);
+      }
+    },
+  };
+}
+
+/** A fetch stand-in answering with the given headers, or rejecting. */
+function fakeFetch(headers, rejectWith) {
+  return () => {
+    if (rejectWith) {
+      return Promise.reject(rejectWith);
+    }
+
+    return Promise.resolve({
+      status: 200,
+      headers: { get: (name) => (name === 'date' ? headers.date || null : null) },
+    });
+  };
+}
+
+/** A clock that returns the given readings in order, then keeps the last one. */
+function fakeNow(readings) {
+  let i = 0;
+
+  return () => {
+    const value = readings[Math.min(i, readings.length - 1)];
+    i += 1;
+
+    return value;
+  };
+}
+
+test('candidates: every zone with the host name first, then every zone with the bare address', () => {
+  const pairs = guard.candidates();
+  assert.equal(pairs.length, 6);
+  assert.deepEqual(pairs[0], { address: 'pool.ntp.org', timeZone: 'Europe/Stockholm', own: false });
+  assert.deepEqual(pairs[1], { address: 'pool.ntp.org', timeZone: 'Europe/Amsterdam', own: false });
+  assert.deepEqual(pairs[2], { address: 'pool.ntp.org', timeZone: 'Europe/Paris', own: false });
+  assert.deepEqual(pairs[3], { address: '216.239.35.0', timeZone: 'Europe/Stockholm', own: false });
+  assert.deepEqual(pairs[5], { address: '216.239.35.0', timeZone: 'Europe/Paris', own: false });
+});
+
+test('candidates: a zone the panel already has leads, the CET defaults follow, no duplicates', () => {
+  // The certificate problem is a UTC problem; a Finnish panel keeps Helsinki.
+  const pairs = guard.candidates({ timeZone: 'Europe/Helsinki' });
+  assert.equal(pairs.length, 8);
+  assert.deepEqual(pairs[0], { address: 'pool.ntp.org', timeZone: 'Europe/Helsinki', own: true });
+  assert.deepEqual(pairs[1], { address: 'pool.ntp.org', timeZone: 'Europe/Stockholm', own: false });
+  assert.deepEqual(pairs[4], { address: '216.239.35.0', timeZone: 'Europe/Helsinki', own: true });
+  assert.equal(guard.candidates({ timeZone: 'Europe/Paris' }).length, 6, 'a zone already in the defaults is not listed twice');
+  assert.deepEqual(guard.candidates({ timeZone: 'Europe/Paris' })[0], { address: 'pool.ntp.org', timeZone: 'Europe/Paris', own: true });
+  assert.equal(guard.candidates({ timeZone: '' }).length, 6, 'an empty zone is no zone');
+  assert.equal(guard.candidates({ timeZone: '   ' }).length, 6, 'a blank zone is no zone');
+  assert.equal(guard.candidates({}).length, 6);
+  assert.equal(guard.candidates(undefined).length, 6);
+  assert.equal(guard.candidates({ timeZone: 42 }).length, 6, 'a non-string zone is no zone');
+});
+
+test('candidates: an NTP server the panel already has leads too; a customer\'s internal server is kept', () => {
+  // Outbound NTP blocked at the router, internal server set in the menu, a
+  // power cut resets the clock below the floor: the guard must put THAT
+  // server back, not an unreachable public one.
+  const pairs = guard.candidates({ use: 'ON', address: '10.0.0.5', timeZone: 'Europe/Helsinki' });
+  assert.equal(pairs.length, 12);
+  assert.deepEqual(pairs[0], { address: '10.0.0.5', timeZone: 'Europe/Helsinki', own: true });
+  assert.deepEqual(pairs[1], { address: '10.0.0.5', timeZone: 'Europe/Stockholm', own: true });
+  assert.deepEqual(pairs[4], { address: 'pool.ntp.org', timeZone: 'Europe/Helsinki', own: true });
+  assert.deepEqual(pairs[5], { address: 'pool.ntp.org', timeZone: 'Europe/Stockholm', own: false });
+  assert.equal(guard.candidates({ use: 'ON', address: 'pool.ntp.org' }).length, 6, 'an own address already among the defaults is not listed twice');
+  assert.deepEqual(guard.candidates({ use: 'ON', address: ' 10.0.0.5 ' })[0].address, '10.0.0.5', 'trimmed');
+});
+
+test('candidates: a stale address on a panel with NTP OFF is ignored; its zone is still kept', () => {
+  // Nobody chose that address while NTP was off; writing it back would make
+  // the first try succeed and the defaults never run.
+  const pairs = guard.candidates({ use: 'OFF', address: 'stale.example', timeZone: 'Europe/Helsinki' });
+  assert.equal(pairs.length, 8);
+  assert.deepEqual(pairs[0], { address: 'pool.ntp.org', timeZone: 'Europe/Helsinki', own: true });
+  assert.equal(guard.candidates({ address: 'stale.example' }).length, 6, 'no use field at all: the address is not trusted');
+});
+
+test('candidates: every zone is CET/CEST, so whichever the firmware takes gives the same wall clock', () => {
+  // A zone with a different offset would make "which one was accepted" matter.
+  const probe = new Date('2026-01-15T12:00:00Z');
+  const offsets = guard.TIME_ZONES.map((zone) =>
+    new Intl.DateTimeFormat('en-GB', { timeZone: zone, hour: '2-digit', hour12: false }).format(probe)
+  );
+  assert.deepEqual(offsets, ['13', '13', '13']);
+});
+
+test('driftFromDateHeader: the midpoint of the round trip stands in for the server stamp', () => {
+  // Server says 12:00:00.000; local clock read 12:00:10.000 before and
+  // 12:00:12.000 after: midpoint 12:00:11 => panel is 11 s ahead.
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  assert.equal(guard.driftFromDateHeader('Thu, 12 Nov 2026 12:00:00 GMT', server + 10000, server + 12000), 11);
+});
+
+test('driftFromDateHeader: the midpoint is rounded to the nearest second, not truncated', () => {
+  // Midpoint 1.5 s ahead rounds to 2; 1.4 s rounds to 1; -1.5 s rounds to -1 (JS rounds half up).
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  assert.equal(guard.driftFromDateHeader('Thu, 12 Nov 2026 12:00:00 GMT', server + 1000, server + 2000), 2);
+  assert.equal(guard.driftFromDateHeader('Thu, 12 Nov 2026 12:00:00 GMT', server + 1000, server + 1800), 1);
+  assert.equal(guard.driftFromDateHeader('Thu, 12 Nov 2026 12:00:00 GMT', server - 1000, server - 2000), -1);
+});
+
+test('driftFromDateHeader: a panel behind the server reads negative', () => {
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  assert.equal(guard.driftFromDateHeader('Thu, 12 Nov 2026 12:00:00 GMT', server - 3600000, server - 3600000), -3600);
+});
+
+test('driftFromDateHeader: no header or an unparseable one is null, not zero', () => {
+  // Zero would read as "clock is fine" on the one panel where nothing was measured.
+  assert.equal(guard.driftFromDateHeader(null, 1000, 2000), null);
+  assert.equal(guard.driftFromDateHeader('', 1000, 2000), null);
+  assert.equal(guard.driftFromDateHeader('not a date', 1000, 2000), null);
+});
+
+test('readNtp: absent off a panel, unreadable on a throw, read with the info otherwise', () => {
+  assert.deepEqual(guard.readNtp(undefined), { status: 'absent' });
+  assert.deepEqual(guard.readNtp({}), { status: 'absent' });
+  assert.deepEqual(guard.readNtp(fakeTimer({ getThrows: 'SecurityError' })), { status: 'unreadable', error: 'SecurityError' });
+  const info = { use: 'ON', address: 'time.samsung.com', timeZone: 'Asia/Seoul' };
+  assert.deepEqual(guard.readNtp(fakeTimer({ ntp: info })), { status: 'read', info: info });
+  // A firmware that returns nothing at all still reads as "read", with an
+  // empty info, so decide() sees "use unset" rather than a crash.
+  assert.deepEqual(guard.readNtp(fakeTimer({ ntp: undefined })), { status: 'read', info: {} });
+});
+
+test('isClockImplausible: a clock before the day this file was written is wrong, without a network', () => {
+  assert.equal(guard.EARLIEST_PLAUSIBLE_MS, Date.parse('2026-11-11T00:00:00Z'));
+  assert.equal(guard.isClockImplausible(guard.EARLIEST_PLAUSIBLE_MS - 1), true);
+  assert.equal(guard.isClockImplausible(guard.EARLIEST_PLAUSIBLE_MS), false);
+  assert.equal(guard.isClockImplausible(Date.parse('2016-01-01T00:00:00Z')), true, 'the bench panel of 2026-11-10');
+  assert.equal(guard.isClockImplausible(NaN), false, 'an unreadable clock is not evidence');
+  assert.equal(guard.isClockImplausible(undefined), false);
+});
+
+test('decide: an implausible clock is applied over everything, even NTP on with no measurable drift', () => {
+  // The exact bench case: clock years out, TLS fails, drift is null, NTP may
+  // well say ON. Without this branch the guard leaves the panel alone.
+  const on = { status: 'read', info: { use: 'ON', address: 'x', timeZone: 'y' } };
+  assert.deepEqual(guard.decide(on, null, true), { action: 'apply', reason: 'the clock reads earlier than this build' });
+  assert.equal(guard.decide(on, 0, true).action, 'apply');
+  assert.equal(guard.decide(on, null, false).action, 'leave');
+  assert.equal(guard.decide(on, null).action, 'leave', 'the flag defaults to plausible');
+});
+
+test('decide: NTP off, unset, unreadable or absent is applied whatever the drift', () => {
+  assert.equal(guard.decide({ status: 'read', info: { use: 'OFF' } }, 0).action, 'apply');
+  assert.deepEqual(guard.decide({ status: 'read', info: { use: 'OFF' } }, 0).reason, 'ntp is OFF');
+  assert.deepEqual(guard.decide({ status: 'read', info: {} }, 0).reason, 'ntp is unset');
+  assert.equal(guard.decide({ status: 'unreadable', error: 'UnknownError' }, 0).action, 'apply');
+  assert.equal(guard.decide({ status: 'absent' }, null).action, 'apply');
+});
+
+test('decide: NTP on with a small or unmeasured drift is left alone', () => {
+  const on = { status: 'read', info: { use: 'ON', address: 'x', timeZone: 'y' } };
+  assert.deepEqual(guard.decide(on, 0), { action: 'leave', reason: 'ntp is on' });
+  assert.equal(guard.decide(on, 60).action, 'leave', 'the threshold itself is still fine');
+  assert.equal(guard.decide(on, -60).action, 'leave');
+  assert.equal(guard.decide(on, null).action, 'leave', 'an offline panel at boot is not evidence of a bad server');
+});
+
+test('decide: NTP on with a measured drift past the threshold is applied over', () => {
+  const on = { status: 'read', info: { use: 'ON' } };
+  assert.equal(guard.decide(on, 61).action, 'apply');
+  assert.equal(guard.decide(on, -61).action, 'apply');
+  assert.equal(guard.decide(on, 31536000).reason, 'ntp is on but the clock is 31536000 s out');
+});
+
+test('applyNtp: the first pair the firmware accepts wins, and the call carries use ON', () => {
+  const timer = fakeTimer({});
+  const result = guard.applyNtp(timer, guard.candidates());
+  assert.deepEqual(result, { status: 'applied', address: 'pool.ntp.org', timeZone: 'Europe/Stockholm', attempts: 1 });
+  assert.deepEqual(timer.calls, [{ use: 'ON', address: 'pool.ntp.org', timeZone: 'Europe/Stockholm' }]);
+});
+
+test('applyNtp: an InvalidValuesError moves to the next pair, in order', () => {
+  // Stockholm is not on the zone list signageOS documents; Amsterdam is.
+  const timer = fakeTimer({ refuse: (info) => (info.timeZone === 'Europe/Stockholm' ? 'InvalidValuesError' : null) });
+  const result = guard.applyNtp(timer, guard.candidates());
+  assert.deepEqual(result, { status: 'applied', address: 'pool.ntp.org', timeZone: 'Europe/Amsterdam', attempts: 2 });
+});
+
+test('applyNtp: a firmware that refuses every host name gets the bare address', () => {
+  const timer = fakeTimer({ refuse: (info) => (info.address === 'pool.ntp.org' ? 'InvalidValuesError' : null) });
+  const result = guard.applyNtp(timer, guard.candidates());
+  assert.deepEqual(result, { status: 'applied', address: '216.239.35.0', timeZone: 'Europe/Stockholm', attempts: 4 });
+});
+
+test('applyNtp: every pair refused on value is reported as refused after all six', () => {
+  const timer = fakeTimer({ refuse: () => 'InvalidValuesError' });
+  assert.deepEqual(guard.applyNtp(timer, guard.candidates()), { status: 'refused', error: 'InvalidValuesError', attempts: 6 });
+  assert.equal(timer.calls.length, 6);
+});
+
+test('applyNtp: an own zone the firmware refuses falls through to the CET defaults', () => {
+  const timer = fakeTimer({ refuse: (info) => (info.timeZone === 'Europe/Helsinki' ? 'InvalidValuesError' : null) });
+  const result = guard.applyNtp(timer, guard.candidates({ timeZone: 'Europe/Helsinki' }));
+  assert.deepEqual(result, { status: 'applied', address: 'pool.ntp.org', timeZone: 'Europe/Stockholm', attempts: 2 });
+});
+
+test('applyNtp: ANY refusal of a pair built from the panel\'s own values moves on; the defaults still get their turn', () => {
+  // The firmware may reject what it reported itself with TypeMismatchError
+  // or UnknownError; only a default pair refused that way means the CALL is refused.
+  const timer = fakeTimer({ refuse: (info) => (info.address === '10.0.0.5' || info.timeZone === 'Nowhere/Odd' ? 'UnknownError' : null) });
+  const result = guard.applyNtp(timer, guard.candidates({ use: 'ON', address: '10.0.0.5', timeZone: 'Nowhere/Odd' }));
+  // 4 own-address pairs, then pool.ntp.org+Nowhere/Odd (own zone), then pool.ntp.org+Stockholm.
+  assert.deepEqual(result, { status: 'applied', address: 'pool.ntp.org', timeZone: 'Europe/Stockholm', attempts: 6 });
+});
+
+test('applyNtp: a default pair refused with a non-value error still stops, even after own pairs moved on', () => {
+  const timer = fakeTimer({ refuse: (info) => (info.address === '10.0.0.5' ? 'UnknownError' : 'SecurityError') });
+  const result = guard.applyNtp(timer, guard.candidates({ use: 'ON', address: '10.0.0.5' }));
+  assert.deepEqual(result, { status: 'refused', error: 'SecurityError', attempts: 4 });
+});
+
+test('applyNtp: SecurityError, NotSupportedError and TypeMismatchError stop at the first try', () => {
+  // The CALL is refused; the next value would be refused the same way, and a
+  // package without the Partner privilege must not hammer the API six times.
+  ['SecurityError', 'NotSupportedError', 'TypeMismatchError', 'UnknownError'].forEach((name) => {
+    const timer = fakeTimer({ refuse: () => name });
+    assert.deepEqual(guard.applyNtp(timer, guard.candidates()), { status: 'refused', error: name, attempts: 1 }, name);
+    assert.equal(timer.calls.length, 1, name);
+  });
+});
+
+test('applyNtp: a throw without a name is reported as its text, not as "undefined"', () => {
+  const timer = { setNTP: () => { throw 'boom'; } };
+  assert.deepEqual(guard.applyNtp(timer, guard.candidates()), { status: 'refused', error: 'boom', attempts: 1 });
+});
+
+test('applyNtp: absent off a panel, and the setting is not attempted', () => {
+  assert.deepEqual(guard.applyNtp(undefined, guard.candidates()), { status: 'absent' });
+  assert.deepEqual(guard.applyNtp({ getNTP: () => ({}) }, guard.candidates()), { status: 'absent' });
+});
+
+test('measureDrift: a HEAD with no-store, timed on the local clock, read off the Date header', async () => {
+  const requests = [];
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const fetchFn = (url, options) => {
+    requests.push({ url: url, options: options });
+
+    return fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' })();
+  };
+  const result = await guard.measureDrift(fetchFn, 'https://example.test/up', fakeNow([server + 100000, server + 100400]));
+  assert.deepEqual(result, { status: 'measured', seconds: 100 });
+  assert.deepEqual(requests, [{ url: 'https://example.test/up', options: { method: 'HEAD', cache: 'no-store' } }]);
+});
+
+test('measureDrift: a response without a readable Date header is unavailable, with the reason', async () => {
+  assert.deepEqual(
+    await guard.measureDrift(fakeFetch({}), 'u', fakeNow([0, 0])),
+    { status: 'unavailable', reason: 'no Date header' }
+  );
+  assert.deepEqual(
+    await guard.measureDrift(fakeFetch({ date: 'garbage' }), 'u', fakeNow([0, 0])),
+    { status: 'unavailable', reason: 'unparseable Date header' }
+  );
+});
+
+test('measureDrift: a failed request is unavailable, never a thrown promise', async () => {
+  const result = await guard.measureDrift(fakeFetch({}, new TypeError('Failed to fetch')), 'u', fakeNow([0, 0]));
+  assert.deepEqual(result, { status: 'unavailable', reason: 'TypeError' });
+});
+
+test('measureDrift: a fetch that THROWS instead of rejecting is unavailable too, not an exception in the caller', async () => {
+  const result = await guard.measureDrift(() => { throw new RangeError('no fetch here'); }, 'u', fakeNow([0, 0]));
+  assert.deepEqual(result, { status: 'unavailable', reason: 'RangeError' });
+});
+
+test('measureDrift: a request that never answers is given up on after the probe timeout', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = guard.measureDrift(() => new Promise(() => {}), 'u', fakeNow([0, 0]));
+  t.mock.timers.tick(guard.PROBE_TIMEOUT_MS - 1);
+  let settled = false;
+  pending.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false, 'still waiting just under the timeout');
+  t.mock.timers.tick(1);
+  assert.deepEqual(await pending, { status: 'unavailable', reason: 'TimeoutError' });
+  assert.equal(guard.PROBE_TIMEOUT_MS, 15000);
+});
+
+test('run: NTP off => set, drift measured, no warning when the clock agrees', async () => {
+  const timer = fakeTimer({ ntp: { use: 'OFF', address: '', timeZone: '' } });
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server + 2000, server + 2000]),
+  });
+  assert.equal(report.decision.action, 'apply');
+  assert.equal(report.result.status, 'applied');
+  assert.equal(report.warn, false);
+  assert.equal(guard.formatReport(report), 'NTP set (pool.ntp.org, Europe/Stockholm) · drift +2 s');
+});
+
+test('run: NTP on and the clock agrees => left alone, and the panel is not written to', async () => {
+  const timer = fakeTimer({ ntp: { use: 'ON', address: 'time.samsung.com', timeZone: 'Europe/Paris' } });
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server - 1000, server - 1000]),
+  });
+  assert.equal(report.result, null);
+  assert.equal(timer.calls.length, 0);
+  assert.equal(report.warn, false);
+  assert.equal(guard.formatReport(report), 'NTP left on (time.samsung.com, Europe/Paris) · drift -1 s');
+});
+
+test('run: NTP on but the clock is a year AHEAD => re-applied with the panel\'s own server and zone, warning on', async () => {
+  // Its own server first even here: a panel whose NTP simply has not synced
+  // yet since boot must not lose a working internal server to a public one.
+  const timer = fakeTimer({ ntp: { use: 'ON', address: 'ntp.customer.lan', timeZone: 'Europe/Paris' } });
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server + 31536000000, server + 31536000000]),
+  });
+  assert.equal(report.result.status, 'applied');
+  assert.deepEqual(timer.calls, [{ use: 'ON', address: 'ntp.customer.lan', timeZone: 'Europe/Paris' }]);
+  assert.equal(report.warn, true);
+  assert.equal(report.clockImplausible, false);
+  assert.equal(
+    guard.formatReport(report),
+    'NTP re-applied (ntp.customer.lan, Europe/Paris) · drift +31536000 s ⚠ clock is wrong'
+  );
+});
+
+test('run: the bench case: clock years BEHIND, TLS fails, NTP says on => its own server re-applied, warning on', async () => {
+  const timer = fakeTimer({ ntp: { use: 'ON', address: 'ntp.customer.lan', timeZone: '' } });
+  const clock = Date.parse('2016-01-01T10:00:00Z');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({}, new TypeError('Failed to fetch')),
+    url: 'u',
+    now: fakeNow([clock, clock]),
+  });
+  assert.equal(report.clockImplausible, true);
+  assert.equal(report.decision.reason, 'the clock reads earlier than this build');
+  assert.equal(report.result.status, 'applied');
+  assert.deepEqual(timer.calls, [{ use: 'ON', address: 'ntp.customer.lan', timeZone: 'Europe/Stockholm' }],
+    'the customer\'s own server is kept; an empty own zone is no zone');
+  assert.equal(report.warn, true);
+  assert.equal(
+    guard.formatReport(report),
+    'NTP re-applied (ntp.customer.lan, Europe/Stockholm) · drift unknown (TypeError), clock reads 2016-01-01 ⚠ clock is wrong'
+  );
+});
+
+test('run: a clock below the floor is applied BEFORE the probe goes out, and a hung probe cannot delay it', async () => {
+  const timer = fakeTimer({ ntp: { use: 'OFF' } });
+  const clock = Date.parse('2016-01-01T10:00:00Z');
+  let fetchStarted = false;
+  const pending = guard.run({
+    timer: timer,
+    fetchFn: () => { fetchStarted = true; return new Promise(() => {}); },
+    url: 'u',
+    now: fakeNow([clock, clock]),
+  });
+  assert.equal(timer.calls.length, 1, 'setNTP was called synchronously, before any await');
+  assert.equal(fetchStarted, false, 'the probe is started on a microtask, after the apply');
+  await Promise.resolve();
+  assert.equal(fetchStarted, true);
+  // The run itself resolves only once the probe times out (see measureDrift); not awaited here.
+  assert.ok(pending instanceof Promise);
+});
+
+test('run: applyAllowed false holds an apply and writes nothing to the panel', async () => {
+  const timer = fakeTimer({ ntp: { use: 'OFF' } });
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server, server]),
+    applyAllowed: false,
+  });
+  assert.equal(report.decision.action, 'apply');
+  assert.deepEqual(report.result, { status: 'held' });
+  assert.equal(timer.calls.length, 0);
+  assert.equal(guard.formatReport(report), 'NTP apply held (applied recently) · drift 0 s');
+});
+
+test('run: applyAllowed false does not hold a leave: nothing was going to be written anyway', async () => {
+  const timer = fakeTimer({ ntp: { use: 'ON', address: 'a', timeZone: 'z' } });
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server, server]),
+    applyAllowed: false,
+  });
+  assert.equal(report.result, null);
+});
+
+test('run: getNTP throws but setNTP works => set, reported without the before-info it never had', async () => {
+  const timer = fakeTimer({ getThrows: 'UnknownError' });
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server, server]),
+  });
+  assert.equal(report.decision.reason, 'ntp setting unreadable');
+  assert.equal(guard.formatReport(report), 'NTP set (pool.ntp.org, Europe/Stockholm) · drift 0 s');
+});
+
+test('run: every pair refused => the plural is spelled out', async () => {
+  const timer = fakeTimer({ ntp: { use: 'OFF' }, refuse: () => 'InvalidValuesError' });
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server, server]),
+  });
+  assert.equal(guard.formatReport(report), 'NTP refused: InvalidValuesError after 6 tries · drift 0 s');
+});
+
+test('run: NTP on with no address or zone reported => left alone and shown as unknown, not undefined', async () => {
+  const timer = fakeTimer({ ntp: { use: 'ON' } });
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server, server]),
+  });
+  assert.equal(report.result, null);
+  assert.equal(guard.formatReport(report), 'NTP left on (?, ?) · drift 0 s');
+});
+
+test('run: the privilege is missing => refused in words, drift still measured, and NO warning', async () => {
+  // A store package without the Partner privilege refuses on every panel. A
+  // permanent warning there would be noise, and noise hides the one panel
+  // whose clock is actually wrong.
+  const timer = fakeTimer({ ntp: { use: 'OFF' }, refuse: () => 'SecurityError' });
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server, server]),
+  });
+  assert.equal(report.warn, false);
+  assert.equal(guard.formatReport(report), 'NTP refused: SecurityError after 1 try · drift 0 s');
+});
+
+test('run: offline at boot with NTP off and a plausible clock => set anyway, drift unknown, no warning', async () => {
+  const timer = fakeTimer({ ntp: { use: 'OFF' } });
+  const clock = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: timer,
+    fetchFn: fakeFetch({}, new TypeError('Failed to fetch')),
+    url: 'u',
+    now: fakeNow([clock, clock]),
+  });
+  assert.equal(report.result.status, 'applied');
+  assert.equal(report.warn, false);
+  assert.equal(guard.formatReport(report), 'NTP set (pool.ntp.org, Europe/Stockholm) · drift unknown (TypeError)');
+});
+
+test('run: off a panel (no webapis) => no Timer API, and the drift is still reported', async () => {
+  const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
+  const report = await guard.run({
+    timer: undefined,
+    fetchFn: fakeFetch({ date: 'Thu, 12 Nov 2026 12:00:00 GMT' }),
+    url: 'u',
+    now: fakeNow([server + 90000, server + 90000]),
+  });
+  assert.equal(report.warn, true);
+  assert.equal(guard.formatReport(report), 'no Timer API · drift +90 s ⚠ clock is wrong');
+});
+
+test('isDriftWarning: only a MEASURED drift past the threshold warns', () => {
+  assert.equal(guard.isDriftWarning({ status: 'measured', seconds: 60 }), false);
+  assert.equal(guard.isDriftWarning({ status: 'measured', seconds: 61 }), true);
+  assert.equal(guard.isDriftWarning({ status: 'measured', seconds: -61 }), true);
+  assert.equal(guard.isDriftWarning({ status: 'unavailable', reason: 'x' }), false);
+});

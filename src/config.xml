@@ -109,6 +109,29 @@
          capture): that task now has a config change to undo here, not only
          code to write. -->
     <tizen:privilege name="http://tizen.org/privilege/application.launch"/>
+    <!-- Both for webapis.timer.setNTP (B2B, Partner level, since Tizen 6.5),
+         which src/js/timeguard.js calls at start so that a panel with a
+         wrong clock corrects itself. Measured on the bench on 2026-11-10: a
+         wrong clock made every https install fail with "Unable to connect to
+         server", and TBM's profile has no clock or NTP key to push. Samsung's
+         Timer API reference lists devicetimer on every method and
+         networkbearerselection on setNTP alone.
+
+         Partner level is granted by the Partner-2026 profile (bench, b2b/)
+         and by Samsung's re-signing for TBM. The STORE package does not get
+         it: build-seller-office-wgt.sh strips these two lines from the
+         staged copy, so the store build's privilege list stays what it was
+         before these two, and on a store panel the call throws
+         SecurityError, which the INFO panel reports as "NTP refused".
+
+         Do not sign THIS file's package with a Public-level distributor
+         certificate (the old TV / Tizen7 profiles): Tizen's installer checks
+         declared privilege levels against the distributor certificate, and a
+         Partner privilege under a Public signature can refuse the install
+         outright rather than throw at runtime. Unmeasured here; every
+         channel that packages this file signs at Partner. -->
+    <tizen:privilege name="http://developer.samsung.com/privilege/devicetimer"/>
+    <tizen:privilege name="http://tizen.org/privilege/networkbearerselection"/>
     <tizen:profile name="tv-samsung"/>
     <tizen:setting screen-orientation="auto-rotation" context-menu="enable" background-support="disable" encryption="disable" install-location="auto" hwkey-event="enable"/>
 </widget>

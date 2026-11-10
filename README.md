@@ -38,10 +38,18 @@ size differs from the build. It is meant for
 pointed at `https://digmiorg.github.io/TizenMarketingWeb/b2b/latest/`, or for a
 USB stick, without a Seller Office review.
 
-**Not yet proven on a panel.** The package has been verified on disk only
-(content identical to the bench build, every digest valid, no DUID in the
-certificate). The first TBM Custom App (URL) run against a panel is still to
-be done; BUILD.md records the channel and what remains unconfirmed.
+**Proven on a panel on 2026-11-10.** TBM → Device Control → Startup Solution →
+Custom App (URL) pointed at `b2b/latest/` installed this package on the bench
+QB43C and it paired and played. The one failure on the way there was the
+panel's own clock: with it wrong the panel reported *Unable to connect to
+server* (the TLS certificate cannot be validated against a wrong date), and
+correcting the clock in the panel's menu was the whole fix. The widget now
+tries to turn NTP on at start (Partner-signed builds only: `b2b/`, the bench)
+and shows the drift in the INFO panel (`js/timeguard.js`); as of 2026-11-11
+that code has run under node, not on a panel.
+What remains unmeasured is what the panel does with a package whose
+distributor certificate has expired (2027-01-01 for the re-signed one); see
+BUILD.md.
 
 **Only for panels with no `E1lTJzhcnm` package installed.** Tizen is expected
 to bind the author-key check to the *package* id `E1lTJzhcnm` (that is its
