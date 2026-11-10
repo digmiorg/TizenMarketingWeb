@@ -104,10 +104,14 @@ descriptor and passes `verify-wgt.sh`; the directory name, the package's `config
 agree (`1.0.14` → `10014`); no two versions share a `<ver>`; every version
 carries the author key `b2b/latest/` serves; and `b2b/latest/` is identical to
 one of the version directories — behind the highest one is allowed and
-reported (that is step 1), different from all of them is not; and `latest/`'s
-`<ver>` never goes below what the base branch already serves — a lower `<ver>`
-is a silent freeze, not a rollback, because displays compare `<ver>` only. The
-three workflows that publish the Pages site run the same check and, if `b2b/`
+reported (that is step 1), different from all of them is not, and identical
+to a directory that failed makes `latest/` fail too. Against the base branch:
+`latest/`'s `<ver>` never goes below what the base serves (a lower `<ver>` is
+a silent freeze, not a rollback, because displays compare `<ver>` only), a
+changed package under an unchanged `<ver>` is refused for the same reason, a
+version directory the base already serves is immutable, and every directory —
+`latest/` included — carries the author key the base's `latest/` carries (the
+key the fleet runs). The three workflows that publish the Pages site run the same check and, if `b2b/`
 on `main` fails it, publish the site **without the failing directories**
 (`::error::` and a step-summary block in the run) rather than fail — Deploy
 site is also the rollback path for `production/`, and a broken `b2b/` must
@@ -139,7 +143,8 @@ scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <ver> Digm
 ```
 
 A re-sign of an already published version cannot be rolled out: `<ver>` comes
-from the semver, so displays would not download it again. A new distributor
+from the semver, so displays would not download it again — and `check-b2b.sh`
+refuses the attempt (changed bytes, unchanged `<ver>`). A new distributor
 certificate (after 2027-01-01) therefore needs a version bump.
 
 Why it exists: on 2026-11-10 a clean QB43C refused the Seller Office version

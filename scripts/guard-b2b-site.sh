@@ -40,7 +40,7 @@ fi
 # of the working tree" comments in the workflows are about.
 list="$(mktemp)"
 rc=0
-CHECK_B2B_FAILED_LIST="$list" "$here/check-b2b.sh" "$SITE/b2b" || rc=$?
+CHECK_B2B_FAILED_LIST="$list" CHECK_B2B_BASE_PATH=b2b "$here/check-b2b.sh" "$SITE/b2b" || rc=$?
 case "$rc" in
     0) rm -f "$list"; exit 0 ;;
     2) rm -f "$list"; echo "::error::check-b2b.sh could not run (a tool is missing on this runner) - refusing to guess whether b2b/ is good"; exit 1 ;;
@@ -49,8 +49,15 @@ esac
 dropped=''
 while IFS= read -r dir; do
     [ -n "$dir" ] || continue
+    # Only a direct child of $SITE/b2b, and never a '..' component (a name
+    # that merely contains two dots, such as a typo'd version, is a child
+    # like any other and is removed like any other).
+    case "/$dir/" in
+        */../*) echo "::error::refusing to remove '$dir'"; exit 1 ;;
+    esac
     case "$dir" in
-        *..*|"$SITE"/b2b/|"$SITE"/b2b) echo "::error::refusing to remove '$dir'"; exit 1 ;;
+        "$SITE"/b2b/|"$SITE"/b2b) echo "::error::refusing to remove '$dir'"; exit 1 ;;
+        "$SITE"/b2b/*/*) echo "::error::refusing to remove '$dir': not a direct child of $SITE/b2b"; exit 1 ;;
         "$SITE"/b2b/*) ;;
         *) echo "::error::refusing to remove '$dir': not under $SITE/b2b"; exit 1 ;;
     esac

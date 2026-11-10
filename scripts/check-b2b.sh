@@ -28,8 +28,13 @@
 # production/.
 #
 # Exit status: 0 consistent, 1 something is broken, 2 could not check (a
-# tool this script needs is missing) — the publish guard treats 2 as its own
-# failure, not as a broken b2b/.
+# tool this script needs is missing, the base ref does not resolve, or the
+# script itself hit an error it did not plan for) — the publish guard treats
+# 2 as its own failure, not as a broken b2b/.
+#
+# CHECK_B2B_BASE_PATH (default b2b) is where the channel lives in the git
+# tree, for when ROOT is somewhere else (the publish guard checks the
+# assembled site's copy at _site/b2b).
 #
 # With CHECK_B2B_FAILED_LIST set to a file path, the directories that failed
 # are written there one per line, so the publish guard can drop exactly
@@ -40,24 +45,30 @@
 set -euo pipefail
 
 ROOT="${1:-b2b}"
+BASE_PATH="${CHECK_B2B_BASE_PATH:-b2b}"
 here="$(cd "$(dirname "$0")" && pwd)"
 
-for tool in unzip openssl python3 sed; do
+# Anything this script did not plan for - a tool failing, a path that is not
+# there - is "could not check", never "broken": the publish guard must not
+# withhold a correct b2b/ because of a runner fault.
+trap 'echo "cannot check: unexpected error at line $LINENO"; exit 2' ERR
+
+for tool in unzip openssl python3 sed diff cmp mktemp find basename git; do
     command -v "$tool" >/dev/null 2>&1 || { echo "cannot check: $tool is not installed"; exit 2; }
 done
 
 [ -d "$ROOT" ] || { echo "no $ROOT/ directory"; exit 1; }
 
-# The <ver> a directory's descriptor advertises, raw (may be non-numeric).
+# The <ver> a descriptor advertises, raw (may be non-numeric).
 ver_of() {
     # `|| true`: head closes the pipe, and under pipefail that SIGPIPE would
     # take the script down before it could report what it read.
     sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' "$1" | head -1 || true
 }
 
-# The <widgetname> a directory's descriptor advertises: the file a display asks for.
+# The <widgetname> a descriptor advertises: the file a display asks for.
 widgetname_of() {
-    sed -n 's|.*<widgetname>\(.*\)</widgetname>.*|\1|p' "$1/sssp_config.xml" | head -1 || true
+    sed -n 's|.*<widgetname>\(.*\)</widgetname>.*|\1|p' "$1" | head -1 || true
 }
 
 # The version attribute of the <widget> element in a package's config.xml.
@@ -65,11 +76,41 @@ package_version() {
     unzip -p "$1" config.xml | sed -n 's|.*<widget [^>]*version="\([0-9.]*\)".*|\1|p' | head -1 || true
 }
 
+# Two trees byte-identical? 0 yes, 1 no; anything diff cannot do is "could
+# not check" (diff inside an `if` would not reach the ERR trap).
+same_tree() {
+    local rc=0
+    diff -rq "$1" "$2" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        0|1) return "$rc" ;;
+        *) echo "cannot check: diff failed ($rc) comparing $1 with $2"; exit 2 ;;
+    esac
+}
+
+# Two files byte-identical? Same contract as same_tree.
+same_file() {
+    local rc=0
+    cmp -s "$1" "$2" || rc=$?
+    case "$rc" in
+        0|1) return "$rc" ;;
+        *) echo "cannot check: cmp failed ($rc) comparing $1 with $2"; exit 2 ;;
+    esac
+}
+
 # A semver as the integer <ver> build-wgt.sh derives: major*10000+minor*100+patch.
 encode() {
     local major minor patch
     IFS=. read -r major minor patch <<< "$1"
     echo $(( 10#$major * 10000 + 10#$minor * 100 + 10#$patch ))
+}
+
+# The signing-key hash of a package, or '' when it cannot be read
+# (author-identity.sh says 'none' for that, with exit 0).
+key_of() {
+    local key
+    key="$("$here/author-identity.sh" "$1" 2>/dev/null || true)"
+    case "$key" in none) key='' ;; esac
+    printf '%s' "$key"
 }
 
 fail=0
@@ -81,13 +122,11 @@ mark_failed() {
     esac
     fail=1
 }
-
-# Take a directory back out of the failed list (fail itself stays set).
-unmark_failed() {
-    failed_dirs=" $failed_dirs "
-    failed_dirs="${failed_dirs// $1 / }"
-    failed_dirs="${failed_dirs# }"
-    failed_dirs="${failed_dirs% }"
+is_failed() {
+    case " $failed_dirs " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
 }
 
 highest=''
@@ -118,7 +157,7 @@ for entry in "$ROOT"/*/; do
         continue
     fi
     wgt="${wgts[0]}"
-    widget="$(widgetname_of "$dir")"
+    widget="$(widgetname_of "$dir/sssp_config.xml")"
     if [ "$(basename "$wgt")" != "$widget.wgt" ]; then
         # The display asks for <widgetname>.wgt and nothing else; a package
         # under any other name is a 404 on Pages and a panel that keeps its
@@ -128,8 +167,13 @@ for entry in "$ROOT"/*/; do
     fi
     pkgver="$(package_version "$wgt")"
     if [ "$pkgver" != "$name" ]; then
+        # Not a version directory of this package, whatever else it holds:
+        # it does not join the versions, so a stray copy of a good package
+        # under a typo'd name is charged alone and never makes the good
+        # directory a "duplicate" or latest/ its mirror.
         echo "  FAIL  directory is $name but the package's config.xml says $pkgver"
         mark_failed "$dir"
+        continue
     fi
     ver="$(ver_of "$dir/sssp_config.xml")"
     if ! [[ "$ver" =~ ^[0-9]+$ ]]; then
@@ -151,8 +195,9 @@ for entry in "$ROOT"/*/; do
         mark_failed "$dir"
         continue
     fi
-    if [ "$ver" != "$(encode "$pkgver")" ]; then
-        echo "  FAIL  <ver>$ver</ver> is not $pkgver encoded ($(encode "$pkgver"))"
+    expected="$(encode "$pkgver")"
+    if [ "$ver" != "$expected" ]; then
+        echo "  FAIL  <ver>$ver</ver> is not $pkgver encoded ($expected)"
         mark_failed "$dir"
     fi
     case "$seen_vers" in
@@ -166,7 +211,43 @@ for entry in "$ROOT"/*/; do
     fi
 done
 
-echo "== $ROOT/latest"
+# ---- what the base serves, if a base was given -------------------------------
+base_ver=''
+base_key=''
+base_wgt_tmp=''
+base_has_latest=0
+if [ -n "${CHECK_B2B_BASE:-}" ]; then
+    # A base that does not resolve is "could not check", never "nothing to go
+    # backwards from" - otherwise a wrong ref in the workflow would turn these
+    # rules off on every pull request without anyone seeing it.
+    git rev-parse --verify -q "$CHECK_B2B_BASE^{commit}" >/dev/null 2>&1 \
+        || { echo "cannot check: base $CHECK_B2B_BASE does not resolve to a commit"; exit 2; }
+    base_cfg="$(git cat-file blob "$CHECK_B2B_BASE:$BASE_PATH/latest/sssp_config.xml" 2>/dev/null || true)"
+    if [ -n "$base_cfg" ]; then
+        base_has_latest=1
+        base_ver="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' | head -1 || true)"
+        base_wgt="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<widgetname>\(.*\)</widgetname>.*|\1|p' | head -1 || true).wgt"
+        base_wgt_tmp="$(mktemp)"
+        # cat-file blob: plumbing, so no textconv or filter can ever rewrite
+        # the bytes on the way out.
+        if git cat-file blob "$CHECK_B2B_BASE:$BASE_PATH/latest/$base_wgt" > "$base_wgt_tmp" 2>/dev/null; then
+            base_key="$(key_of "$base_wgt_tmp")"
+        else
+            echo "cannot check: $CHECK_B2B_BASE has a $BASE_PATH/latest descriptor but no $base_wgt beside it"
+            exit 2
+        fi
+    elif [ "$ROOT" != "$BASE_PATH" ] && ! git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH" 2>/dev/null; then
+        # ROOT points somewhere else (a scratch copy, the assembled site) and
+        # the base has no such tree at all: that is a wrong CHECK_B2B_BASE_PATH,
+        # not a channel that does not exist yet.
+        echo "cannot check: $CHECK_B2B_BASE has no $BASE_PATH/ - set CHECK_B2B_BASE_PATH to where the channel lives in the tree"
+        exit 2
+    fi
+fi
+
+# ---- latest/ ------------------------------------------------------------------
+echo "== $ROOT/latest against the version directories"
+latest_ok=0
 if [ ! -d "$ROOT/latest" ]; then
     # Every panel on the channel follows latest/; without it they 404 on
     # the descriptor, and no version is compared with any other.
@@ -175,10 +256,12 @@ if [ ! -d "$ROOT/latest" ]; then
 elif [ "${#versions[@]}" -eq 0 ]; then
     echo "  FAIL  no version directory to compare $ROOT/latest with"
     fail=1
+elif is_failed "$ROOT/latest"; then
+    echo "  skip  $ROOT/latest already failed above"
 else
     match=''
     for dir in "${versions[@]}"; do
-        if diff -rq "$ROOT/latest" "$dir" >/dev/null 2>&1; then
+        if same_tree "$ROOT/latest" "$dir"; then
             match="$dir"
             break
         fi
@@ -186,137 +269,99 @@ else
     if [ -z "$match" ]; then
         echo "  FAIL  $ROOT/latest is not identical to any version directory"
         mark_failed "$ROOT/latest"
+    elif is_failed "$match"; then
+        # Byte-identical to a directory that failed: it carries the same
+        # fault, and it is the directory every panel follows.
+        echo "  FAIL  $ROOT/latest is identical to $match, which failed above"
+        mark_failed "$ROOT/latest"
     elif [ "$match" = "$highest_dir" ]; then
         echo "  ok    identical to $match, the highest <ver> ($highest)"
+        latest_ok=1
     else
         echo "  note  identical to $match; $highest_dir (<ver>$highest</ver>) is not on latest/ yet (README step 1 - prove it on a panel first)"
         [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice::$ROOT/latest serves $match, not $highest_dir"
-    fi
-
-    latest_key=''
-    key_charged=''
-    latest_wgts=("$ROOT/latest"/*.wgt)
-    if [ "${#latest_wgts[@]}" -ne 1 ] || [ ! -f "${latest_wgts[0]}" ]; then
-        echo "  FAIL  expected exactly one .wgt in $ROOT/latest, found ${#latest_wgts[@]}"
-        mark_failed "$ROOT/latest"
-    else
-        # Per directory, so that exactly the directory with the other key is
-        # charged - latest/ is the fleet's path and keeps serving, and a good
-        # version beside a bad one keeps serving too. author-identity.sh
-        # prints the package's signing-key hash (what a display binds on).
-        # author-identity.sh prints 'none' (exit 0) for a package whose
-        # author signature it cannot read, so that word is "unreadable" here,
-        # never a key to compare with.
-        latest_key="$("$here/author-identity.sh" "${latest_wgts[0]}" 2>/dev/null || true)"
-        case " $failed_dirs " in
-            *" $ROOT/latest "*)
-                echo "  skip  $ROOT/latest already failed above - not charging version directories against its key" ;;
-            *)
-                case "$latest_key" in
-                    ''|none)
-                        echo "  FAIL  could not read the author key of $ROOT/latest"
-                        mark_failed "$ROOT/latest" ;;
-                    *)
-                        differing=0
-                        version_keys=''
-                        # What had already failed before the key comparison:
-                        # those directories are never given back below.
-                        failed_before_keys="$failed_dirs"
-                        for dir in "${versions[@]}"; do
-                            vwgts=("$dir"/*.wgt)
-                            key="$("$here/author-identity.sh" "${vwgts[0]}" 2>/dev/null || true)"
-                            version_keys="$version_keys$dir=$key "
-                            case "$key" in
-                                ''|none)
-                                    echo "  FAIL  could not read the author key of $dir"
-                                    mark_failed "$dir"; continue ;;
-                            esac
-                            if [ "$key" = "$latest_key" ]; then
-                                continue
-                            fi
-                            echo "  FAIL  $dir is signed with author key $key but $ROOT/latest serves $latest_key - panels on the channel would refuse it"
-                            mark_failed "$dir"
-                            key_charged="$key_charged$dir "
-                            differing=$((differing + 1))
-                        done
-                        [ "$differing" -eq 0 ] && echo "  ok    every version carries the author key $ROOT/latest serves ($latest_key)" ;;
-                esac ;;
-        esac
-    fi
-
-    # latest/ must never advertise a lower <ver> than it did before: a
-    # display compares <ver> only and would stay on the higher one, with no
-    # error anywhere.
-    if [ -n "${CHECK_B2B_BASE:-}" ]; then
-        # A base that does not resolve is "could not check", never "nothing
-        # to go backwards from" - otherwise a wrong ref in the workflow would
-        # turn this rule off on every pull request without anyone seeing it.
-        git rev-parse --verify -q "$CHECK_B2B_BASE^{commit}" >/dev/null 2>&1 \
-            || { echo "cannot check: base $CHECK_B2B_BASE does not resolve to a commit"; exit 2; }
-        base_cfg="$(git show "$CHECK_B2B_BASE:$ROOT/latest/sssp_config.xml" 2>/dev/null || true)"
-        if [ -n "$base_cfg" ]; then
-            # latest/ may not change author key either: the versions are
-            # compared against latest/ above, so a latest/ that swapped key
-            # together with a matching new version would otherwise pass and
-            # charge the OLD, good directories. The base's latest/ is the
-            # key the fleet actually runs.
-            base_wgt="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<widgetname>\(.*\)</widgetname>.*|\1|p' | head -1 || true).wgt"
-            base_tmp="$(mktemp)"
-            case " $failed_dirs " in
-                *" $ROOT/latest "*)
-                    echo "  skip  $ROOT/latest already failed above - not comparing its author key with $CHECK_B2B_BASE" ;;
-                *)
-            # cat-file blob: plumbing, so no textconv or filter can ever
-            # rewrite the bytes on the way out.
-            if git cat-file blob "$CHECK_B2B_BASE:$ROOT/latest/$base_wgt" > "$base_tmp" 2>/dev/null; then
-                base_key="$("$here/author-identity.sh" "$base_tmp" 2>/dev/null || true)"
-                case "$base_key" in
-                    ''|none) echo "  FAIL  could not read the author key $CHECK_B2B_BASE's $ROOT/latest serves"; mark_failed "$ROOT/latest" ;;
-                    "$latest_key") echo "  ok    $ROOT/latest keeps the author key $CHECK_B2B_BASE serves" ;;
-                    *)
-                        echo "  FAIL  $ROOT/latest changes author key from $base_key ($CHECK_B2B_BASE) to ${latest_key:-?} - every panel on the channel would refuse it"
-                        mark_failed "$ROOT/latest"
-                        # The version directories charged ONLY for differing
-                        # from a latest/ that is itself the fault, and that
-                        # still carry the base's key, are the good ones.
-                        # Give exactly those back.
-                        set -f
-                        for pair in ${version_keys:-}; do
-                            vdir="${pair%=*}"
-                            vkey="${pair##*=}"
-                            case " $key_charged " in
-                                *" $vdir "*) ;;
-                                *) continue ;;
-                            esac
-                            case " ${failed_before_keys:-} " in
-                                *" $vdir "*) continue ;;
-                            esac
-                            if [ "$vkey" = "$base_key" ]; then
-                                unmark_failed "$vdir"
-                                echo "  ok    $vdir carries the base's key - not withheld"
-                            fi
-                        done
-                        set +f ;;
-                esac
-            else
-                echo "  FAIL  $CHECK_B2B_BASE has a $ROOT/latest descriptor but no $base_wgt beside it"
-                mark_failed "$ROOT/latest"
-            fi ;;
-            esac
-            rm -f "$base_tmp"
-            base_ver="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' | head -1 || true)"
-            new_ver="$(ver_of "$ROOT/latest/sssp_config.xml")"
-            if [[ "$base_ver" =~ ^[0-9]+$ ]] && [[ "$new_ver" =~ ^[0-9]+$ ]] && [ "$new_ver" -lt "$base_ver" ]; then
-                echo "  FAIL  $ROOT/latest goes from <ver>$base_ver</ver> ($CHECK_B2B_BASE) to <ver>$new_ver</ver> - displays never download a lower <ver>, so this is a silent freeze, not a rollback"
-                mark_failed "$ROOT/latest"
-            else
-                echo "  ok    <ver>$new_ver</ver> is not below $CHECK_B2B_BASE's <ver>${base_ver:-none}</ver>"
-            fi
-        else
-            echo "  ok    $CHECK_B2B_BASE serves no $ROOT/latest yet - nothing to go backwards from"
-        fi
+        latest_ok=1
     fi
 fi
+
+# ---- author key: one reference, every directory against it -------------------
+# The key the fleet runs is the one the base's latest/ carries; without a base
+# it is whatever latest/ carries now. Every directory, latest/ included, is
+# compared with that one key, and whichever differs is the one charged.
+ref_key=''
+ref_src=''
+if [ -n "$base_key" ]; then
+    ref_key="$base_key"; ref_src="$CHECK_B2B_BASE's $BASE_PATH/latest"
+elif [ "$base_has_latest" -eq 1 ]; then
+    echo "  FAIL  could not read the author key $CHECK_B2B_BASE's $BASE_PATH/latest serves"
+    fail=1
+elif [ "$latest_ok" -eq 1 ]; then
+    lw=("$ROOT/latest"/*.wgt)
+    ref_key="$(key_of "${lw[0]}")"
+    ref_src="$ROOT/latest"
+    if [ -z "$ref_key" ]; then
+        echo "  FAIL  could not read the author key of $ROOT/latest"
+        mark_failed "$ROOT/latest"
+    fi
+fi
+if [ -n "$ref_key" ]; then
+    echo "== author key: every directory must carry $ref_key ($ref_src)"
+    to_check=("${versions[@]}")
+    [ "$latest_ok" -eq 1 ] && to_check+=("$ROOT/latest")
+    for dir in "${to_check[@]}"; do
+        is_failed "$dir" && continue
+        dw=("$dir"/*.wgt)
+        key="$(key_of "${dw[0]}")"
+        if [ -z "$key" ]; then
+            echo "  FAIL  could not read the author key of $dir"
+            mark_failed "$dir"
+        elif [ "$key" != "$ref_key" ]; then
+            echo "  FAIL  $dir is signed with author key $key, not $ref_key - panels on the channel would refuse it"
+            mark_failed "$dir"
+        fi
+    done
+    [ "$fail" -eq 0 ] && echo "  ok    every directory carries it"
+fi
+
+# ---- against the base: never backwards, never a new package under an old <ver>
+if [ "$base_has_latest" -eq 1 ] && [ "$latest_ok" -eq 1 ]; then
+    echo "== $ROOT/latest against $CHECK_B2B_BASE"
+    new_ver="$(ver_of "$ROOT/latest/sssp_config.xml")"
+    if [[ "$base_ver" =~ ^[0-9]+$ ]] && [[ "$new_ver" =~ ^[0-9]+$ ]] && [ "$new_ver" -lt "$base_ver" ]; then
+        echo "  FAIL  $ROOT/latest goes from <ver>$base_ver</ver> to <ver>$new_ver</ver> - displays never download a lower <ver>, so this is a silent freeze, not a rollback"
+        mark_failed "$ROOT/latest"
+    elif [ "$new_ver" = "$base_ver" ]; then
+        lw=("$ROOT/latest"/*.wgt)
+        if same_file "${lw[0]}" "$base_wgt_tmp"; then
+            echo "  ok    <ver>$new_ver</ver> and the package are unchanged"
+        else
+            echo "  FAIL  the package in $ROOT/latest changed but <ver>$new_ver</ver> did not - no display would ever download it (a re-sign needs a version bump)"
+            mark_failed "$ROOT/latest"
+        fi
+    else
+        echo "  ok    <ver>$new_ver</ver> is above $CHECK_B2B_BASE's <ver>$base_ver</ver>"
+    fi
+fi
+if [ -n "${CHECK_B2B_BASE:-}" ]; then
+    # A version directory the base already serves must be the same bytes:
+    # its <ver> is fixed by its name, so a changed package there is the same
+    # silent no-op.
+    for dir in "${versions[@]}"; do
+        is_failed "$dir" && continue
+        name="$(basename "$dir")"
+        dw=("$dir"/*.wgt)
+        if git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/$(basename "${dw[0]}")" 2>/dev/null; then
+            vt="$(mktemp)"
+            git cat-file blob "$CHECK_B2B_BASE:$BASE_PATH/$name/$(basename "${dw[0]}")" > "$vt"
+            if ! same_file "${dw[0]}" "$vt"; then
+                echo "  FAIL  $dir is already served by $CHECK_B2B_BASE with other bytes - a published version is immutable, publish a new one instead"
+                mark_failed "$dir"
+            fi
+            rm -f "$vt"
+        fi
+    done
+fi
+[ -n "$base_wgt_tmp" ] && rm -f "$base_wgt_tmp"
 
 if [ -n "${CHECK_B2B_FAILED_LIST:-}" ]; then
     # Word splitting is the point; pathname expansion is not.
