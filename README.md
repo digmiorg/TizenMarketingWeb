@@ -120,7 +120,9 @@ never stand between a revert and the panels. `latest/` is withheld only when
 fleet's path; and when the check itself cannot run (a tool missing on the
 runner, an unexpected error) **all** of `b2b/` is withheld and the deploy still
 goes on — an unchecked `b2b/` is never published, and `production/` is never
-blocked. (The base-branch rules — `<ver>` not going backwards, `latest/`
+blocked. The single exception, chosen on purpose: if the runner cannot even
+remove `_site/b2b`, `production/` still ships and `b2b/` goes out as committed
+with an `::error:: … UNCHECKED` in the run. (The base-branch rules — `<ver>` not going backwards, `latest/`
 keeping its author key — run only in **Verify b2b**, where a base exists; the
 publish workflows have none, so a red PR is the line of defence there.)
 Panels pointed at a withheld directory 404 on the descriptor

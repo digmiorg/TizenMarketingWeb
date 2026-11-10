@@ -60,9 +60,11 @@
 set -Eeuo pipefail
 
 ROOT="${1:-b2b}"
-ROOT="${ROOT%/}"
+while [ "${ROOT%/}" != "$ROOT" ]; do ROOT="${ROOT%/}"; done
+[ -n "$ROOT" ] || { echo "cannot check: an empty channel root"; exit 2; }
 BASE_PATH="${CHECK_B2B_BASE_PATH:-b2b}"
-BASE_PATH="${BASE_PATH%/}"
+while [ "${BASE_PATH%/}" != "$BASE_PATH" ]; do BASE_PATH="${BASE_PATH%/}"; done
+[ -n "$BASE_PATH" ] || { echo "cannot check: an empty CHECK_B2B_BASE_PATH"; exit 2; }
 here="$(cd "$(dirname "$0")" && pwd)"
 
 # Anything this script did not plan for - a tool failing, a path that is not
