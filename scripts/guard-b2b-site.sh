@@ -9,8 +9,9 @@
 # rollback path for production/latest/, and a bad b2b/ must never stand
 # between a revert and the panels. Instead b2b/ is dropped from the assembled
 # site and an ::error:: is raised. A display following b2b/latest/ then gets a
-# 404 on the descriptor and keeps the build it has; new installs resume once
-# b2b/ is fixed on main.
+# 404 on the descriptor and is expected to keep the build it has (documented
+# SSSP behaviour, not yet measured for TBM Custom App URL); new installs
+# resume once b2b/ is fixed on main.
 #
 # Usage: scripts/guard-b2b-site.sh <assembled-site-dir>   (run from the repo root)
 
@@ -19,7 +20,10 @@ set -euo pipefail
 SITE="${1:?usage: guard-b2b-site.sh <assembled-site-dir>}"
 here="$(cd "$(dirname "$0")" && pwd)"
 
-if "$here/check-b2b.sh" b2b; then
+# Check the b2b/ that is about to be published - the one in the assembled
+# site - not the working tree's, which is what the "git archive, not a copy
+# of the working tree" comments in the workflows are about.
+if "$here/check-b2b.sh" "$SITE/b2b"; then
     exit 0
 fi
 

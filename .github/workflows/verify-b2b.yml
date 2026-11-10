@@ -10,6 +10,7 @@ on:
     paths: &paths
       - 'b2b/**'
       - 'scripts/check-b2b.sh'
+      - 'scripts/guard-b2b-site.sh'
       - 'scripts/verify-wgt.sh'
       - 'scripts/author-identity-gate.sh'
       - 'scripts/author-identity.sh'
@@ -32,3 +33,14 @@ jobs:
           # The job only reads the tree; no git operation needs the token.
           persist-credentials: false
       - run: scripts/check-b2b.sh b2b
+      # The guard the publish workflows run: on a good b2b/ it must leave the
+      # assembled site's b2b/ in place. (Its drop path is exercised by the
+      # script's own failure branch; a bad b2b/ never reaches main green.)
+      - name: The publish guard keeps a good b2b/ on the site
+        run: |
+          set -euo pipefail
+          rm -rf _site && mkdir _site
+          git archive HEAD | tar -x -C _site
+          scripts/guard-b2b-site.sh _site
+          test -f _site/b2b/latest/sssp_config.xml
+          rm -rf _site
