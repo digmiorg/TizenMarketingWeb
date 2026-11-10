@@ -21,6 +21,7 @@ on:
       - 'scripts/guard-b2b-site.sh'
       - 'scripts/verify-wgt.sh'
       - 'scripts/author-identity.sh'
+      - '.github/b2b-accept-key'
       - '.github/workflows/verify-b2b.yml'
 permissions: {}
 jobs:

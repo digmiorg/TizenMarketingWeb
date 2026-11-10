@@ -148,7 +148,8 @@ scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <ver> Digm
 A change of author key is never silent: with a base, every directory must
 carry the key the base's `latest/` carries. The one sanctioned way to move
 the channel to a new key is to commit the new key's sha256 (what
-`scripts/author-identity.sh <wgt>` prints) to `.github/b2b-accept-key` in
+`scripts/author-identity.sh <wgt>` prints) as the first line of
+`.github/b2b-accept-key`, and the key it replaces as the second line, in
 the same pull request — reviewed where it happens — and to plan the
 consequence: every panel on the channel refuses the update until the app is
 uninstalled on it (see above), so a rotation is a site visit per panel, not a

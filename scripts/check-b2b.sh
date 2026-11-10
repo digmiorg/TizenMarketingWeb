@@ -41,10 +41,12 @@
 # committing the new key's sha256 to .github/b2b-accept-key (or passing it as
 # CHECK_B2B_ACCEPT_KEY). That file is in the pull request's diff, so the
 # rotation is reviewed where it happens instead of by merging a red check.
-# While the file names latest/'s key, that key is the reference and the
-# directories still on ONE older key are kept (for panels not yet
-# re-pointed): in pull-request mode those the base already serves, without a
-# base those that agree on a single older key. A directory the base serves
+# While the file's first line names latest/'s key, that key is the reference
+# and the directories still on ONE older key are kept (for panels not yet
+# re-pointed): in pull-request mode those the base already serves; without a
+# base - the publish guard - only directories on the key the file's SECOND
+# line names, the key being replaced, so a stale file never admits a package
+# on some third key. A directory the base serves
 # may be removed once its key is no longer the key the base's latest/
 # carries. Removing the file ends the rotation; remove the old directories
 # in the same pull request, or they fail from then on.
@@ -173,6 +175,20 @@ is_failed() {
 # unchecked.
 for n in "$ROOT"/* "$ROOT"/.[!.]* "$ROOT"/..?*; do
     [ -e "$n" ] || [ -L "$n" ] || continue
+    bn="$(basename "$n")"
+    case "$bn" in
+        .*)
+            # A dot entry, directory or not: the version loop's glob never
+            # sees it, so it would be published unchecked.
+            echo "== $n"; echo "  FAIL  a dot entry - nothing hidden belongs under $ROOT/"
+            mark_failed "$n"; continue ;;
+        *[[:cntrl:]]*)
+            # A name with a control character cannot be carried by the
+            # newline-delimited failed list, so the guard could not withhold
+            # it by name.
+            echo "== $(printf '%q' "$n")"; echo "  FAIL  a control character in the name"
+            fail=1; continue ;;
+    esac
     [ -d "$n" ] && [ ! -L "$n" ] && continue
     echo "== $n"
     echo "  FAIL  not a directory - nothing but version directories and latest/ belongs directly under $ROOT/"
@@ -190,9 +206,11 @@ candidates=()
 for entry in "$ROOT"/*/; do
     [ -d "$entry" ] || continue
     dir="${entry%/}"
-    # Already failed by the root pass (a symlinked directory): it must not
-    # join the versions, or it could become latest/'s match or the highest.
+    # Already failed by the root pass (a symlinked directory, a control
+    # character): it must not join the versions, or it could become latest/'s
+    # match or the highest.
     is_failed "$dir" && continue
+    case "$(basename "$dir")" in *[[:cntrl:]]*) continue ;; esac
     name="$(basename "$dir")"
     echo "== $dir"
     [ "$name" = latest ] || candidates+=("$dir")
@@ -380,11 +398,19 @@ cert_of() {
     case "$c" in none) c='' ;; esac
     printf '%s' "$c"
 }
-accept_key="$(printf '%s' "${CHECK_B2B_ACCEPT_KEY:-}" | tr -cd '0-9a-f')"
+# The accepted key, and the key it replaces. Lower-cased, then required to
+# be a sha256 - a key that is not one is "could not check", never a quiet
+# non-match that fails the rotation with a message about something else.
+accept_key="$(printf '%s' "${CHECK_B2B_ACCEPT_KEY:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')"
+replaced_key="$(printf '%s' "${CHECK_B2B_REPLACED_KEY:-}" | tr 'A-F' 'a-f' | tr -d '[:space:]')"
 if [ -z "$accept_key" ] && [ -f "$here/../.github/b2b-accept-key" ]; then
-    # First line, hex only: a trailing newline or a stray space is not a key.
-    accept_key="$(head -1 "$here/../.github/b2b-accept-key" | tr -cd '0-9a-f' || true)"
+    accept_key="$(sed -n 1p "$here/../.github/b2b-accept-key" | tr 'A-F' 'a-f' | tr -d '[:space:]' || true)"
+    replaced_key="$(sed -n 2p "$here/../.github/b2b-accept-key" | tr 'A-F' 'a-f' | tr -d '[:space:]' || true)"
 fi
+for k in "$accept_key" "$replaced_key"; do
+    [ -z "$k" ] && continue
+    [[ "$k" =~ ^[0-9a-f]{64}$ ]] || { echo "cannot check: '$k' in .github/b2b-accept-key (or CHECK_B2B_ACCEPT_KEY/CHECK_B2B_REPLACED_KEY) is not a sha256"; exit 2; }
+done
 # Accepted mode: the file names exactly the key latest/ carries.
 accepted=0
 latest_key=''
@@ -410,7 +436,7 @@ elif [ "$base_has_latest" -eq 1 ]; then
     echo "cannot check: could not read the author key $CHECK_B2B_BASE's $BASE_PATH/latest serves"
     exit 2
 elif [ "$latest_ok" -eq 1 ]; then
-    lw=("$ROOT/latest"/*.wgt)
+    lw=("$ROOT/latest/$(widgetname_of "$ROOT/latest/sssp_config.xml").wgt")
     ref_key="$latest_key"
     ref_cert="$(cert_of "${lw[0]}")"
     ref_src="$ROOT/latest"
@@ -430,7 +456,7 @@ if [ -n "$ref_key" ]; then
     old_keys=' '
     for dir in ${to_check[@]+"${to_check[@]}"}; do
         is_failed "$dir" && continue
-        dw=("$dir"/*.wgt)
+        dw=("$dir/$(widgetname_of "$dir/sssp_config.xml").wgt")
         key="$(key_of "${dw[0]}")"
         if [ -z "$key" ]; then
             echo "  FAIL  could not read the author key of $dir"
@@ -461,16 +487,28 @@ if [ -n "$ref_key" ]; then
     [ "$(printf '%s' "$old_keys" | wc -w | tr -d ' ')" -gt 1 ] && several_old=1
     for dir in ${old_dirs[@]+"${old_dirs[@]}"}; do
         name="$(basename "$dir")"
+        okey="$(key_of "$dir/$(widgetname_of "$dir/sssp_config.xml").wgt")"
         if [ "$several_old" -eq 1 ]; then
             echo "  FAIL  $dir carries one of several older keys - nothing says which one panels run; only one older key may remain (remove the earlier rotation's leftovers first)"
             mark_failed "$dir"
             key_fails=$((key_fails + 1))
-        elif [ "$base_has_latest" -eq 1 ] && ! git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/sssp_config.xml" 2>/dev/null; then
-            echo "  FAIL  $dir carries an older key and $CHECK_B2B_BASE does not serve it - a new directory must carry the accepted key"
+        elif [ "$base_has_latest" -eq 1 ]; then
+            if git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/sssp_config.xml" 2>/dev/null; then
+                echo "  ok    $dir still carries the older key - kept for panels not yet re-pointed"
+            else
+                echo "  FAIL  $dir carries an older key and $CHECK_B2B_BASE does not serve it - a new directory must carry the accepted key"
+                mark_failed "$dir"
+                key_fails=$((key_fails + 1))
+            fi
+        elif [ -n "$replaced_key" ] && [ "$okey" = "$replaced_key" ]; then
+            # No base (the publish guard): only the key the accept file says
+            # is being replaced is an older key. Anything else is a package
+            # on a third key, admitted by nothing.
+            echo "  ok    $dir still carries the replaced key - kept for panels not yet re-pointed"
+        else
+            echo "  FAIL  $dir carries key $okey, which is neither the accepted key nor the replaced key named on line 2 of .github/b2b-accept-key"
             mark_failed "$dir"
             key_fails=$((key_fails + 1))
-        else
-            echo "  ok    $dir still carries the older key - kept for panels not yet re-pointed"
         fi
     done
     [ "$key_fails" -eq 0 ] && echo "  ok    every directory carries it"
@@ -485,8 +523,10 @@ elif [ "${#versions[@]}" -gt 0 ]; then
     first_key=''
     disagree=0
     for dir in ${versions[@]+"${versions[@]}"}; do
-        dw=("$dir"/*.wgt)
-        key="$(key_of "${dw[0]}")"
+        # A directory already failed (a stray .wgt beside the package, say)
+        # must not vote: its stray could carry any key.
+        is_failed "$dir" && continue
+        key="$(key_of "$dir/$(widgetname_of "$dir/sssp_config.xml").wgt")"
         if [ -z "$key" ]; then
             echo "  FAIL  could not read the author key of $dir"
             mark_failed "$dir"
@@ -500,7 +540,7 @@ elif [ "${#versions[@]}" -gt 0 ]; then
     done
     if [ "$disagree" -eq 1 ]; then
         echo "  FAIL  the version directories carry different author keys and nothing says which one the fleet runs - all withheld until latest/ is fixed"
-        for dir in ${versions[@]+"${versions[@]}"}; do mark_failed "$dir"; done
+        for dir in ${versions[@]+"${versions[@]}"}; do is_failed "$dir" || mark_failed "$dir"; done
     elif [ -n "$first_key" ]; then
         echo "  ok    every version directory carries $first_key"
     fi
