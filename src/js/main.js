@@ -1617,10 +1617,6 @@ function displayMediaContent(data) {
         // never showed it; the pass-through came in with 707f5ac on
         // 2026-09-05 and shipped in 1.0.12, which was never released.
         // signage.digmi.eu multiplies by 1000; this is the same contract.
-        //
-        // Floor of one second, deliberately: a unit mistake here is not a
-        // cosmetic bug, it is a flashing screen in a salon, and a floor is
-        // the cheapest thing that makes the next one harmless.
         let duration = clampSlotMs(Number(currentMedia.duration) * 1000);
 
         // For videos, get the length from the player.
@@ -1638,7 +1634,7 @@ function displayMediaContent(data) {
         // default. Worth knowing before trusting the number.
         const avplayMs = window.avplayDurationMs ? window.avplayDurationMs() : null;
         if (currentMedia.video && avplayMs) {
-          duration = avplayMs;
+          duration = clampSlotMs(avplayMs);
           // Tell the player when this slot ends, so a stream completing at
           // the same moment does not restart the clip just before the timer
           // advances the playlist.
