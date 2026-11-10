@@ -175,6 +175,9 @@ candidates=()
 for entry in "$ROOT"/*/; do
     [ -d "$entry" ] || continue
     dir="${entry%/}"
+    # Already failed by the root pass (a symlinked directory): it must not
+    # join the versions, or it could become latest/'s match or the highest.
+    is_failed "$dir" && continue
     name="$(basename "$dir")"
     echo "== $dir"
     [ "$name" = latest ] || candidates+=("$dir")
@@ -392,8 +395,8 @@ if [ -n "$ref_key" ]; then
             mark_failed "$dir"
             key_fails=$((key_fails + 1))
         elif [ -n "$ref_cert" ] && [ "$(cert_of "${dw[0]}")" != "$ref_cert" ]; then
-            echo "  warn  $dir: same signing key, a different certificate - a renewal. Samsung says a renewal over the existing key keeps an app updatable, but says it about the Galaxy store; nobody has watched a display take one over SSSP. Watch the FIRST screen take this update."
-            [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::$dir carries a renewed certificate over the same key as $ref_src - watch the first screen take it"
+            echo "  warn  $dir and $ref_src: same signing key, different certificates - a renewal on one side. Samsung says a renewal over the existing key keeps an app updatable, but says it about the Galaxy store; nobody has watched a display take one over SSSP. Watch the FIRST screen take this update."
+            [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::$dir and $ref_src carry different certificates over the same key (a renewal on one side) - watch the first screen take the update"
         fi
     done
     [ "$key_fails" -eq 0 ] && echo "  ok    every directory carries it"
