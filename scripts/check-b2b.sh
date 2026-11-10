@@ -14,8 +14,8 @@
 #     channel is where <ver> is typed by hand, and a wrong one means displays
 #     never re-download;
 #   * no two version directories advertise the same <ver>;
-#   * the package carries the same author key as b2b/latest/ serves
-#     (scripts/author-identity-gate.sh), or panels on the channel refuse it.
+#   * the package carries the same author key as b2b/latest/ serves (read
+#     with scripts/author-identity.sh), or panels on the channel refuse it.
 #
 # b2b/latest/ must exist and be byte-for-byte one of the version directories.
 # It is allowed to be BEHIND the highest <ver>: that is the README's step 1, a
@@ -53,6 +53,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # withhold a correct b2b/ because of a runner fault.
 # -E: the trap is inherited into functions too.
 trap 'echo "cannot check: unexpected error at line $LINENO"; exit 2' ERR
+tmpfiles=''
+trap 'rm -f $tmpfiles' EXIT
 
 for tool in unzip openssl python3 sed diff cmp mktemp find basename git; do
     command -v "$tool" >/dev/null 2>&1 || { echo "cannot check: $tool is not installed"; exit 2; }
@@ -115,17 +117,21 @@ key_of() {
 }
 
 fail=0
-failed_dirs=''
+# Newline-delimited, with a leading newline, so a name with spaces stays one
+# entry and "b2b/1.0.1" never matches inside "b2b/1.0.13".
+nl='
+'
+failed_dirs="$nl"
 mark_failed() {
-    case " $failed_dirs " in
-        *" $1 "*) ;;
-        *) failed_dirs="$failed_dirs $1" ;;
+    case "$failed_dirs" in
+        *"$nl$1$nl"*) ;;
+        *) failed_dirs="$failed_dirs$1$nl" ;;
     esac
     fail=1
 }
 is_failed() {
-    case " $failed_dirs " in
-        *" $1 "*) return 0 ;;
+    case "$failed_dirs" in
+        *"$nl$1$nl"*) return 0 ;;
     esac
     return 1
 }
@@ -134,12 +140,16 @@ highest=''
 highest_dir=''
 seen_vers=' '
 versions=()
+# Every directory that is not latest/, failed or not: latest/ mirroring a
+# failed one carries the same fault and must be charged too.
+candidates=()
 
 for entry in "$ROOT"/*/; do
     [ -d "$entry" ] || continue
     dir="${entry%/}"
     name="$(basename "$dir")"
     echo "== $dir"
+    [ "$name" = latest ] || candidates+=("$dir")
     if [ ! -f "$dir/sssp_config.xml" ]; then
         echo "  FAIL  no sssp_config.xml - a display pointed here gets a 404 and keeps its old build"
         mark_failed "$dir"
@@ -165,6 +175,7 @@ for entry in "$ROOT"/*/; do
         # old build without a word.
         echo "  FAIL  package is $(basename "$wgt") but the descriptor advertises <widgetname>$widget</widgetname>, so a display would fetch $widget.wgt"
         mark_failed "$dir"
+        continue
     fi
     pkgver="$(package_version "$wgt")"
     if [ "$pkgver" != "$name" ]; then
@@ -198,11 +209,14 @@ for entry in "$ROOT"/*/; do
     fi
     expected="$(encode "$pkgver")"
     if [ "$ver" != "$expected" ]; then
+        # A wrong <ver> must not reach seen_vers or highest: the directory
+        # that legitimately owns that number would be charged as a duplicate.
         echo "  FAIL  <ver>$ver</ver> is not $pkgver encoded ($expected)"
         mark_failed "$dir"
+        continue
     fi
     case "$seen_vers" in
-        *" $ver "*) echo "  FAIL  <ver>$ver</ver> is advertised by more than one version directory"; mark_failed "$dir" ;;
+        *" $ver "*) echo "  FAIL  <ver>$ver</ver> is advertised by more than one version directory"; mark_failed "$dir"; continue ;;
     esac
     seen_vers="$seen_vers$ver "
     versions+=("$dir")
@@ -229,6 +243,7 @@ if [ -n "${CHECK_B2B_BASE:-}" ]; then
         base_ver="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' | head -1 || true)"
         base_wgt="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<widgetname>\(.*\)</widgetname>.*|\1|p' | head -1 || true).wgt"
         base_wgt_tmp="$(mktemp)"
+        tmpfiles="$tmpfiles $base_wgt_tmp"
         # cat-file blob: plumbing, so no textconv or filter can ever rewrite
         # the bytes on the way out.
         if git cat-file blob "$CHECK_B2B_BASE:$BASE_PATH/latest/$base_wgt" > "$base_wgt_tmp" 2>/dev/null; then
@@ -254,26 +269,39 @@ if [ ! -d "$ROOT/latest" ]; then
     # the descriptor, and no version is compared with any other.
     echo "  FAIL  $ROOT/latest is missing"
     fail=1
-elif [ "${#versions[@]}" -eq 0 ]; then
-    echo "  FAIL  no version directory to compare $ROOT/latest with"
-    fail=1
 elif is_failed "$ROOT/latest"; then
     echo "  skip  $ROOT/latest already failed above"
 else
+    # A good version directory it mirrors is what counts; a stray copy of
+    # the same bytes under a bad name does not take latest/ down with it.
     match=''
-    for dir in "${versions[@]}"; do
+    for dir in ${versions[@]+"${versions[@]}"}; do
         if same_tree "$ROOT/latest" "$dir"; then
             match="$dir"
             break
         fi
     done
+    # No good one: byte-identical to a directory that failed means it
+    # carries the same fault, and it is the directory every panel follows.
+    # Checked before "no version directory" so a mirrored fault is never
+    # hidden behind that.
+    mirrored_fault=''
     if [ -z "$match" ]; then
-        echo "  FAIL  $ROOT/latest is not identical to any version directory"
+        for dir in ${candidates[@]+"${candidates[@]}"}; do
+            if is_failed "$dir" && same_tree "$ROOT/latest" "$dir"; then
+                mirrored_fault="$dir"
+                break
+            fi
+        done
+    fi
+    if [ -n "$mirrored_fault" ]; then
+        echo "  FAIL  $ROOT/latest is identical to $mirrored_fault, which failed above"
         mark_failed "$ROOT/latest"
-    elif is_failed "$match"; then
-        # Byte-identical to a directory that failed: it carries the same
-        # fault, and it is the directory every panel follows.
-        echo "  FAIL  $ROOT/latest is identical to $match, which failed above"
+    elif [ "${#versions[@]}" -eq 0 ]; then
+        echo "  FAIL  no version directory to compare $ROOT/latest with"
+        fail=1
+    elif [ -z "$match" ]; then
+        echo "  FAIL  $ROOT/latest is not identical to any version directory"
         mark_failed "$ROOT/latest"
     elif [ "$match" = "$highest_dir" ]; then
         echo "  ok    identical to $match, the highest <ver> ($highest)"
@@ -308,10 +336,10 @@ elif [ "$latest_ok" -eq 1 ]; then
 fi
 if [ -n "$ref_key" ]; then
     echo "== author key: every directory must carry $ref_key ($ref_src)"
-    to_check=("${versions[@]}")
+    to_check=(${versions[@]+"${versions[@]}"})
     [ "$latest_ok" -eq 1 ] && to_check+=("$ROOT/latest")
     key_fails=0
-    for dir in "${to_check[@]}"; do
+    for dir in ${to_check[@]+"${to_check[@]}"}; do
         is_failed "$dir" && continue
         dw=("$dir"/*.wgt)
         key="$(key_of "${dw[0]}")"
@@ -351,28 +379,24 @@ if [ -n "${CHECK_B2B_BASE:-}" ]; then
     # A version directory the base already serves must be the same bytes:
     # its <ver> is fixed by its name, so a changed package there is the same
     # silent no-op.
-    for dir in "${versions[@]}"; do
+    for dir in ${versions[@]+"${versions[@]}"}; do
         is_failed "$dir" && continue
         name="$(basename "$dir")"
         dw=("$dir"/*.wgt)
         if git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/$(basename "${dw[0]}")" 2>/dev/null; then
             vt="$(mktemp)"
+            tmpfiles="$tmpfiles $vt"
             git cat-file blob "$CHECK_B2B_BASE:$BASE_PATH/$name/$(basename "${dw[0]}")" > "$vt"
             if ! same_file "${dw[0]}" "$vt"; then
                 echo "  FAIL  $dir is already served by $CHECK_B2B_BASE with other bytes - a published version is immutable, publish a new one instead"
                 mark_failed "$dir"
             fi
-            rm -f "$vt"
         fi
     done
 fi
-[ -n "$base_wgt_tmp" ] && rm -f "$base_wgt_tmp"
 
 if [ -n "${CHECK_B2B_FAILED_LIST:-}" ]; then
-    # Word splitting is the point; pathname expansion is not.
-    set -f
-    printf '%s\n' $failed_dirs > "$CHECK_B2B_FAILED_LIST"
-    set +f
+    printf '%s' "${failed_dirs#"$nl"}" > "$CHECK_B2B_FAILED_LIST"
 fi
 
 [ "$fail" -eq 0 ] && echo "$ROOT/ looks consistent"

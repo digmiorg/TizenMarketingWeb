@@ -38,15 +38,24 @@ fi
 # Check the b2b/ that is about to be published - the one in the assembled
 # site - not the working tree's, which is what the "git archive, not a copy
 # of the working tree" comments in the workflows are about.
+# The list file must not exist before the check: check-b2b.sh writes it only
+# when it reached a verdict, so "exit 1 and no list" means it was cut short
+# (bash 3.2 reports a lost exec bit as 1, not 126).
 list="$(mktemp)"
+rm -f "$list"
 rc=0
 CHECK_B2B_FAILED_LIST="$list" CHECK_B2B_BASE_PATH=b2b "$here/check-b2b.sh" "$SITE/b2b" || rc=$?
 case "$rc" in
     0) rm -f "$list"; exit 0 ;;
+    1) [ -f "$list" ] || { echo "::error::check-b2b.sh exited 1 without writing its verdict - it was cut short, refusing to publish an unchecked b2b/"; exit 1; } ;;
     2) rm -f "$list"; echo "::error::check-b2b.sh could not check b2b/ (see its output above) - refusing to guess whether b2b/ is good"; exit 1 ;;
+    # Anything else is not a verdict: a lost exec bit, a signal, an abort
+    # before the list was written. Publishing an unchecked b2b/ behind a
+    # green step is the one outcome this guard must never produce.
+    *) rm -f "$list"; echo "::error::check-b2b.sh exited $rc, which is not a verdict - refusing to publish an unchecked b2b/"; exit 1 ;;
 esac
 
-dropped=''
+dropped=()
 while IFS= read -r dir; do
     [ -n "$dir" ] || continue
     # Only a direct child of $SITE/b2b, and never a '..' component (a name
@@ -63,25 +72,33 @@ while IFS= read -r dir; do
     esac
     rm -rf -- "$dir"
     [ ! -e "$dir" ] || { echo "::error::could not remove $dir"; exit 1; }
-    dropped="$dropped ${dir#"$SITE"/}"
+    dropped+=("${dir#"$SITE"/}")
 done < "$list"
 rm -f "$list"
 
-if [ -z "$dropped" ]; then
+if [ "${#dropped[@]}" -eq 0 ]; then
     # check-b2b.sh failed on something it could not pin to a directory (for
     # example latest/ with no version directory to compare with). Nothing is
     # removed; the error is still raised so someone looks.
-    dropped=' (nothing removed - see the check output above)'
+    echo "::error::b2b/ fails scripts/check-b2b.sh on something not tied to one directory (see its output above) - nothing withheld, site published as committed. production/ and its rollback path are not blocked."
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        {
+            echo "### b2b/ fails its check"
+            echo
+            echo "\`scripts/check-b2b.sh\` failed on something not tied to one directory; nothing was withheld. See the step output, and fix \`b2b/\` on \`main\`."
+        } >> "$GITHUB_STEP_SUMMARY"
+    fi
+    exit 0
 fi
 
-echo "::error::b2b/ fails scripts/check-b2b.sh - publishing this site WITHOUT:$dropped. production/ and its rollback path are not blocked. Panels pointed at a dropped directory keep what they have; fix b2b/ on main to resume."
+echo "::error::b2b/ fails scripts/check-b2b.sh - publishing this site WITHOUT: ${dropped[*]}. production/ and its rollback path are not blocked. Panels pointed at a dropped directory keep what they have; fix b2b/ on main to resume."
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
         echo "### b2b/ partly withheld from this deploy"
         echo
         echo "\`scripts/check-b2b.sh\` failed, so these directories were not published:"
         echo
-        for d in $dropped; do echo "- \`$d\`"; done
+        for d in "${dropped[@]}"; do echo "- \`$d\`"; done
         echo
         echo "\`production/\` was published as usual. Panels pointed at a withheld directory get a 404 on the descriptor and keep the build they have. Fix \`b2b/\` on \`main\` to resume."
     } >> "$GITHUB_STEP_SUMMARY"

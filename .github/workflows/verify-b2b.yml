@@ -20,7 +20,6 @@ on:
       - 'scripts/check-b2b.sh'
       - 'scripts/guard-b2b-site.sh'
       - 'scripts/verify-wgt.sh'
-      - 'scripts/author-identity-gate.sh'
       - 'scripts/author-identity.sh'
       - '.github/workflows/verify-b2b.yml'
 permissions: {}
