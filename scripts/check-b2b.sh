@@ -26,14 +26,17 @@ here="$(cd "$(dirname "$0")" && pwd)"
 
 [ -d "$ROOT" ] || { echo "no $ROOT/ directory"; exit 1; }
 
+# The <ver> a directory's descriptor advertises, raw (may be non-numeric).
 ver_of() {
     sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' "$1/sssp_config.xml" | head -1
 }
 
+# The version attribute of the <widget> element in a package's config.xml.
 package_version() {
     unzip -p "$1" config.xml | sed -n 's|.*<widget [^>]*version="\([0-9.]*\)".*|\1|p' | head -1
 }
 
+# A semver as the integer <ver> build-wgt.sh derives: major*10000+minor*100+patch.
 encode() {
     local major minor patch
     IFS=. read -r major minor patch <<< "$1"

@@ -28,4 +28,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # The job only reads the tree; no git operation needs the token.
+          persist-credentials: false
       - run: scripts/check-b2b.sh b2b

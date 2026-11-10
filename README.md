@@ -55,6 +55,13 @@ has to have it uninstalled before this package goes on, and once a panel is on
 `b2b/` it cannot be moved back to `production/` or the store build the same
 way. Whether TBM can do that uninstall remotely is not known yet.
 
+Uninstalling also clears the widget's `localStorage`, where the device id
+(`myUUID`) lives. On a panel whose id came from Tizen's own `tizenid` — the
+normal case — the reinstalled widget reads the same id again and the pairing in
+portal.digmi.eu survives. A panel that had to fall back to a generated id (no
+`tizenid`) gets a new one and has to be paired again; plan for that before
+uninstalling.
+
 This directory is NOT written by CI. To publish a version, mirror the
 `production/` flow (prove on one panel first, then widen):
 
@@ -64,13 +71,21 @@ This directory is NOT written by CI. To publish a version, mirror the
    `b2b/<version>/DigmiMarketing.wgt` only, with `.build/out/sssp_config.xml`
    copied next to it and `<size>` replaced by
    `wc -c < b2b/<version>/DigmiMarketing.wgt`. Any other profile has another
-   author key, and panels already on `b2b/` would refuse the update. `<ver>` stays the integer
+   author key, and panels already on `b2b/` would refuse the update —
+   `scripts/check-b2b.sh` (below, and in CI) compares the key with
+   `b2b/latest/` and fails on a mismatch. `<ver>` stays the integer
    `build-wgt.sh` derived (1.0.13 → `10013`); `<widgetname>` must equal
    config.xml `<name>` and the .wgt file name (`verify-wgt.sh` checks the
    former, the display needs the latter).
 2. Point one panel at `b2b/<version>/` through TBM Custom App (URL) and watch
-   it install and play.
+   it install and play. From the second version on, make that a panel that
+   already runs `b2b/latest/`, so the *update* path is what gets proven, not
+   only a clean install; keep a clean panel for the install path when you
+   have one.
 3. Only then copy the same two files to `b2b/latest/`, descriptor included.
+   Once Pages serves them, point the test panel back at `b2b/latest/` through
+   TBM so it follows the fleet again (or keep a dedicated test panel on the
+   version directory, if you have one to spare).
 
 1.0.13 is the first publish and `latest/` was filled in the same commit as
 `1.0.13/`, before any panel test, because no panel followed `b2b/latest/` yet.
@@ -82,13 +97,17 @@ descriptor; the directory name, the package's `config.xml` version and `<ver>`
 agree (`1.0.14` → `10014`); no two versions share a `<ver>`; every version
 carries the author key `b2b/latest/` serves; and `b2b/latest/` is identical to
 one of the version directories — behind the highest one is allowed and
-reported (that is step 1), different from all of them is not. What it cannot
-see is what Pages already serves, so before the commit also run:
+reported (that is step 1), different from all of them is not. Before the
+commit also run:
 
 ```sh
 scripts/check-b2b.sh b2b                                 # what CI will run
 scripts/served-baseline.sh b2b/latest                    # <ver> the new one has to beat
 ```
+
+`served-baseline.sh` reads the descriptor in the checkout, not Pages: on a
+branch cut from `main` that is what Pages serves, and after the merge
+`check-served.sh` (below) is the check against the live site.
 
 and after each merge, that Pages serves the bytes you committed — only the
 version directory after step 1 (`latest/` still advertises the old `<ver>` then,
@@ -106,8 +125,10 @@ certificate (after 2027-01-01) therefore needs a version bump.
 Why it exists: on 2026-11-10 a clean QB43C refused the Seller Office version
 pushed by TBM as *Custom App (ID)* ("Unable to install the app"), and the
 store's author certificate had expired on 2025-05-06. This channel depends on
-neither. Anyone can download it and install it on a Samsung B2B panel; the
-package holds nothing secret and a panel shows nothing until it is paired in
+neither. Anyone can download it and install it on a Samsung B2B panel. The
+package carries the shared tablet bearer for `/api/v1/devices` in `main.js`,
+as `production/`, the store build and every Digmi app do — nothing new is
+exposed here — and a panel shows nothing until it is paired in
 portal.digmi.eu, which is the same exposure `production/` already has.
 
 ## howto tizen
