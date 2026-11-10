@@ -159,6 +159,7 @@ function fakePanel(overrides) {
     setDisplayMethod: record('setDisplayMethod'),
     setVideoStillMode: record('setVideoStillMode'),
     disableAudioStream: record('disableAudioStream'),
+    enableAudioStream: record('enableAudioStream'),
     getDuration: () => 15000,
     getCurrentTime: () => 0,
     setListener: (listener) => {
@@ -171,6 +172,7 @@ function fakePanel(overrides) {
   // the TV-mute fallback is then the only silence there is.
   if (behaviour.noAudioStreamApi) {
     delete player.disableAudioStream;
+    delete player.enableAudioStream;
   }
   const audio = {
     muted: false,
@@ -527,13 +529,31 @@ test('createPlayer: silence is per player - disableAudioStream after prepare, an
   assert.equal(panel.audio.muted, false, 'close() unmuted a TV that was never muted');
 });
 
-test('createPlayer: a panel that REFUSES disableAudioStream falls back to the TV mute', () => {
+test('createPlayer: a panel that REFUSES disableAudioStream falls back to the TV mute, once, and still plays', () => {
+  const lines = [];
   const panel = fakePanel({ disableAudioStream: () => { throw new Error('NotSupportedError'); } });
-  const player = makePlayer(panel);
+  const player = makePlayer(panel, { log: (line) => lines.push(line) });
 
-  player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+  const result = player.play('http://example/a.mp4', { width: 1080, height: 1920 });
+  player.play('http://example/b.mp4', { width: 1080, height: 1920 });
 
+  assert.equal(result.ok, true, 'a refused audio switch must not fail the clip');
   assert.deepEqual(panel.args.setMute[0], [true], 'a refused per-player switch left playback audible');
+  assert.equal(panel.args.disableAudioStream.length, 1, 'a refusal was retried every clip - a log line per seam');
+  const prepare = panel.calls.indexOf('prepare');
+  const refused = panel.calls.indexOf('disableAudioStream');
+  const mute = panel.calls.indexOf('setMute');
+  const play = panel.calls.indexOf('play');
+  assert.ok(prepare < refused && refused < mute && mute < play, 'prepare -> (refused) -> TV mute -> play');
+});
+
+test('createPlayer: close() hands the audio stream back, so the next instance does not inherit our silence', () => {
+  const panel = fakePanel();
+  const player = makePlayer(panel);
+  player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+  player.close();
+  assert.ok(panel.calls.indexOf('enableAudioStream') > -1, 'the stream was left disabled on close()');
+  assert.ok(panel.calls.indexOf('enableAudioStream') < panel.calls.indexOf('close'), 'enable must come before close()');
 });
 
 test('createPlayer: without the per-player switch, playback is silent via the TV mute, and close() puts it back', () => {
@@ -831,7 +851,7 @@ test('createPlayer: a player held by a dead instance says so in plain words', ()
 test('createPlayer: a missing tvaudiocontrol does not stop playback', () => {
   // A browser, or a panel without the privilege. Audible is wrong; not
   // playing at all is worse.
-  const panel = fakePanel();
+  const panel = fakePanel({ noAudioStreamApi: true });
   delete panel.scope.tizen;
   const player = makePlayer(panel);
   assert.equal(player.play('http://example/a.mp4', { width: 1080, height: 1920 }).ok, true);

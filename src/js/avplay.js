@@ -282,6 +282,9 @@
     // reused clip after clip (stop/open, never close), so a turn applied for
     // one clip stays on the plane for the next unless something sends NONE.
     let lastSentRotation = null;
+    // Set once the panel has refused disableAudioStream; the TV mute is then
+    // used directly for the rest of this instance.
+    let audioStreamRefused = false;
 
     /**
      * @param {{width: number, height: number}} viewport
@@ -730,12 +733,18 @@
       // start while muted, and AVPlay starts a stream at every seam -- an icon
       // blinking over the customer's content all day. Per clip, because the
       // API leaves re-enabling to the application and says nothing about
-      // open(); the call is cheap and idempotent. The TV mute stays as the
-      // fallback for a panel that lacks the method or refuses it -- with its
-      // OSD, which is still better than an audible salon.
+      // open(). Whether a second call is a no-op is not documented; it has
+      // not misbehaved. The TV mute stays as the fallback for a panel that
+      // lacks the method or refuses it -- with its OSD, which is still better
+      // than an audible salon. A refusal is remembered for the instance:
+      // trying again every clip would log a line per seam and overwrite
+      // lastError with a failure that play() survives.
       let silenced = false;
-      if (typeof p.disableAudioStream === 'function') {
+      if (!audioStreamRefused && typeof p.disableAudioStream === 'function') {
         silenced = attempt('disableAudioStream', () => p.disableAudioStream()).ok;
+        if (!silenced) {
+          audioStreamRefused = true;
+        }
       }
       if (!silenced) {
         muteAudio();
@@ -799,6 +808,14 @@
       player = null;
       if (!p) {
         return;
+      }
+      // Samsung puts enable/disable of the audio stream on the application.
+      // Whether a disabled stream outlives close() on the system player is
+      // not documented and not measured; handing it back costs one call in
+      // IDLE (allowed) and keeps the next app, or the panel's own player, from
+      // inheriting our silence.
+      if (typeof p.enableAudioStream === 'function') {
+        attempt('enableAudioStream', () => p.enableAudioStream());
       }
       attempt('close', () => p.close());
     }
