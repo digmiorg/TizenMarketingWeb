@@ -219,6 +219,9 @@ else
                     *)
                         differing=0
                         version_keys=''
+                        # What had already failed before the key comparison:
+                        # those directories are never given back below.
+                        failed_before_keys="$failed_dirs"
                         for dir in "${versions[@]}"; do
                             vwgts=("$dir"/*.wgt)
                             key="$("$here/author-identity.sh" "${vwgts[0]}" 2>/dev/null || true)"
@@ -284,6 +287,9 @@ else
                             case " $key_charged " in
                                 *" $vdir "*) ;;
                                 *) continue ;;
+                            esac
+                            case " ${failed_before_keys:-} " in
+                                *" $vdir "*) continue ;;
                             esac
                             if [ "$vkey" = "$base_key" ]; then
                                 unmark_failed "$vdir"
