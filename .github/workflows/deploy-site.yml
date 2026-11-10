@@ -149,12 +149,6 @@ jobs:
           # a Pages deployment's SHA as the content it published.
           ref: main
 
-      # The hand-published channel has no build job to fail; this is the one
-      # place a broken b2b/ on main can be stopped before Pages serves it to
-      # every panel following latest/. Same check as the Verify b2b workflow.
-      - name: Refuse to publish a b2b/ that fails its own gate
-        run: scripts/check-b2b.sh b2b
-
       - name: Assemble the site exactly as the branch would have served it
         run: |
           set -euo pipefail
@@ -170,6 +164,10 @@ jobs:
           # of `git archive`, so this is the second of two; it is the one a
           # rename defeats, since `rm -rf` on a missing path exits 0.
           rm -rf _site/lab
+          # b2b/ is hand-published: if it fails its gate it is dropped from
+          # the site rather than failing the deploy, so production/ and its
+          # rollback path never wait on it. See scripts/guard-b2b-site.sh.
+          scripts/guard-b2b-site.sh _site
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:

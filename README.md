@@ -101,8 +101,13 @@ descriptor; the directory name, the package's `config.xml` version and `<ver>`
 agree (`1.0.14` → `10014`); no two versions share a `<ver>`; every version
 carries the author key `b2b/latest/` serves; and `b2b/latest/` is identical to
 one of the version directories — behind the highest one is allowed and
-reported (that is step 1), different from all of them is not. Before the
-commit also run:
+reported (that is step 1), different from all of them is not. The three
+workflows that publish the Pages site run the same check and, if `b2b/` on
+`main` fails it, publish the site **without** `b2b/` (`::error::` in the run)
+rather than fail — Deploy site is also the rollback path for `production/`,
+and a broken `b2b/` must never stand between a revert and the panels. Panels
+on `b2b/latest/` then 404 on the descriptor and keep what they have until
+`b2b/` is fixed. Before the commit also run:
 
 ```sh
 scripts/check-b2b.sh b2b                                 # what CI will run

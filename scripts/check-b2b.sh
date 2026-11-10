@@ -155,13 +155,20 @@ else
         # key. stdout passes through: a renewal over the same key is a
         # ::warning:: the gate prints, and it belongs in the CI summary.
         latest_wgts=("$ROOT/latest"/*.wgt)
+        if [ ! -f "${latest_wgts[0]}" ]; then
+            echo "  FAIL  $ROOT/latest holds no .wgt to compare author keys with"
+            fail=1
+            latest_wgts=()
+        fi
         rc=0
-        "$here/author-identity-gate.sh" "${latest_wgts[0]}" "${versions[@]}" | sed 's/^/        /' || rc="${PIPESTATUS[0]}"
-        case "$rc" in
-            0) echo "  ok    every version carries the author key $ROOT/latest serves" ;;
-            2) echo "  FAIL  a version directory is signed with a different author key than $ROOT/latest - panels on the channel would refuse it (see the keys above)"; fail=1 ;;
-            *) echo "  FAIL  author-identity-gate.sh could not compare the versions with $ROOT/latest (exit $rc)"; fail=1 ;;
-        esac
+        if [ "${#latest_wgts[@]}" -eq 1 ]; then
+            "$here/author-identity-gate.sh" "${latest_wgts[0]}" "${versions[@]}" | sed 's/^/        /' || rc="${PIPESTATUS[0]}"
+            case "$rc" in
+                0) echo "  ok    every version carries the author key $ROOT/latest serves" ;;
+                2) echo "  FAIL  a version directory is signed with a different author key than $ROOT/latest - panels on the channel would refuse it (see the keys above)"; fail=1 ;;
+                *) echo "  FAIL  author-identity-gate.sh could not compare the versions with $ROOT/latest (exit $rc)"; fail=1 ;;
+            esac
+        fi
     fi
 fi
 
