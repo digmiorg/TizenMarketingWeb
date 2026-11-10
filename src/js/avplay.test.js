@@ -222,6 +222,28 @@ test('createPlayer: a landscape viewport leaves the plane untouched - the measur
   assert.deepEqual(reported, ['NONE:landscape:skipped']);
 });
 
+test('createPlayer: a landscape fleet is SILENT about rotation, and the HUD gets the rect verbatim', () => {
+  // The "press 7 or 9" line is for the one unmeasured case. A future change
+  // that logs it on every skipped rotation would nag every landscape seam in
+  // the field; nothing but this test would notice. And the rect handed to
+  // the HUD is the line the bench reads to decide whether the rotated
+  // coordinate space swaps its axes, so it must be the rect that was sent.
+  const lines = [];
+  const rects = [];
+  const panel = fakePanel();
+  panel.scope.screen = { orientation: { angle: 0 } };
+  const player = makePlayer(panel, {
+    log: (line) => lines.push(line),
+    onRotation: (v, s, state, rect) => rects.push(rect),
+  });
+
+  player.play('http://example/clip.mp4', { width: 1920, height: 1080 });
+
+  assert.deepEqual(lines.filter((line) => /portrait|press 7/i.test(line)), [], 'a landscape panel was told to press a key');
+  assert.deepEqual(rects, [{ x: 0, y: 0, width: 1920, height: 1080 }]);
+  assert.deepEqual(panel.args.setDisplayRect[0], [0, 0, 1920, 1080]);
+});
+
 test('createPlayer: a portrait viewport with angle 0 is reported as unmeasured, not silently turned', () => {
   // A panel that rotates in its compositor can report angle 0 for a portrait
   // page. Until the bench has measured which way AVPlay counts, the honest

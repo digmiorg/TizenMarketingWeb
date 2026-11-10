@@ -88,7 +88,8 @@
  * coordinate origin -- whether that space also swaps its axes is not stated
  * and not yet measured. The HUD shows the rect sent, so the bench can tell:
  * a clip cropped to 1080x1080 after a turn means the axes did not swap and
- * the rect must be 1920x1080 regardless. Only the full-screen form is used. An earlier draft computed a letterboxed rect
+ * the rect must be 1920x1080 regardless. Only the full-screen form is used.
+ * An earlier draft computed a letterboxed rect
  * and laid the blurred backdrop in the margins around it; that was removed,
  * because no non-full-screen rect has ever been measured here and, if the
  * document is right about the coordinate space, such a rect lands partly off
@@ -546,7 +547,11 @@
       // origin of coordinates. So, Application should call setDisplayRect()
       // again after calling this API." Allowed in IDLE/READY/PLAYING/PAUSED;
       // after prepare() the player is READY. Since 4.0.
-      const rotation = resolveRotation(screen);
+      // Defensive: `screen` used to be read only inside attempt(), where a
+      // miss was caught. A caller without one must not throw here, after
+      // prepare() with the freeze held and no release().
+      const viewport = screen || { width: 1920, height: 1080 };
+      const rotation = resolveRotation(viewport);
       let turnedState;
       if (rotation.value === 'NONE' && rotation.source !== 'override') {
         // Landscape, or portrait that nobody has measured yet: the plane is
@@ -574,12 +579,12 @@
       // was refused must not read as a value that took, in the middle of the
       // one measurement that decides the direction.
       onRotation(rotation.value, rotation.source, turnedState, {
-        x: 0, y: 0, width: screen.width, height: screen.height,
+        x: 0, y: 0, width: viewport.width, height: viewport.height,
       });
 
       // The rect, in the space the rotation just defined. Measured in ONE form
       // only, and only in landscape; see the note at the top of this file.
-      attempt('setDisplayRect', () => p.setDisplayRect(0, 0, screen.width, screen.height));
+      attempt('setDisplayRect', () => p.setDisplayRect(0, 0, viewport.width, viewport.height));
       // Aspect inside that rect. Without it the default fills the area, which
       // stretches a 16:9 clip across a 9:16 panel.
       // Not measured on this panel -- it is not among the methods the probe
