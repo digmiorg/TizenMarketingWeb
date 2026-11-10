@@ -113,7 +113,10 @@ on `main` fails it, publish the site **without the failing directories**
 site is also the rollback path for `production/`, and a broken `b2b/` must
 never stand between a revert and the panels. `latest/` is withheld only when
 `latest/` itself is broken, so a bad new version directory never blanks the
-fleet's path. Panels pointed at a withheld directory 404 on the descriptor
+fleet's path. (The base-branch rules — `<ver>` not going backwards, `latest/`
+keeping its author key — run only in **Verify b2b**, where a base exists; the
+publish workflows have none, so a red PR is the line of defence there.)
+Panels pointed at a withheld directory 404 on the descriptor
 and are expected to keep what they have (documented SSSP behaviour, not yet
 measured for TBM Custom App URL) until `b2b/` is fixed. Before the commit
 also run:

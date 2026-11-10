@@ -193,6 +193,8 @@ else
         [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice::$ROOT/latest serves $match, not $highest_dir"
     fi
 
+    latest_key=''
+    key_charged=''
     latest_wgts=("$ROOT/latest"/*.wgt)
     if [ "${#latest_wgts[@]}" -ne 1 ] || [ ! -f "${latest_wgts[0]}" ]; then
         echo "  FAIL  expected exactly one .wgt in $ROOT/latest, found ${#latest_wgts[@]}"
@@ -231,6 +233,7 @@ else
                             fi
                             echo "  FAIL  $dir is signed with author key $key but $ROOT/latest serves $latest_key - panels on the channel would refuse it"
                             mark_failed "$dir"
+                            key_charged="$key_charged$dir "
                             differing=$((differing + 1))
                         done
                         [ "$differing" -eq 0 ] && echo "  ok    every version carries the author key $ROOT/latest serves ($latest_key)" ;;
@@ -256,7 +259,13 @@ else
             # key the fleet actually runs.
             base_wgt="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<widgetname>\(.*\)</widgetname>.*|\1|p' | head -1 || true).wgt"
             base_tmp="$(mktemp)"
-            if git show "$CHECK_B2B_BASE:$ROOT/latest/$base_wgt" > "$base_tmp" 2>/dev/null; then
+            case " $failed_dirs " in
+                *" $ROOT/latest "*)
+                    echo "  skip  $ROOT/latest already failed above - not comparing its author key with $CHECK_B2B_BASE" ;;
+                *)
+            # cat-file blob: plumbing, so no textconv or filter can ever
+            # rewrite the bytes on the way out.
+            if git cat-file blob "$CHECK_B2B_BASE:$ROOT/latest/$base_wgt" > "$base_tmp" 2>/dev/null; then
                 base_key="$("$here/author-identity.sh" "$base_tmp" 2>/dev/null || true)"
                 case "$base_key" in
                     ''|none) echo "  FAIL  could not read the author key $CHECK_B2B_BASE's $ROOT/latest serves"; mark_failed "$ROOT/latest" ;;
@@ -264,21 +273,30 @@ else
                     *)
                         echo "  FAIL  $ROOT/latest changes author key from $base_key ($CHECK_B2B_BASE) to ${latest_key:-?} - every panel on the channel would refuse it"
                         mark_failed "$ROOT/latest"
-                        # The version directories that still carry the
-                        # base's key are the good ones; they were charged
-                        # above only for differing from a latest/ that is
-                        # itself the fault. Give them back.
+                        # The version directories charged ONLY for differing
+                        # from a latest/ that is itself the fault, and that
+                        # still carry the base's key, are the good ones.
+                        # Give exactly those back.
+                        set -f
                         for pair in ${version_keys:-}; do
-                            if [ "${pair#*=}" = "$base_key" ]; then
-                                unmark_failed "${pair%%=*}"
-                                echo "  ok    ${pair%%=*} carries the base's key - not withheld"
+                            vdir="${pair%=*}"
+                            vkey="${pair##*=}"
+                            case " $key_charged " in
+                                *" $vdir "*) ;;
+                                *) continue ;;
+                            esac
+                            if [ "$vkey" = "$base_key" ]; then
+                                unmark_failed "$vdir"
+                                echo "  ok    $vdir carries the base's key - not withheld"
                             fi
-                        done ;;
+                        done
+                        set +f ;;
                 esac
             else
                 echo "  FAIL  $CHECK_B2B_BASE has a $ROOT/latest descriptor but no $base_wgt beside it"
                 mark_failed "$ROOT/latest"
-            fi
+            fi ;;
+            esac
             rm -f "$base_tmp"
             base_ver="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' | head -1 || true)"
             new_ver="$(ver_of "$ROOT/latest/sssp_config.xml")"
