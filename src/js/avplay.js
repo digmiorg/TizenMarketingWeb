@@ -107,13 +107,18 @@
   /**
    * What a seam needs, given what is leaving and what is arriving.
    *
-   * `freeze` is rule 3: the plane is about to be torn down with nothing
-   * opaque over it. `coverMustBePainted` says the arriving item is itself the
-   * cover, so the caller must not touch the plane until that item is decoded
-   * AND painted -- an image that has merely been asked for is transparent,
-   * and the plane shows through for the whole decode.
+   * `freeze` is rule 1: LEAVING a video is what needs the freeze, whatever
+   * comes next. The probe's own words, in its advance(): "A card is opaque,
+   * but it is not opaque until it is PAINTED, and the plane does not hold
+   * its last frame on its own: the bench showed black here." An arriving
+   * image lands only after an asynchronous decode, and a stream that ends
+   * during that decode leaves a black plane behind a transparent page.
+   * `coverMustBePainted` says the arriving item is itself the cover, so the
+   * caller must not stop the plane until that item is decoded AND painted.
    *
-   * Leaving an image needs neither: there is no stream to tear down.
+   * Leaving an image needs neither: there is no stream to tear down. What
+   * it DOES need is for the still to stay up until the new clock has moved
+   * -- that is the caller's job (the probe's startBehindCard), not a flag.
    *
    * @param {('video'|'image'|'none')} from
    * @param {('video'|'image'|'none')} to
@@ -123,11 +128,13 @@
     const leavingVideo = from === 'video';
     const arrivingImage = to === 'image';
     return {
-      // Leaving a video always needs the freeze EXCEPT when an opaque image
-      // is arriving to cover the plane itself. A decoded, painted image is a
+      // An earlier version exempted video->image ("a painted image is a
       // complete cover, and freezing as well would hold a frame nobody can
-      // see while risking a stuck freeze on the error paths.
-      freeze: leavingVideo && !arrivingImage,
+      // see"). It was wrong by exactly the decode: seen black on the bench
+      // 2026-11-10, video->image, after the port shipped. The freeze is
+      // released by the next play() and by stop() under the cover; no path
+      // leaves it held.
+      freeze: leavingVideo,
       coverMustBePainted: arrivingImage && leavingVideo,
     };
   }

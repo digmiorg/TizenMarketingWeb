@@ -7,10 +7,19 @@ test('seamPlan: leaving a video for another video needs the freeze', () => {
   assert.deepEqual(seamPlan('video', 'video'), { freeze: true, coverMustBePainted: false });
 });
 
+test('seamPlan: leaving a video for an image STILL needs the freeze - the image arrives after a decode', () => {
+  // The port shipped with this seam exempted ("a painted image is a complete
+  // cover") and the bench showed black at every video->image seam: the
+  // image lands only after an asynchronous decode, and a stream that ends
+  // inside that window leaves a black plane. Rule 1, in the probe's words:
+  // "LEAVING a video is what needs the freeze, whatever comes next."
+  assert.equal(seamPlan('video', 'image').freeze, true);
+});
+
 test('seamPlan: an arriving image is the cover, and must be painted first', () => {
   // The decisive one. An image that has merely been asked for is transparent,
   // and the plane shows through for the whole decode.
-  assert.deepEqual(seamPlan('video', 'image'), { freeze: false, coverMustBePainted: true });
+  assert.deepEqual(seamPlan('video', 'image'), { freeze: true, coverMustBePainted: true });
 });
 
 test('seamPlan: leaving an image needs nothing - there is no stream to tear down', () => {

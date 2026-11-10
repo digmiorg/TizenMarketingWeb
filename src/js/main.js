@@ -1127,6 +1127,60 @@ function displayMediaContent(data) {
         }
       }
 
+      /**
+       * Take the still down once the new stream's clock has moved.
+       *
+       * The probe's watchStart(), ported: poll getCurrentTime() every 16 ms,
+       * remember the first reading as the base, and when the clock is more
+       * than 150 ms past it the picture is live -- hold the cover 250 ms
+       * more (an engine can report a clock a frame before it paints), then
+       * clear the stage. Numbers are the probe's, measured; not retuned.
+       *
+       * The deadline is the one case a cover must NOT win: a clock that never
+       * moves is a dead plane, and a still that hides it forever is a screen
+       * nobody knows is broken. After 5 s the still comes down and the log
+       * says so. The error path does not come here: a refused play() falls
+       * to the <video> branch, which clears the stage itself.
+       *
+       * Guarded on the render token and the generation on every tick, so a
+       * newer render or a teardown owns the stage from then on.
+       */
+      function dropStillWhenClockMoves(token) {
+        const PROGRESS_MS = 150;
+        const HOLD_MS = 250;
+        const DEADLINE_MS = 5000;
+        const since = monotonicNow();
+        let base = null;
+        const poll = setInterval(() => {
+          if (token !== renderToken || !isCurrentGeneration()) {
+            clearInterval(poll);
+            return;
+          }
+          if (monotonicNow() - since > DEADLINE_MS) {
+            clearInterval(poll);
+            console.log('[avplay] no picture within ' + DEADLINE_MS + ' ms: dropping the still over a plane that never moved');
+            clearStage();
+            return;
+          }
+          const t = avplay.currentTime();
+          if (t === null) {
+            return;
+          }
+          if (base === null || t < base) {
+            base = t;
+            return;
+          }
+          if (t > base + PROGRESS_MS) {
+            clearInterval(poll);
+            setTimeout(() => {
+              if (token === renderToken && isCurrentGeneration()) {
+                clearStage();
+              }
+            }, HOLD_MS);
+          }
+        }, 16);
+      }
+
       /** Two frames, so the browser has actually painted before we continue. */
       function afterPaint() {
         return new Promise((resolve) => {
@@ -1225,7 +1279,17 @@ function displayMediaContent(data) {
           if (seam.freeze) {
             avplay.freeze();
           }
-          clearStage();
+          // A still on the stage is NOT cleared here. It is the cover: the
+          // page is opaque under it, so open/prepare/play happen behind it,
+          // and it comes down only once the new stream's clock has actually
+          // moved (the probe's startBehindCard). Clearing first showed the
+          // page's dark background until the first frame -- black at every
+          // image->video seam on the bench, 2026-11-10. Video->video has no
+          // still to keep, and the freeze covers that seam.
+          const stillCovers = onScreenKind === 'image';
+          if (!stillCovers) {
+            clearStage();
+          }
           const result = avplay.play(fullsize, {
             width: window.innerWidth,
             height: window.innerHeight,
@@ -1242,7 +1306,14 @@ function displayMediaContent(data) {
             avplayDurationMs = result.durationMs;
             planeHeld = true;
             loopsDisabledUntilNextPlay = false;
+            // Transparent page now, while the still (if any) is still on top
+            // of it: the cover is the image, not the page colour, so this
+            // paints nothing new. When the clock has moved, dropping the
+            // image reveals a plane that is already live.
             setPlaneVisible(true);
+            if (stillCovers) {
+              dropStillWhenClockMoves(mine);
+            }
             // The Stage readout is the line a bench reads to see which
             // rotation and rect THIS clip got (onRotation has already run
             // inside play()). Nothing else refreshes it on a clip start, so
@@ -1296,6 +1367,14 @@ function displayMediaContent(data) {
         // decoded swap is already instantaneous, which is the effect the fade
         // was there to soften.
         const className = 'main-media';
+        // Rule 1, before anything asynchronous: the decode below takes
+        // hundreds of milliseconds, and a stream that ends inside that window
+        // leaves a black plane behind a transparent page. Freezing here holds
+        // the last frame until the image is painted over it, whatever the
+        // stream does meanwhile. stop() under the cover releases it.
+        if (useAvplay && seam.freeze && planeHeld) {
+          avplay.freeze();
+        }
         Promise.all([
           decodedImage(fullsize, className),
           poster ? decodedImage(poster, 'background') : Promise.resolve(null),
