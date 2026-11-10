@@ -76,13 +76,13 @@ jobs:
           set -euo pipefail
           rm -rf _site && mkdir _site
           git archive HEAD | tar -x -C _site
-          scripts/guard-b2b-site.sh _site
+          bash scripts/guard-b2b-site.sh _site
           test -f _site/b2b/latest/sssp_config.xml
           # The version directory latest/ mirrors today, whichever that is.
           kept="$(for d in _site/b2b/*/; do d="${d%/}"; [ "$(basename "$d")" = latest ] && continue; diff -rq _site/b2b/latest "$d" >/dev/null && echo "$d" && break; done)"
           test -n "$kept"
           sed -i 's|<size>[0-9]*</size>|<size>1</size>|' _site/b2b/latest/sssp_config.xml
-          scripts/guard-b2b-site.sh _site
+          bash scripts/guard-b2b-site.sh _site
           test ! -e _site/b2b/latest
           test -f "$kept/sssp_config.xml"
           rm -rf _site

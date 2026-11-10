@@ -60,7 +60,9 @@ for tool in unzip openssl python3 sed diff cmp mktemp find basename git; do
     command -v "$tool" >/dev/null 2>&1 || { echo "cannot check: $tool is not installed"; exit 2; }
 done
 
-[ -d "$ROOT" ] || { echo "no $ROOT/ directory"; exit 1; }
+# No channel is not a broken channel: a tree without b2b/ has nothing to
+# check, and the guard treats it the same way.
+[ -d "$ROOT" ] || { echo "no $ROOT/ - nothing to check"; exit 0; }
 
 # The <ver> a descriptor advertises, raw (may be non-numeric).
 ver_of() {
@@ -98,6 +100,21 @@ same_file() {
         0|1) return "$rc" ;;
         *) echo "cannot check: cmp failed ($rc) comparing $1 with $2"; exit 2 ;;
     esac
+}
+
+# A directory of this channel holds exactly two entries: the descriptor and
+# <widgetname>.wgt. Anything else (a stray file, a dotfile, a nested dir) is
+# a fault of THAT directory - a display never asks for it, and it must not
+# make latest/ "not identical" to a good package.
+extra_entries() {
+    local d="$1" widget="$2" n
+    for n in "$d"/* "$d"/.[!.]* "$d"/..?*; do
+        [ -e "$n" ] || continue
+        case "$(basename "$n")" in
+            sssp_config.xml|"$widget.wgt") ;;
+            *) printf '%s ' "$(basename "$n")" ;;
+        esac
+    done
 }
 
 # A semver as the integer <ver> build-wgt.sh derives: major*10000+minor*100+patch.
@@ -156,6 +173,12 @@ for entry in "$ROOT"/*/; do
         continue
     fi
     if ! "$here/verify-wgt.sh" "$dir"; then
+        mark_failed "$dir"
+        continue
+    fi
+    extra="$(extra_entries "$dir" "$(widgetname_of "$dir/sssp_config.xml")")"
+    if [ -n "$extra" ]; then
+        echo "  FAIL  unexpected entries beside the descriptor and the package: $extra"
         mark_failed "$dir"
         continue
     fi
@@ -333,11 +356,47 @@ elif [ "$latest_ok" -eq 1 ]; then
         echo "  FAIL  could not read the author key of $ROOT/latest"
         mark_failed "$ROOT/latest"
     fi
+elif [ "${#versions[@]}" -gt 0 ]; then
+    # latest/ cannot serve as the reference (it failed) and there is no
+    # base, so nothing says which key the fleet runs. The version
+    # directories must then agree among themselves; if they do not, there
+    # is no way to tell the foreign one from the right one, and every one
+    # of them is withheld until latest/ is fixed. Safe either way: a
+    # withheld directory means panels keep the build they have.
+    echo "== author key: latest/ is not usable as the reference and there is no base - the versions must agree"
+    first_key=''
+    disagree=0
+    for dir in ${versions[@]+"${versions[@]}"}; do
+        dw=("$dir"/*.wgt)
+        key="$(key_of "${dw[0]}")"
+        if [ -z "$key" ]; then
+            echo "  FAIL  could not read the author key of $dir"
+            mark_failed "$dir"
+            continue
+        fi
+        if [ -z "$first_key" ]; then
+            first_key="$key"
+        elif [ "$key" != "$first_key" ]; then
+            disagree=1
+        fi
+    done
+    if [ "$disagree" -eq 1 ]; then
+        echo "  FAIL  the version directories carry different author keys and nothing says which one the fleet runs - all withheld until latest/ is fixed"
+        for dir in ${versions[@]+"${versions[@]}"}; do mark_failed "$dir"; done
+    elif [ -n "$first_key" ]; then
+        echo "  ok    every version directory carries $first_key"
+    fi
 fi
 if [ -n "$ref_key" ]; then
     echo "== author key: every directory must carry $ref_key ($ref_src)"
-    to_check=(${versions[@]+"${versions[@]}"})
-    [ "$latest_ok" -eq 1 ] && to_check+=("$ROOT/latest")
+    to_check=()
+    for dir in ${versions[@]+"${versions[@]}"}; do
+        [ "$dir" = "$ROOT/latest" ] && continue
+        to_check+=("$dir")
+    done
+    # latest/ is compared too unless it IS the reference (then it would only
+    # be compared with itself).
+    [ "$latest_ok" -eq 1 ] && [ "$ref_src" != "$ROOT/latest" ] && to_check+=("$ROOT/latest")
     key_fails=0
     for dir in ${to_check[@]+"${to_check[@]}"}; do
         is_failed "$dir" && continue
@@ -375,7 +434,18 @@ if [ "$base_has_latest" -eq 1 ] && [ "$latest_ok" -eq 1 ]; then
         echo "  ok    <ver>$new_ver</ver> is above $CHECK_B2B_BASE's <ver>$base_ver</ver>"
     fi
 fi
-if [ -n "${CHECK_B2B_BASE:-}" ]; then
+if [ -n "${CHECK_B2B_BASE:-}" ] && git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH" 2>/dev/null; then
+    # A version directory the base already serves must still exist: a panel
+    # may be pointed at it (README step 2), and nothing else would notice
+    # its descriptor turning into a 404.
+    while IFS= read -r served; do
+        [ -n "$served" ] || continue
+        [ "$served" = latest ] && continue
+        if [ ! -d "$ROOT/$served" ]; then
+            echo "  FAIL  $BASE_PATH/$served is served by $CHECK_B2B_BASE but is gone from this tree - a panel pointed at it would 404; published versions are not removed"
+            fail=1
+        fi
+    done <<< "$(git ls-tree --name-only "$CHECK_B2B_BASE:$BASE_PATH" 2>/dev/null | while IFS= read -r e; do git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$e/sssp_config.xml" 2>/dev/null && echo "$e"; done || true)"
     # A version directory the base already serves must be the same bytes:
     # its <ver> is fixed by its name, so a changed package there is the same
     # silent no-op.
