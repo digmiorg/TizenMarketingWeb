@@ -86,7 +86,7 @@ jobs:
           sed -i 's|<size>[0-9]*</size>|<size>1</size>|' _site/b2b/latest/sssp_config.xml
           # A rehearsal: no step summary, and its ::error:: must not show up
           # as a real annotation on a green run.
-          GITHUB_STEP_SUMMARY='' bash scripts/guard-b2b-site.sh _site 2>&1 | sed 's/^::error::/[rehearsal] /'
+          GITHUB_ACTIONS='' GITHUB_STEP_SUMMARY='' bash scripts/guard-b2b-site.sh _site 2>&1 | sed 's/^::[a-z]*::/[rehearsal] /'
           test ! -e _site/b2b/latest
           test -f "$kept/sssp_config.xml"
           rm -rf _site

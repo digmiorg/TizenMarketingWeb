@@ -41,6 +41,13 @@
 # committing the new key's sha256 to .github/b2b-accept-key (or passing it as
 # CHECK_B2B_ACCEPT_KEY). That file is in the pull request's diff, so the
 # rotation is reviewed where it happens instead of by merging a red check.
+# While the file names latest/'s key, that key is the reference and the
+# directories still on ONE older key are kept (for panels not yet
+# re-pointed): in pull-request mode those the base already serves, without a
+# base those that agree on a single older key. A directory the base serves
+# may be removed once its key is no longer the key the base's latest/
+# carries. Removing the file ends the rotation; remove the old directories
+# in the same pull request, or they fail from then on.
 #
 # With CHECK_B2B_FAILED_LIST set to a file path, the directories that failed
 # are written there one per line, so the publish guard can drop exactly
@@ -342,7 +349,7 @@ else
     if [ -n "$mirrored_fault" ]; then
         echo "  FAIL  $ROOT/latest is identical to $mirrored_fault, which failed above"
         mark_failed "$ROOT/latest"
-        elif [ "${#versions[@]}" -eq 0 ]; then
+    elif [ "${#versions[@]}" -eq 0 ]; then
         # No version directory vouches for it: not a proven package, and it
         # is the directory every panel follows - withheld, not advisory.
         echo "  FAIL  no version directory to compare $ROOT/latest with - latest/ must mirror a published version"
@@ -373,25 +380,29 @@ cert_of() {
     case "$c" in none) c='' ;; esac
     printf '%s' "$c"
 }
-rotating=0
-accept_key="${CHECK_B2B_ACCEPT_KEY:-}"
+accept_key="$(printf '%s' "${CHECK_B2B_ACCEPT_KEY:-}" | tr -cd '0-9a-f')"
 if [ -z "$accept_key" ] && [ -f "$here/../.github/b2b-accept-key" ]; then
     # First line, hex only: a trailing newline or a stray space is not a key.
     accept_key="$(head -1 "$here/../.github/b2b-accept-key" | tr -cd '0-9a-f' || true)"
 fi
+# Accepted mode: the file names exactly the key latest/ carries.
+accepted=0
+latest_key=''
+if [ "$latest_ok" -eq 1 ]; then
+    lwidget="$(widgetname_of "$ROOT/latest/sssp_config.xml")"
+    latest_key="$(key_of "$ROOT/latest/$lwidget.wgt")"
+    [ -n "$accept_key" ] && [ "$latest_key" = "$accept_key" ] && accepted=1
+fi
 ref_key=''
 ref_cert=''
 ref_src=''
-if [ -n "$base_key" ] && [ "$latest_ok" -eq 1 ] && [ -n "$accept_key" ] \
-   && [ "$(key_of "$(printf '%s' "$ROOT"/latest/*.wgt)")" = "$accept_key" ] && [ "$accept_key" != "$base_key" ]; then
-    # A sanctioned rotation: latest/ carries exactly the accepted key, which
-    # is not the base's. The accepted key becomes the reference for every
-    # directory; the base's key is left behind on purpose.
-    lw=("$ROOT/latest"/*.wgt)
-    ref_key="$accept_key"; ref_cert="$(cert_of "${lw[0]}")"; ref_src="$ROOT/latest (rotation accepted by .github/b2b-accept-key)"
-    rotating=1
-    echo "== author key: ROTATION from $base_key ($CHECK_B2B_BASE) to $accept_key, accepted by .github/b2b-accept-key - every panel on the channel has to be emptied and re-pointed"
-    [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::b2b/ changes author key (accepted rotation) - panels on the channel will refuse the update until the app is uninstalled on them"
+if [ "$accepted" -eq 1 ]; then
+    lwidget="$(widgetname_of "$ROOT/latest/sssp_config.xml")"
+    ref_key="$accept_key"; ref_cert="$(cert_of "$ROOT/latest/$lwidget.wgt")"; ref_src="$ROOT/latest (key accepted by .github/b2b-accept-key)"
+    if [ -n "$base_key" ] && [ "$base_key" != "$accept_key" ]; then
+        echo "== author key: ROTATION from $base_key ($CHECK_B2B_BASE) to $accept_key, accepted by .github/b2b-accept-key - every panel on the channel has to be emptied and re-pointed"
+        [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::b2b/ changes author key (accepted rotation) - panels on the channel will refuse the update until the app is uninstalled on them"
+    fi
 elif [ -n "$base_key" ]; then
     ref_key="$base_key"; ref_cert="$(cert_of "$base_wgt_tmp")"; ref_src="$CHECK_B2B_BASE's $BASE_PATH/latest"
 elif [ "$base_has_latest" -eq 1 ]; then
@@ -400,7 +411,7 @@ elif [ "$base_has_latest" -eq 1 ]; then
     exit 2
 elif [ "$latest_ok" -eq 1 ]; then
     lw=("$ROOT/latest"/*.wgt)
-    ref_key="$(key_of "${lw[0]}")"
+    ref_key="$latest_key"
     ref_cert="$(cert_of "${lw[0]}")"
     ref_src="$ROOT/latest"
     if [ -z "$ref_key" ]; then
@@ -415,6 +426,8 @@ if [ -n "$ref_key" ]; then
     # be compared with itself).
     [ "$latest_ok" -eq 1 ] && [ "$ref_src" != "$ROOT/latest" ] && to_check+=("$ROOT/latest")
     key_fails=0
+    old_dirs=()
+    old_keys=' '
     for dir in ${to_check[@]+"${to_check[@]}"}; do
         is_failed "$dir" && continue
         dw=("$dir"/*.wgt)
@@ -423,10 +436,11 @@ if [ -n "$ref_key" ]; then
             echo "  FAIL  could not read the author key of $dir"
             mark_failed "$dir"
             key_fails=$((key_fails + 1))
-        elif [ "$rotating" -eq 1 ] && [ "$key" = "$base_key" ]; then
-            # The old key, during an accepted rotation: still what the
-            # panels not yet re-pointed can run. Kept.
-            echo "  ok    $dir still carries the old key $base_key - kept for panels not yet re-pointed"
+        elif [ "$accepted" -eq 1 ] && [ "$key" != "$ref_key" ]; then
+            # An older key during an accepted rotation: decided below, once
+            # every such directory is known.
+            old_dirs+=("$dir")
+            case "$old_keys" in *" $key "*) ;; *) old_keys="$old_keys$key " ;; esac
         elif [ "$key" != "$ref_key" ]; then
             echo "  FAIL  $dir is signed with author key $key, not $ref_key - panels on the channel would refuse it"
             mark_failed "$dir"
@@ -434,6 +448,28 @@ if [ -n "$ref_key" ]; then
         elif [ -n "$ref_cert" ] && [ "$(cert_of "${dw[0]}")" != "$ref_cert" ]; then
             echo "  warn  $dir and $ref_src: same signing key, different certificates - a renewal on one side. Samsung says a renewal over the existing key keeps an app updatable, but says it about the Galaxy store; nobody has watched a display take one over SSSP. Watch the FIRST screen take this update."
             [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::$dir and $ref_src carry different certificates over the same key (a renewal on one side) - watch the first screen take the update"
+        fi
+    done
+    # The older-key directories of an accepted rotation: kept for the panels
+    # not yet re-pointed, as long as they are what the base already serves
+    # (pull-request mode) or, without a base, as long as they agree on ONE
+    # older key. A second older key is nobody's channel.
+    for dir in ${old_dirs[@]+"${old_dirs[@]}"}; do
+        name="$(basename "$dir")"
+        if [ "$base_has_latest" -eq 1 ]; then
+            if git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/sssp_config.xml" 2>/dev/null; then
+                echo "  ok    $dir still carries an older key - kept for panels not yet re-pointed ($CHECK_B2B_BASE serves it)"
+            else
+                echo "  FAIL  $dir carries an older key and $CHECK_B2B_BASE does not serve it - a new directory must carry the accepted key"
+                mark_failed "$dir"
+                key_fails=$((key_fails + 1))
+            fi
+        elif [ "$(printf '%s' "$old_keys" | wc -w | tr -d ' ')" -le 1 ]; then
+            echo "  ok    $dir still carries the older key - kept for panels not yet re-pointed"
+        else
+            echo "  FAIL  $dir carries one of several older keys - nothing says which one panels run; only one older key may remain"
+            mark_failed "$dir"
+            key_fails=$((key_fails + 1))
         fi
     done
     [ "$key_fails" -eq 0 ] && echo "  ok    every directory carries it"
@@ -498,8 +534,21 @@ if [ -n "${CHECK_B2B_BASE:-}" ] && git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH" 
         [ -n "$served" ] || continue
         [ "$served" = latest ] && continue
         if [ ! -d "$ROOT/$served" ]; then
-            echo "  FAIL  $BASE_PATH/$served is served by $CHECK_B2B_BASE but is gone from this tree - a panel pointed at it would 404; published versions are not removed"
-            fail=1
+            # Gone. Allowed only if the base's copy carries a key other than
+            # the key the base's latest/ carries: a directory left behind by
+            # a rotation, which no panel on the current key can run anyway.
+            swidget="$(git cat-file blob "$CHECK_B2B_BASE:$BASE_PATH/$served/sssp_config.xml" 2>/dev/null | sed -n 's|.*<widgetname>\(.*\)</widgetname>.*|\1|p' | head -1 || true)"
+            st="$(mktemp)"; tmpfiles="$tmpfiles $st"
+            skey=''
+            if git cat-file blob "$CHECK_B2B_BASE:$BASE_PATH/$served/$swidget.wgt" > "$st" 2>/dev/null; then
+                skey="$(key_of "$st")"
+            fi
+            if [ -n "$skey" ] && [ -n "$base_key" ] && [ "$skey" != "$base_key" ]; then
+                echo "  ok    $BASE_PATH/$served is gone, and it carried a key other than the one $CHECK_B2B_BASE's latest/ carries - a rotation leftover, removable"
+            else
+                echo "  FAIL  $BASE_PATH/$served is served by $CHECK_B2B_BASE but is gone from this tree - a panel pointed at it would 404; published versions are not removed"
+                fail=1
+            fi
         fi
     done <<< "$(git ls-tree --name-only "$CHECK_B2B_BASE:$BASE_PATH" 2>/dev/null | while IFS= read -r e; do git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$e/sssp_config.xml" 2>/dev/null && echo "$e"; done || true)"
     # A version directory the base already serves must be the same bytes:
