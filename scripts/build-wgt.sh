@@ -34,8 +34,50 @@ OUT_DIR="${BUILD_OUT_DIR:-.build/out}"
 
 # Both are wiped with `rm -rf` below, and both are overridable. Refuse anything
 # outside .build/ so that `BUILD_STAGE_DIR=src` cannot delete the source tree.
-case "$STAGE_DIR" in .build/*) ;; *) echo "BUILD_STAGE_DIR must live under .build/" >&2; exit 1 ;; esac
-case "$OUT_DIR" in .build/*) ;; *) echo "BUILD_OUT_DIR must live under .build/" >&2; exit 1 ;; esac
+# Both are wiped with `rm -rf` below, and both are overridable, so the guard
+# that keeps the cleanup inside .build/ has to hold against more than a typo.
+# It used to be a string prefix test (`case $dir in .build/*`), which is not
+# enough on two counts, and each one reached the `rm -rf`:
+#
+#   * `.build/../src` matches the pattern and resolves to the source tree --
+#     exactly the deletion the guard was added to prevent.
+#   * `.build/` matches it too, because a trailing `*` also matches nothing,
+#     which would take the reference directory down with it.
+#
+# So resolve first and compare resolved paths. `pwd -P` resolves symlinks, so a
+# symlinked component cannot redirect the cleanup out of the tree either, and
+# the target is required to be STRICTLY beneath .build/ rather than equal to it.
+# Pure shell on purpose: this script has no other interpreter dependency.
+#
+# The directory need not exist yet, so resolve the deepest existing ancestor
+# and re-append the part that does not exist.
+resolve_path() {
+    _rest=""
+    _p="${1%/}"
+    [ -n "$_p" ] || _p="/"
+    while [ ! -d "$_p" ]; do
+        _rest="${_p##*/}${_rest:+/}$_rest"
+        case "$_p" in
+            */*) _p="${_p%/*}"; [ -n "$_p" ] || _p="/" ;;
+            *)   _p="." ;;
+        esac
+    done
+    printf '%s\n' "$(cd "$_p" && pwd -P)${_rest:+/$_rest}"
+}
+
+assert_under_build() {
+    _label="$1"
+    _given="$2"
+    _root="$(resolve_path .build)"
+    _abs="$(resolve_path "$_given")"
+    case "$_abs" in
+        "$_root"/?*) ;;
+        *) echo "$_label must resolve to a directory strictly beneath $_root; '$_given' resolves to '$_abs'" >&2; exit 1 ;;
+    esac
+}
+
+assert_under_build BUILD_STAGE_DIR "$STAGE_DIR"
+assert_under_build BUILD_OUT_DIR "$OUT_DIR"
 
 say() { printf '==> %s\n' "$1"; }
 die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
