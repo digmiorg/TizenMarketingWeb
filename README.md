@@ -27,11 +27,12 @@ copy.
 
 ## B2B re-signed packages for TBM
 
-`b2b/latest/` and `b2b/<version>/` hold the same widget **re-signed by Samsung's
-"B2B App Certificate Re-signing Tool"** (Seller Office → Tools). The tool keeps
-our author signature and the package bytes untouched and replaces the
-distributor signature with `VD B2B Distributor Partner Signer` (expires
-2027-01-01), which is not bound to any DUID. It is meant for
+`b2b/latest/` and `b2b/<version>/` hold the widget **re-signed by Samsung's
+"B2B App Certificate Re-signing Tool"** (Seller Office → Tools). Every file
+inside the package, and our author signature over them, is unchanged; only
+`signature1.xml` is replaced — with `VD B2B Distributor Partner Signer` (expires
+2027-01-01), which is not bound to any DUID — and therefore the zip size
+differs from the build. It is meant for
 **Tizen Business Manager → Device Control → Startup Solution → Custom App (URL)**
 pointed at `https://digmiorg.github.io/TizenMarketingWeb/b2b/latest/`, or for a
 USB stick, without a Seller Office review.
@@ -39,28 +40,46 @@ USB stick, without a Seller Office review.
 **Not yet proven on a panel.** The package has been verified on disk only
 (content identical to the bench build, every digest valid, no DUID in the
 certificate). The first TBM Custom App (URL) run against a panel is still to
-be done; BUILD.md keeps the TBM/Seller Office path as unconfirmed until then.
+be done; BUILD.md records the channel and what remains unconfirmed.
 
-**Only for panels without `DigmiMarketing` installed.** The app id is the same
-as in `production/` (`E1lTJzhcnm.DigmiMarketing`) but the author key is not:
-`production/` is signed with the old key, `b2b/` with the Partner-2026 key, and
-a display refuses an update signed with a different author key (see
-`scripts/author-identity-gate.sh`). A panel that already runs the production
-build has to have the app uninstalled before this package goes on, and once a
-panel is on `b2b/` it cannot be moved back to `production/` the same way.
+**Only for panels with no `E1lTJzhcnm` package installed.** Tizen binds the
+author-key check to the *package* id `E1lTJzhcnm`, which every build of this
+widget shares — the SSSP build (`E1lTJzhcnm.DigmiMarketing`, old key) **and the
+Seller Office store build the fleet runs (`E1lTJzhcnm.DigmiSignage`, store
+key)**. `b2b/` is signed with the Partner-2026 key, and a display refuses an
+update signed with a different author key (see
+`scripts/author-identity-gate.sh`). So a panel that already has either build
+has to have it uninstalled before this package goes on, and once a panel is on
+`b2b/` it cannot be moved back to `production/` or the store build the same
+way. Whether TBM can do that uninstall remotely is not known yet.
 
-This directory is NOT written by CI. To publish a version: upload the
-`scripts/build-wgt.sh` output (`.build/out/DigmiMarketing.wgt`) to the Samsung
-tool, commit the result as `b2b/<version>/DigmiMarketing.wgt` AND
-`b2b/latest/DigmiMarketing.wgt`, and copy `.build/out/sssp_config.xml` next to
-each with `<size>` changed to the re-signed file's byte count (the re-signing
-changes the size; `<ver>` stays the integer `build-wgt.sh` derived, e.g. 1.0.13
-→ `10013`, and `<widgetname>` stays the part of the app id after the dot). Then
-check by hand — no workflow does it for this directory:
+This directory is NOT written by CI. To publish a version, mirror the
+`production/` flow (prove on one panel first, then widen):
+
+1. Upload the `scripts/build-wgt.sh` output (`.build/out/DigmiMarketing.wgt`)
+   to the Samsung tool and commit the result as `b2b/<version>/DigmiMarketing.wgt`
+   only, with `.build/out/sssp_config.xml` copied next to it and `<size>` set
+   to the re-signed file's byte count. `<ver>` stays the integer
+   `build-wgt.sh` derived (1.0.13 → `10013`); `<widgetname>` must equal
+   config.xml `<name>` and the .wgt file name (`verify-wgt.sh` checks the
+   former, the display needs the latter).
+2. Point one panel at `b2b/<version>/` through TBM Custom App (URL) and watch
+   it install and play.
+3. Only then copy the same two files to `b2b/latest/`.
+
+Check by hand before each commit — no workflow does it for this directory:
 
 ```sh
-cmp b2b/latest/DigmiMarketing.wgt b2b/<version>/DigmiMarketing.wgt
-scripts/verify-wgt.sh b2b/latest
+scripts/verify-wgt.sh b2b/<version>                     # descriptor vs package
+scripts/served-baseline.sh b2b/latest                   # <ver> to beat
+scripts/author-identity-gate.sh b2b/<version>/DigmiMarketing.wgt b2b/latest   # same author key as already served
+cmp b2b/latest/DigmiMarketing.wgt b2b/<version>/DigmiMarketing.wgt            # after step 3
+```
+
+and after the merge, that Pages serves the bytes you committed:
+
+```sh
+scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <ver> DigmiMarketing b2b/<version>/DigmiMarketing.wgt b2b/latest b2b/<version>
 ```
 
 A re-sign of an already published version cannot be rolled out: `<ver>` comes

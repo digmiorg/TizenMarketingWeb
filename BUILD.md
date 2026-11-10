@@ -16,14 +16,14 @@ it.
 A screen can get this widget two different ways, and until 2026-11-09 only the
 first was written down here.
 
-| | **SSSP** (`production/`) | **TV Seller Office** (the store) |
-| --- | --- | --- |
-| Built by | `scripts/build-wgt.sh` + the two workflows | `scripts/build-seller-office-wgt.sh` |
-| Signed with | one of our own certificate profiles | nothing; the signature is copied |
-| Who verifies the signature | the panel, on download | Samsung, at upload |
-| Tizen ID | `E1lTJzhcnm.DigmiMarketing` | `E1lTJzhcnm.DigmiSignage` |
-| `<name>` | `DigmiMarketing` | `Digmi Marketing` |
-| Everything below this section | applies | does **not** apply |
+| | **SSSP** (`production/`) | **TV Seller Office** (the store) | **TBM Custom App (URL)** (`b2b/`) |
+| --- | --- | --- | --- |
+| Built by | `scripts/build-wgt.sh` + the two workflows | `scripts/build-seller-office-wgt.sh` | `scripts/build-wgt.sh`, then Seller Office's *B2B App Certificate Re-signing Tool*, by hand |
+| Signed with | one of our own certificate profiles | nothing; the signature is copied | our author signature kept; distributor replaced by Samsung's `VD B2B Distributor Partner Signer` (no DUID) |
+| Who verifies the signature | the panel, on download | Samsung, at upload | the panel, on download |
+| Tizen ID | `E1lTJzhcnm.DigmiMarketing` | `E1lTJzhcnm.DigmiSignage` | `E1lTJzhcnm.DigmiMarketing` |
+| `<name>` | `DigmiMarketing` | `Digmi Marketing` | `DigmiMarketing` |
+| Everything below this section | applies | does **not** apply | applies to the build; the serving is described in README only |
 
 There is one `src/config.xml` and it holds the SSSP values. The store build
 rewrites the Tizen ID, `<name>` and `<tizen:profile>` in a staged copy, taking
@@ -518,9 +518,14 @@ different keys, not merely three certificates (measured 2026-11-03 with
 | 1.0.5 | `b279b279…` | `7461c1fb…`, `CN=Digmi AB` |
 | 1.0.7 (live) | `c442303c…` | `e318dc37…`, `CN=Digmi`, Tizen Developers CA, expires **2027-01-01** |
 | 1.0.9 | `b31d589c…` | `35c211a7…` (never distributable: different key, already expired) |
+| 1.0.13 (`b2b/`, 2026-11-10) | `c0d67d24…` | `670295c0…`, `O=Digmi Sweden AB`, Samsung VD Author CA, expires **2027-11-03**; distributor re-signed by Samsung, expires 2027-01-01 |
 
 The key changed at every release, which is why the fleet cannot be updated from
 a laptop that happens to have a certificate on it.
+
+The fourth row is served from Pages under `b2b/` and carries a fourth key. All
+four packages share the package id `E1lTJzhcnm`, so none of them can update a
+display that runs another — the display must be emptied first.
 
 Every build prints the key, the certificate and the expiry, and warns at 90 and
 then 30 days out — because a certificate that lapses before the next release
@@ -572,6 +577,14 @@ This is the question that decides whether display number 51 can be sold, and it
 is the one to put to Samsung in their own vocabulary: *does distributing a
 signage Custom App through Seller Office and TBM replace the pseudo-distributor
 certificate, as app-store submission does?*
+
+**Part of the answer arrived on 2026-11-10.** Seller Office → Tools has a *B2B
+App Certificate Re-signing Tool*: upload a .wgt, get it back with the
+distributor signature replaced by Samsung's `VD B2B Distributor Partner Signer`,
+which names no DUID at all. That package is committed under `b2b/` (see
+README). Still unconfirmed: that a panel installs it through TBM Custom App
+(URL) — the first run is pending — and that the same swap happens to a store
+submission on its way to the fleet.
 
 ### The production route as Samsung describes it
 
