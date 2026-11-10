@@ -198,8 +198,11 @@ import base64, re, sys
 xml = open(sys.argv[1]).read()
 certs = re.findall(r'<[^>]*X509Certificate>\s*([A-Za-z0-9+/=\s]+?)\s*</[^>]*X509Certificate>', xml)
 if certs:
+    # Decode first: a certificate that does not decode must leave no file
+    # behind, or it would read as "present".
+    der = base64.b64decode(re.sub(r'\s', '', certs[0]))
     with open(sys.argv[2], 'wb') as f:
-        f.write(base64.b64decode(re.sub(r'\s', '', certs[0])))
+        f.write(der)
 PY
 }
 
@@ -207,10 +210,10 @@ PY
 # is also true for a certificate that lapsed long ago, so the message says
 # both rather than promising it is still valid today.
 warn_expiry() {
-    local der="$1" message="$2" days
+    local der="$1" message="$2" hint="$3" days
     for days in 30 90; do
         if ! openssl x509 -inform DER -in "$der" -checkend $(( days * 86400 )) -noout >/dev/null 2>&1; then
-            warn "$message expires within $days days, or already has - $3"
+            warn "$message expires within $days days, or already has - $hint"
             break
         fi
     done
@@ -267,6 +270,10 @@ if [ -f "$WORK/pkg/signature1.xml" ]; then
     extract_first_cert "$WORK/pkg/signature1.xml" "$WORK/distributor.der"
     if [ ! -f "$WORK/distributor.der" ]; then
         bad "signature1.xml carries no X509Certificate"
+    elif ! openssl x509 -inform DER -in "$WORK/distributor.der" -noout >/dev/null 2>&1; then
+        # Present but not a certificate: a display cannot validate the
+        # signature with it, and -checkend would read it as "expired".
+        bad "signature1.xml carries a certificate openssl cannot read"
     else
         printf '  info  distributor certificate\n'
         openssl x509 -inform DER -in "$WORK/distributor.der" -noout -subject -enddate \
