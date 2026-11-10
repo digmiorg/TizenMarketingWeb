@@ -1,4 +1,4 @@
-const appVersion = '1.0.12';
+const appVersion = '1.0.13';
 const baseUrl = 'https://portal.digmi.eu';
 // Shared tablet bearer. /api/v1/devices needs it (401 without); verify-device
 // does not, so it is no longer sent there. It lives in one place now because
@@ -75,6 +75,15 @@ function showReloadModal() {
   }, 0);
 
   setTimeout(() => {
+    // AVPlay is a SYSTEM resource and a reload does not fire unload, so
+    // without this the instance stays allocated to the page that is going
+    // away: every getPlayer() after the reload answers QuotaExceededError,
+    // the widget falls back to <video> for the rest of the panel's uptime,
+    // and only a restart clears it. The RETURN key is a documented, working
+    // key on this app, so this is a path a person takes, not a corner case.
+    if (window.stopAvplayPlayback) {
+      window.stopAvplayPlayback(true);
+    }
     window.location.reload();
   }, 1500);
 }
@@ -314,7 +323,7 @@ function getDeviceModel() {
 
 const MediaStorage = {
   STORAGE_KEY: 'digmi_cached_media',
-  TTL: 10000, // 1 hours
+  TTL: 10000, // 10 s, not an hour: a cold-start accelerator, not a change detector
 
   save: function(uuid, data) {
     const storage = {
@@ -456,6 +465,18 @@ function updateStageGeometry() {
   const slide = document.querySelector('.media-player video, .media-player img.main-media');
   const viewport = window.innerWidth + 'x' + window.innerHeight;
 
+  // A clip on the video plane has NO element to measure: AVPlay lives outside
+  // the DOM, behind the page. Reporting "no slide" for it would be true of
+  // the markup and wrong about the screen, on the one panel that exists to
+  // tell an engineer what is actually being shown. The rect is not reported
+  // because this file no longer chooses one -- it is always the full screen,
+  // with setDisplayMethod deciding the letterbox inside it.
+  if (window.avplayOnPlane) {
+    readout.textContent = 'viewport ' + viewport + ', avplay full screen (letterboxed)';
+
+    return;
+  }
+
   if (!slide) {
     readout.textContent = 'viewport ' + viewport + ', no slide';
 
@@ -521,6 +542,19 @@ function stopPlayback() {
   window.displayMedia = null;
   window.mediaLength = 0;
   window.currentMediaIndex = 0;
+
+  // AVPlay is a SYSTEM resource and lives entirely outside the DOM, so
+  // emptying the container below does not touch it. Left running, a stream
+  // would keep playing behind the pairing screen -- and a freeze left held
+  // would strand a still picture on a panel that has stopped. Before the
+  // teardown, because stopAvplayPlayback is defined per playlist and the
+  // container is what holds the closure alive.
+  if (window.stopAvplayPlayback) {
+    window.stopAvplayPlayback(true);
+    window.stopAvplayPlayback = null;
+    window.avplayDurationMs = null;
+    window.avplayNoteSlot = null;
+  }
 
   const campaignContainer = document.getElementById('campaign-container');
   if (campaignContainer) {
@@ -781,6 +815,92 @@ function showStatus(text) {
  *
  * @param {object} data A device payload with a `campaign_media` array.
  */
+/**
+ * How close to the end of a slot a completed stream stops looping itself.
+ *
+ * The slot is usually set from the clip's own duration, so the stream ending
+ * and the rotation timer firing are the same moment give or take scheduling
+ * jitter. Within this window the timer is trusted to advance the playlist,
+ * and the loop stands down rather than paying for a second seam.
+ */
+const LOOP_GRACE_MS = 400;
+
+/**
+ * How long the playlist-change poll may hang before the rotation gives up on
+ * it. Generous: the poll is a nicety, and the screen keeps rotating without
+ * it. What it must not do is hold the render path open indefinitely.
+ */
+const DEVICE_POLL_TIMEOUT_MS = 15000;
+
+/**
+ * A clock that does not step. The loop gate compares against a 400 ms window,
+ * and an NTP correction after boot routinely moves the wall clock by more
+ * than that. The probe used a monotonic clock for the same reason.
+ */
+function monotonicNow() {
+  return window.performance && typeof window.performance.now === 'function'
+    ? window.performance.now()
+    : Date.now();
+}
+
+/**
+ * The one AVPlay wrapper for this page, and the per-playlist hooks it calls.
+ *
+ * Rule 1 says the panel hands out ONE player, and the panel's mute is just as
+ * singular: it belongs to the TV, not to a playlist. A wrapper built per
+ * playlist remembered "how we found the mute" per playlist, so the second
+ * playlist read back OUR OWN mute, recorded it as the panel's own setting,
+ * and then refused to undo it -- a customer's TV silent on every input until
+ * somebody finds the remote. Measured in a test, not reasoned about.
+ *
+ * So the wrapper lives as long as the page. The hooks are what changes with
+ * each playlist, and they are read through this object at call time rather
+ * than captured, so a torn-down playlist cannot answer for a live one.
+ */
+let sharedAvplay = null;
+const avplayHooks = { onStreamCompleted: null, onError: null };
+
+/** The page's AVPlay wrapper, built on first use. Null where AVPlay is not. */
+function getSharedAvplay() {
+  if (sharedAvplay) {
+    return sharedAvplay;
+  }
+  if (!window.DigmiAvplay || !window.DigmiAvplay.isAvailable()) {
+    return null;
+  }
+  sharedAvplay = window.DigmiAvplay.createPlayer({
+    log: (line) => console.log('[avplay] ' + line),
+    onStreamCompleted: () => {
+      if (avplayHooks.onStreamCompleted) {
+        avplayHooks.onStreamCompleted();
+      }
+    },
+    onError: (type) => {
+      if (avplayHooks.onError) {
+        avplayHooks.onError(type);
+      }
+    },
+  });
+  return sharedAvplay;
+}
+
+/**
+ * Hand the player back to the system and forget it.
+ *
+ * Only on a real teardown -- unpairing, or the reload the RETURN key does.
+ * A playlist being replaced calls stop(), not this: close() would make the
+ * next playlist ask for a fresh instance, and it would also hand the mute
+ * back and take it again a moment later.
+ */
+function closeSharedAvplay() {
+  avplayHooks.onStreamCompleted = null;
+  avplayHooks.onError = null;
+  if (sharedAvplay) {
+    sharedAvplay.close();
+    sharedAvplay = null;
+  }
+}
+
 function displayMediaContent(data) {
   if (data.campaign_media && data.campaign_media.length > 0) {
     const campaignContainer = document.getElementById('campaign-container');
@@ -822,41 +942,383 @@ function displayMediaContent(data) {
       const generation = window.rotationGeneration;
       const isCurrentGeneration = () => generation === window.rotationGeneration;
 
+      // What is on the plane right now, so a seam knows what it is leaving.
+      // 'none' until the first item renders. Reset with the playlist, not
+      // with the generation: a new playlist starts from a blank stage.
+      let onScreenKind = 'none';
+      // Guards the asynchronous half of a render. An image has to be DECODED
+      // before the stage is swapped, and two renders can overlap across that
+      // await -- a rotation tick landing on a remote key press, say. The
+      // later render wins and the earlier one must not paint over it.
+      let renderToken = 0;
+
+      /**
+       * The AVPlay-backed player, or null when this runtime has no AVPlay
+       * (a browser, or a panel that refused it). Built once per playlist.
+       *
+       * Falling back is permanent for the playlist rather than per item: a
+       * panel that cannot open one clip will not open the next either, and
+       * flipping between two playback engines mid-rotation is its own class
+       * of fault.
+       */
+      // A second playlist must not abandon the first one's player. AVPlay is
+      // a system resource outside the DOM, so emptying the container does not
+      // touch it: the old stream would keep playing -- audibly -- behind the
+      // new one, and a held freeze would strand a still picture. The hook is
+      // overwritten a few lines below, so this is the last moment it exists.
+      if (window.stopAvplayPlayback) {
+        window.stopAvplayPlayback();
+      }
+
+      // Captured, unlike the hooks, which are read at call time. The
+      // asymmetry is deliberate but it rests on an invariant worth stating:
+      // after closeSharedAvplay() this reference points at a wrapper whose
+      // player is null, and a play() through it would acquire a fresh native
+      // instance that nothing tracks and nothing can close -- the leak that
+      // close() exists to prevent, through a side door.
+      //
+      // What keeps it shut is that closeSharedAvplay() is only reached from
+      // stopPlayback(), which nulls window.displayMedia first, and from
+      // showReloadModal(), where the close and the reload are adjacent
+      // statements. No playlist is alive to call through this afterwards.
+      // Break either of those and this has to become getSharedAvplay() at
+      // each use.
+      const avplay = getSharedAvplay();
+      let avplayFailed = false;
+      // The slot the rotation timer is currently counting down, so a stream
+      // that completes at the very end of its slot does not restart itself a
+      // few milliseconds before the timer advances the playlist -- which
+      // would be two full stop/open/prepare/play seams back to back.
+      let slotEndsAt = 0;
+      let loopsDisabledUntilNextPlay = false;
+      let avplayDurationMs = null;
+      // Whether AVPlay currently holds the video plane. Not the same question
+      // as "was the previous item a video": two images in quick succession
+      // used to leave the plane held, because the FIRST image's deferred stop
+      // was skipped by the render guard while the SECOND saw the previous
+      // item as an image and scheduled nothing. Tracking the plane itself
+      // makes the second image take the job over.
+      let planeHeld = false;
+      if (avplay) {
+        Object.assign(avplayHooks, {
+          onStreamCompleted: () => {
+            // Loop the current clip, matching what `<video loop>` did before:
+            // an ended stream is black, so the plane must never be left
+            // showing one.
+            //
+            // But NOT when the rotation timer is about to advance anyway. The
+            // slot is usually set from this very clip's duration, so both
+            // fall due in the same instant and the order between them is
+            // undefined -- loop first and the panel pays for two complete
+            // stop/open/prepare/play seams, back to back, every single lap.
+            if (!isCurrentGeneration() || loopsDisabledUntilNextPlay) {
+              return;
+            }
+            if (slotEndsAt && monotonicNow() > slotEndsAt - LOOP_GRACE_MS) {
+              // Standing down is not the same as doing nothing. The stream
+              // has ended and the rotation tick may be milliseconds away or,
+              // on the last item of a playlist, a whole network round trip
+              // away -- checkDeviceDataChanges() runs a fetch with no timeout
+              // before the next render. Freeze the plane so it holds the last
+              // frame for however long that takes; play() releases it between
+              // prepare and play, and avplay.stop() releases it if an image
+              // comes next, so no path leaves it held.
+              //
+              // This is also what the probe did: it set the still AT
+              // onstreamcompleted, not on a timer.
+              avplay.freeze();
+              return;
+            }
+            const item = data.campaign_media[window.currentMediaIndex];
+            if (item && item.video) {
+              window.displayMedia(window.currentMediaIndex);
+            }
+          },
+          onError: () => {
+            // Reported, not acted on: the rotation timer will move off this
+            // item by itself, and tearing the stage down here would turn one
+            // bad clip into a black screen. The loop stands down though --
+            // a surviving listener re-rendering the item would restart it
+            // from zero in the middle of its slot.
+            avplayFailed = true;
+            loopsDisabledUntilNextPlay = true;
+          },
+        });
+      }
+
+      /** Everything on the stage, removed. */
+      function clearStage() {
+        mediaPlayer.innerHTML = '';
+      }
+
+      /**
+       * Let the video plane through the page, or close it off again.
+       *
+       * The page paints its own opaque background colour, and AVPlay is
+       * behind the page -- so with the colour in place the panel shows dark
+       * grey and no video, which reads as a broken screen rather than a
+       * styling choice. Switched off again for stills and for the pairing
+       * view, where a transparent page would show whatever the plane last
+       * held.
+       *
+       * @param {boolean} open
+       */
+      function setPlaneVisible(open) {
+        const root = document.documentElement;
+        if (!root || !root.classList) {
+          return;
+        }
+        if (open) {
+          root.classList.add('avplay-video');
+          window.avplayOnPlane = true;
+        } else {
+          root.classList.remove('avplay-video');
+          // Cleared with the plane, so the debug panel cannot keep claiming a
+          // clip is on the video plane after it stopped.
+          window.avplayOnPlane = false;
+        }
+      }
+
+      /** Two frames, so the browser has actually painted before we continue. */
+      function afterPaint() {
+        return new Promise((resolve) => {
+          if (window.requestAnimationFrame) {
+            requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0)));
+          } else {
+            setTimeout(resolve, 32);
+          }
+        });
+      }
+
+      /**
+       * An image that is decoded and ready to paint opaquely.
+       *
+       * `decode()` matters: an <img> that has merely been given a src is
+       * transparent until the decode finishes, and on a 1080p JPEG that is
+       * long enough to show the plane -- or black -- through it. Measured on
+       * the bench as black between two stills while two videos were clean.
+       *
+       * A decode failure resolves rather than rejects: a missing image should
+       * cost one blank slide, not the rotation.
+       *
+       * @param {string} src
+       * @param {string} className
+       * @returns {Promise<HTMLImageElement>}
+       */
+      function decodedImage(src, className) {
+        const img = document.createElement('img');
+        img.className = className;
+        img.src = src;
+        if (typeof img.decode !== 'function') {
+          return Promise.resolve(img);
+        }
+        return img.decode().then(
+          () => img,
+          () => img,
+        );
+      }
+
       // Make displayMedia available globally
       window.displayMedia = function(index) {
         window.currentMediaIndex = index;
         const mediaItem = data.campaign_media[index];
+        if (!mediaItem) {
+          return;
+        }
+        const mine = ++renderToken;
+        // Per render, before anything can return early. Left standing, the
+        // previous clip's slot end sits in the past and the loop gate below
+        // reads it as "the timer is about to advance anyway" for the whole of
+        // the next clip. Walking that path gives a 10 s video holding a dead
+        // plane for 20 s behind a 30 s slot -- derived from the code, not
+        // seen on a panel.
+        slotEndsAt = 0;
+        const isVideo = !!mediaItem.video;
+        const fullsize = mediaItem.fullsize_url || mediaItem.fullsize;
+        // The blurred backdrop behind the slide. It is NOT one source for both
+        // kinds, and collapsing it into one was a regression shipped in 1.0.13:
+        //
+        //   a video -> the thumbnail, because the fullsize is the clip itself
+        //   an image -> the fullsize, the very picture shown in front of it
+        //
+        // A thumbnail is small and often cropped to a different aspect ratio,
+        // so `object-fit: cover` across a 1080x1920 panel lands it at a
+        // different scale AND a different crop than the `contain`-fitted slide
+        // in front. During the fade the slide is translucent, so both are
+        // visible at once -- on a text-heavy slide that reads as the same
+        // heading printed twice in two sizes. Filmed on the bench 2026-11-10;
+        // the version in the field, which uses the fullsize, does not do it.
+        const poster = isVideo
+          ? (mediaItem.thumbnail_url || mediaItem.thumbnail)
+          : fullsize;
+        const useAvplay = !!avplay && !avplayFailed;
+        // Keyed on whether AVPlay is actually driving, not merely present.
+        // On the <video> path there is no video plane, so the plan carries no
+        // freeze and nothing to cover. (The fade this once protected is gone
+        // from the image path; see the className note below.)
+        const seam = useAvplay
+          ? window.DigmiAvplay.seamPlan(onScreenKind, isVideo ? 'video' : 'image')
+          : { freeze: false, coverMustBePainted: false };
 
-        // Clear previous content
-        mediaPlayer.innerHTML = '';
-
-        // Create background image
-        const backgroundImg = document.createElement('img');
-        backgroundImg.className = 'background';
-        backgroundImg.src = mediaItem.video ?
-          (mediaItem.thumbnail_url || mediaItem.thumbnail) :
-          (mediaItem.fullsize_url || mediaItem.fullsize);
-        mediaPlayer.appendChild(backgroundImg);
-
-        // Create main media element
-        const mediaElement = document.createElement(mediaItem.video ? 'video' : 'img');
-        mediaElement.className = mediaItem.video ? 'video fade-in' : 'main-media fade-in';
-        mediaElement.src = mediaItem.fullsize_url || mediaItem.fullsize;
-
-        if (mediaItem.video) {
-          mediaElement.autoplay = true;
-          mediaElement.loop = true;
-          mediaElement.muted = true;
-          mediaElement.playsInline = true;
+        /** The caption, which is independent of how the media is rendered. */
+        function updateCaption() {
+          if (mediaItem.campaign_name || mediaItem.campaignName) {
+            const mediaPlayingInfoElement = document.getElementById('media-playing-info');
+            if (mediaPlayingInfoElement) {
+              mediaPlayingInfoElement.textContent = `${mediaItem.campaign_name || mediaItem.campaignName} (${index + 1}/${data.campaign_media.length}) - ${mediaItem.media_name || mediaItem.name}`;
+            }
+          }
         }
 
-        mediaPlayer.appendChild(mediaElement);
-
-        // Update info display if campaign name exists
-        if (mediaItem.campaign_name || mediaItem.campaignName) {
-          const mediaPlayingInfoElement = document.getElementById('media-playing-info');
-          mediaPlayingInfoElement.textContent = `${mediaItem.campaign_name || mediaItem.campaignName} (${index + 1}/${data.campaign_media.length}) - ${mediaItem.media_name || mediaItem.name}`;
+        if (useAvplay && isVideo) {
+          // Freeze BEFORE the stage is touched. The frozen frame is what the
+          // viewer sees for the length of stop/open/prepare, and the player
+          // releases it between prepare() and play().
+          if (seam.freeze) {
+            avplay.freeze();
+          }
+          clearStage();
+          const result = avplay.play(fullsize, {
+            width: window.innerWidth,
+            height: window.innerHeight,
+          });
+          if (!result.ok) {
+            // One failed open should not blank the screen for good. Drop to
+            // the <video> path for the rest of this playlist.
+            avplayFailed = true;
+            console.log('[avplay] falling back to <video>: ' + avplay.lastError());
+          } else {
+            // No blurred backdrop behind an AVPlay clip: behind the video is
+            // in FRONT of it, and the margins belong to
+            // setDisplayMethod(LETTER_BOX) instead. Deliberate, and visible.
+            avplayDurationMs = result.durationMs;
+            planeHeld = true;
+            loopsDisabledUntilNextPlay = false;
+            setPlaneVisible(true);
+            onScreenKind = 'video';
+            updateCaption();
+            return;
+          }
         }
+
+        if (isVideo) {
+          // No AVPlay: the original path, seams and all. A browser, or a
+          // panel that refused the player.
+          clearStage();
+          if (poster) {
+            const backgroundImg = document.createElement('img');
+            backgroundImg.className = 'background';
+            backgroundImg.src = poster;
+            mediaPlayer.appendChild(backgroundImg);
+          }
+          const video = document.createElement('video');
+          video.className = 'video fade-in';
+          video.src = fullsize;
+          video.autoplay = true;
+          video.loop = true;
+          video.muted = true;
+          video.playsInline = true;
+          mediaPlayer.appendChild(video);
+          setPlaneVisible(false);
+          onScreenKind = 'video';
+          updateCaption();
+          return;
+        }
+
+        // An image. Decode first, swap second: the stage is not touched until
+        // there is something opaque to put on it.
+        //
+        // No `fade-in`, ever, on this path. The version in the field has the
+        // class, but there it is applied to an <img> that is appended BEFORE it
+        // has loaded, so the 0.5 s animation runs on an empty box and the
+        // picture arrives opaque once the bytes do: the fade is never seen.
+        // Decoding first moves the insertion to AFTER the bytes, so the same
+        // class fades a finished picture -- and for that half second the slide
+        // is translucent over its own blurred `object-fit: cover` backdrop,
+        // which sits at a different scale and crop. On a text slide that reads
+        // as the heading printed twice. Filmed on the bench 2026-11-10
+        // (IMG_4494/4495); the field build, same CSS, does not show it. The
+        // decoded swap is already instantaneous, which is the effect the fade
+        // was there to soften.
+        const className = 'main-media';
+        Promise.all([
+          decodedImage(fullsize, className),
+          poster ? decodedImage(poster, 'background') : Promise.resolve(null),
+        ]).then(([main, background]) => {
+          if (mine !== renderToken || !isCurrentGeneration()) {
+            return; // a later render, or a teardown, took over during the decode
+          }
+          clearStage();
+          if (background) {
+            mediaPlayer.appendChild(background);
+          }
+          mediaPlayer.appendChild(main);
+          // In the same paint as the image itself. Restoring the colour makes
+          // the page opaque again, which covers the plane a moment before
+          // avplay.stop() tears it down -- the cover arriving early rather
+          // than late.
+          setPlaneVisible(false);
+          onScreenKind = 'image';
+          updateCaption();
+
+          if (useAvplay && planeHeld) {
+            // The image is on the stage but not yet on the glass. Stopping
+            // the player before it has been painted would show the teardown
+            // through a transparent layer -- rule 3 on the bench, and the
+            // reason this waits two frames rather than calling stop() here.
+            afterPaint().then(() => {
+              // Still guarded: a NEWER render that is a video has already
+              // taken the plane through its own stop/open/prepare/play, and
+              // stopping here would kill it. A newer render that is an image
+              // leaves `planeHeld` true and schedules this itself, which is
+              // what keeps the plane from being left held.
+              if (mine === renderToken && planeHeld) {
+                // Cleared after the call, like release() and restoreAudio().
+                // stop() swallows a throw, and a flag that says the plane is
+                // free while it is not is a state nothing comes back from.
+                avplay.stop();
+                planeHeld = false;
+              }
+            });
+          }
+        });
+      };
+
+      // A playlist being replaced must not leave a stream running behind the
+      // next one, nor a frozen frame on a screen that stopped playing.
+      window.stopAvplayPlayback = function(andClose) {
+        loopsDisabledUntilNextPlay = true;
+        slotEndsAt = 0;
+        avplayDurationMs = null;
+        planeHeld = false;
+        if (andClose) {
+          // Hands the instance back to the system. Without it the player
+          // stays allocated to a page that is going away, and the next
+          // getPlayer() answers QuotaExceededError until the panel restarts.
+          closeSharedAvplay();
+        } else if (avplay) {
+          avplay.stop();
+        }
+        setPlaneVisible(false);
+        onScreenKind = 'none';
+      };
+
+      /**
+       * The current clip's length, as read when it was prepared.
+       *
+       * Not a live getDuration(): the probe measured that the player's clock
+       * does not necessarily belong to the new stream straight after a seam,
+       * and a stale length here sets the slot for the WRONG clip -- a 10 s
+       * advert held for 60 s, or a 60 s one cut at 10. Nothing is black, so
+       * nobody would look.
+       */
+      window.avplayDurationMs = function() {
+        return avplayFailed ? null : avplayDurationMs;
+      };
+
+      /** Told by the rotation timer, so the loop above can stand down. */
+      window.avplayNoteSlot = function(endsAt) {
+        slotEndsAt = endsAt;
       };
 
       // Initial display
@@ -864,15 +1326,63 @@ function displayMediaContent(data) {
       updateStageGeometry();
 
       // Function to check for device data changes and handle accordingly
+      /**
+       * Polls the device endpoint for a changed playlist.
+       *
+       * ⚠️ This sits ON the render path: on the LAST item of a playlist the
+       * rotation tick calls this and only renders the next item from its
+       * `.then`/`.catch`. A request that hangs therefore holds the screen on
+       * whatever is up -- and on a single-video playlist every item is the
+       * last one, so it happens every lap.
+       *
+       * Before AVPlay that meant a dead `<video>`; now it means a frozen last
+       * frame, which looks healthier and is therefore worse to diagnose. The
+       * deadline below is what bounds it: an unanswered request fails after
+       * DEVICE_POLL_TIMEOUT_MS and the rotation carries on, rather than
+       * waiting out a TCP stack that may never give up on a Wi-Fi that drops
+       * packets without a reset.
+       *
+       * Aborting is not a lost poll: the next lap asks again.
+       *
+       * ⚠️ Best effort. `AbortController` arrived in Chrome 66 and this
+       * widget's floor is Tizen 5.0 (M63), so on a panel older than roughly
+       * Tizen 6 there is NO deadline and the behaviour is the old unbounded
+       * one. The served model groups are Tizen 8.0, so in practice the
+       * deadline is there -- but the sideload channel reaches further back.
+       *
+       * Why a deadline and not "render first, then poll": in the changed
+       * case this function OWNS the render. It calls displayMedia(0) and
+       * startRotationTimer() itself and returns `true` to say so. Rendering
+       * before it would therefore render twice whenever the playlist had
+       * changed -- which under AVPlay is a double seam, the very thing
+       * LOOP_GRACE_MS exists to avoid. Reordering means rebuilding that
+       * branch, in a function with nine documented continuation hazards.
+       */
       function checkDeviceDataChanges() {
         return getUUID().then(uuid => {
           const url = `${baseUrl}/api/v1/devices/${uuid}`;
+          const controller =
+            typeof AbortController === 'function' ? new AbortController() : null;
           const options = {
             method: 'GET',
             headers: {
               Accept: 'application/json',
               Authorization: apiAuthorization,
             },
+          };
+          if (controller) {
+            options.signal = controller.signal;
+          }
+          // Cleared on both settle paths below, so a completed request does
+          // not leave a timer that aborts the NEXT one.
+          const deadline = controller
+            ? setTimeout(() => controller.abort(), DEVICE_POLL_TIMEOUT_MS)
+            : null;
+          const clearDeadline = (value) => {
+            if (deadline !== null) {
+              clearTimeout(deadline);
+            }
+            return value;
           };
 
           return fetch(url, options)
@@ -881,6 +1391,16 @@ function displayMediaContent(data) {
                 throw new Error(`HTTP error! status: ${response.status}`);
               }
               return response.json();
+            })
+            // AFTER the body, not after the headers. `fetch` settles as soon
+            // as the response header arrives, so clearing there leaves a
+            // connection that delivers the header and then stalls mid-body
+            // with nothing to abort -- the same unbounded hold, through a
+            // narrower door. abort() cancels a body read in progress too, so
+            // waiting costs nothing.
+            .then(clearDeadline, (error) => {
+              clearDeadline();
+              throw error;
             })
             .then(currentData => {
               // The NINTH continuation, and the last one. This handler runs
@@ -912,11 +1432,23 @@ function displayMediaContent(data) {
                 return true;
               }
 
-              // Load cached data
-              const cachedData = MediaStorage.load(uuid);
+              // Compared against what is ON SCREEN -- this closure's `data`,
+              // which the branch below mutates in place -- and not against
+              // MediaStorage. That cache has a 10 s TTL while slides are
+              // 10 s or longer, so by the time this resolved it had almost
+              // always expired and answered null, which read as "changed":
+              // every lap re-rendered slide 0 from scratch and reset the
+              // index, and a one-picture campaign went the whole
+              // decode-and-swap every slot. The single-image guard in
+              // continueRotation() was never even consulted at the default
+              // 15 s; a reviewer's simulation put 10 of 10 laps through this
+              // branch. Only what the branch applies is compared: the media
+              // list, and the location when the server sends one.
+              const fetchedMedia = currentData.campaign_media || [];
+              const mediaChanged = JSON.stringify(data.campaign_media) !== JSON.stringify(fetchedMedia);
+              const locationChanged = !!currentData.location && currentData.location !== data.location;
 
-              // If data differs from cache or no cache exists, update the data
-              if (!cachedData || JSON.stringify(cachedData) !== JSON.stringify(currentData)) {
+              if (mediaChanged || locationChanged) {
                 // `|| []`, because the line below reads `.length` off this.
                 // A 200 without `campaign_media` threw here -- BEFORE the
                 // `mediaLength === 0` branch could run -- which left
@@ -997,12 +1529,33 @@ function displayMediaContent(data) {
       // this: there the stale continuation RESTARTED the chain, loudly and
       // wrongly, with a TypeError. Guarding only startRotationTimer() traded
       // loud-and-recovering for silent-and-permanent, which is worse.
+      /**
+       * True when the one slide of a single-item playlist is an image that is
+       * already on screen and loaded. Repainting it would re-run the whole
+       * decode-and-swap for nothing -- on the bench that was a visible blink
+       * every 15 s on a one-picture campaign (2026-11-10), the same fault
+       * signage.digmi.eu fixed in its own rotation. A video is excluded: it
+       * has to be restarted to loop. An image that failed to load is excluded
+       * too, so a screen that started offline still heals itself.
+       */
+      function singleImageAlreadyShowing() {
+        if (data.campaign_media.length !== 1 || data.campaign_media[0].video) {
+          return false;
+        }
+        const shown = mediaPlayer.querySelector('img.main-media');
+        return !!shown && shown.complete && shown.naturalWidth > 0;
+      }
+
       const continueRotation = () => {
         if (!isCurrentGeneration()) {
           return;
         }
 
-        window.displayMedia(window.currentMediaIndex);
+        // The timer is still rearmed below: the wrap-around poll in the tick
+        // has to keep running so a switched-off campaign is noticed.
+        if (!singleImageAlreadyShowing()) {
+          window.displayMedia(window.currentMediaIndex);
+        }
 
         // Null it, not just clear it. If startRotationTimer() returns without
         // building a chain - its own generation guard, or a throw - the handle
@@ -1016,6 +1569,27 @@ function displayMediaContent(data) {
 
         startRotationTimer();
       };
+
+      /**
+       * Every slot length passes through here before it reaches setInterval.
+       *
+       * Floor 1 s: a unit mistake upstream is a flashing screen in a salon,
+       * and this is the cheapest thing that makes the next one harmless.
+       * Ceiling 1 h: setInterval stores its delay as a 32-bit integer, so a
+       * value past 2^31-1 ms wraps and fires at once -- a strobe again, from
+       * the other direction. Non-finite: a live stream reports Infinity for
+       * `videoElement.duration`, and Infinity * 1000 is Infinity, which
+       * setInterval treats as 0.
+       *
+       * @param {number} ms
+       * @return {number}
+       */
+      function clampSlotMs(ms) {
+        if (!Number.isFinite(ms) || ms <= 0) {
+          return 10000;
+        }
+        return Math.min(3600000, Math.max(1000, ms));
+      }
 
       // Set up rotation interval
       function startRotationTimer() {
@@ -1032,16 +1606,48 @@ function displayMediaContent(data) {
         }
 
         const currentMedia = data.campaign_media[window.currentMediaIndex];
-        let duration = currentMedia.duration || 10000;
+        // `duration` arrives in SECONDS -- the API builds it from
+        // `secondsForEachImageOnScreensaver`, default 15 -- and setInterval
+        // wants milliseconds. This line used to pass the value straight
+        // through, so every image slot was 15 ms: the stage re-rendered at
+        // ~66 Hz, which a camera integrates into a double exposure and an eye
+        // reads as a strobe. Measured on the bench 2026-11-10 (QB43C, the
+        // Default campaign, HUD open). The bundle in the field (1.0.10 as
+        // uploaded to Seller Office) never read this field at all and so
+        // never showed it; the pass-through came in with 707f5ac on
+        // 2026-09-05 and shipped in 1.0.12, which was never released.
+        // signage.digmi.eu multiplies by 1000; this is the same contract.
+        let duration = clampSlotMs(Number(currentMedia.duration) * 1000);
 
-        // For videos, get the actual duration from the video element
-        if (currentMedia.video) {
+        // For videos, get the length from the player.
+        //
+        // Read when the clip was prepared, not asked for now: the probe
+        // measured that the player's clock does not necessarily belong to the
+        // new stream straight after a seam. Whether getDuration() lags the
+        // same way is NOT measured.
+        //
+        // The fallback when AVPlay will not say a length is NOT the <video>
+        // branch below -- that branch looks for a `.media-player video`
+        // element, and on the AVPlay path there never is one, so it always
+        // keeps the server-side `duration` (in seconds, clamped above). A 45 s
+        // clip with no server-side duration is therefore cut at the 10 s
+        // default. Worth knowing before trusting the number.
+        const avplayMs = window.avplayDurationMs ? window.avplayDurationMs() : null;
+        if (currentMedia.video && avplayMs) {
+          duration = clampSlotMs(avplayMs);
+          // Tell the player when this slot ends, so a stream completing at
+          // the same moment does not restart the clip just before the timer
+          // advances the playlist.
+          if (window.avplayNoteSlot) {
+            window.avplayNoteSlot(monotonicNow() + duration);
+          }
+        } else if (currentMedia.video) {
           const videoElement = document.querySelector('.media-player video');
 
           if (videoElement) {
             // Check if duration is already available
             if (videoElement.duration && videoElement.duration > 0) {
-              duration = videoElement.duration * 1000; // Convert to milliseconds
+              duration = clampSlotMs(videoElement.duration * 1000);
             } else {
               // Wait for metadata to load to get duration
               videoElement.addEventListener('loadedmetadata', function onMetadataLoaded() {
@@ -1059,7 +1665,7 @@ function displayMediaContent(data) {
                 // Only update if we're still on the same media item
                 if (data.campaign_media[window.currentMediaIndex] === currentMedia) {
                   clearInterval(window.rotationInterval);
-                  const videoDuration = videoElement.duration * 1000;
+                  const videoDuration = clampSlotMs(videoElement.duration * 1000);
 
                   // Set new interval with correct duration
                   window.rotationInterval = setInterval(() => {

@@ -367,6 +367,13 @@ jobs:
       - name: Verify the package
         run: scripts/verify-wgt.sh .build/out
 
+      # The guard that stands in front of `rm -rf` in both build scripts. It
+      # shipped once with a hole that deleted a sibling repository's .git with
+      # exit 0, and the reason it shipped is that nothing ran it. Running it
+      # here is what makes that not merely a promise.
+      - name: Exercise the build scripts' path guard
+        run: scripts/test-path-guard.sh
+
       - name: Remove the certificates from the runner
         if: always()
         run: |

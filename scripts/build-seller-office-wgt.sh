@@ -46,8 +46,77 @@ STAGE_DIR="${SO_STAGE_DIR:-.build/seller-office/package}"
 OUT_DIR="${SO_OUT_DIR:-.build/seller-office/out}"
 REF_DIR=".build/seller-office/reference"
 
-case "$STAGE_DIR" in .build/*) ;; *) echo "SO_STAGE_DIR must live under .build/" >&2; exit 1 ;; esac
-case "$OUT_DIR" in .build/*) ;; *) echo "SO_OUT_DIR must live under .build/" >&2; exit 1 ;; esac
+# Both are wiped with `rm -rf` below, and both are overridable, so the guard
+# that keeps the cleanup inside .build/ has to hold against more than a typo.
+# It used to be a string prefix test (`case $dir in .build/*`), which is not
+# enough on two counts, and each one reached the `rm -rf`:
+#
+#   * `.build/../src` matches the pattern and resolves to the source tree --
+#     exactly the deletion the guard was added to prevent.
+#   * `.build/` matches it too, because a trailing `*` also matches nothing,
+#     which would take the reference directory down with it.
+#
+# So resolve first and compare resolved paths, and require the target to be
+# STRICTLY beneath .build/ rather than equal to it.
+#
+# What this enforces is "beneath the RESOLVED .build/", which is not the same as
+# "inside the repository", and the difference is worth stating because a comment
+# that promises more than the code does is how the next person draws the wrong
+# conclusion. If `.build` is ITSELF a symlink, both sides resolve through it and
+# a path outside the repository is accepted -- measured, not argued. That is
+# deliberate: someone who symlinks their build directory onto another disk means
+# it. `pwd -P` does stop a symlinked component INSIDE the path from redirecting
+# the cleanup, which is the case that would otherwise be a surprise.
+# Pure shell on purpose: this script has no other interpreter dependency.
+#
+# The directory need not exist yet, so resolve the deepest existing ancestor
+# and re-append the part that does not exist.
+resolve_path() {
+    local p rest
+    rest=""
+    p="${1%/}"
+    [ -n "$p" ] || p="/"
+    while [ ! -d "$p" ]; do
+        rest="${p##*/}${rest:+/}$rest"
+        case "$p" in
+            */*) p="${p%/*}"; [ -n "$p" ] || p="/" ;;
+            *)   p="." ;;
+        esac
+    done
+    # CDPATH= : with a relative argument `cd` searches CDPATH and PRINTS the
+    # directory it picked, so without this the command substitution returns TWO
+    # lines and the guard validates a different tree from the one `rm -rf`
+    # later walks. `--` covers a directory whose name begins with a dash.
+    printf '%s\n' "$(CDPATH='' cd -P -- "$p" && pwd -P)${rest:+/$rest}"
+}
+
+assert_under_build() {
+    local label given root abs
+    label="$1"
+    given="$2"
+
+    # Rejected BEFORE resolution, and this is the load-bearing line. resolve_path
+    # resolves the deepest EXISTING ancestor and re-appends the rest verbatim, so
+    # a `..` sitting under a component that does not exist yet is never
+    # normalised -- it survives into the comparison and still matches. Measured:
+    # `.build/a/../../../sibling-repo` was accepted, `mkdir -p` then CREATED
+    # `.build/a` so the path became real, and the dotfile sweep deleted `.git`
+    # and `.env` in a sibling repository with exit 0 and no warning. That is a
+    # worse hole than the string prefix test this guard replaced.
+    case "/$given/" in
+        *'/../'*) echo "$label must not contain a '..' component; got '$given'" >&2; exit 1 ;;
+    esac
+
+    root="$(resolve_path .build)"
+    abs="$(resolve_path "$given")"
+    case "$abs" in
+        "$root"/?*) ;;
+        *) echo "$label must resolve to a directory strictly beneath $root; '$given' resolves to '$abs'" >&2; exit 1 ;;
+    esac
+}
+
+assert_under_build SO_STAGE_DIR "$STAGE_DIR"
+assert_under_build SO_OUT_DIR "$OUT_DIR"
 
 say() { printf '==> %s\n' "$1"; }
 die() { printf 'ERROR: %s\n' "$1" >&2; exit 1; }
@@ -186,6 +255,10 @@ cp -R "$SRC_DIR"/. "$STAGE_DIR"/
 find "$STAGE_DIR" -mindepth 1 \( -name '.*' -o -name Build -o -name Debug \) \
     -prune -exec rm -rf {} +
 find "$STAGE_DIR" -name '*.wgt' -delete
+# Tests sit beside the code they test. They are CommonJS, the panel has no
+# loader for them, and in this channel they would travel all the way into a
+# Samsung store listing. Same strip as build-wgt.sh.
+find "$STAGE_DIR" -name '*.test.js' -delete
 rm -f "$STAGE_DIR/author-signature.xml" "$STAGE_DIR/signature1.xml"
 
 [ -f "$STAGE_DIR/config.xml" ] || die "config.xml missing from the staged package"
