@@ -401,9 +401,10 @@
      * Silence the panel for playback, remembering what it was.
      *
      * The `<video>` path set `muted` on the element, which is scoped to that
-     * element. AVPlay has no equivalent: it offers `setSelectTrack` for
-     * choosing BETWEEN audio tracks, not for choosing none. The nearest thing
-     * is `tizen.tvaudiocontrol.setMute`, which is the TV's own mute.
+     * element. AVPlay's equivalent is `disableAudioStream()` (since 6.5),
+     * which play() tries first. This is the FALLBACK for a panel that lacks
+     * it or refuses it: `tizen.tvaudiocontrol.setMute`, the TV's own mute,
+     * which the panel announces with an OSD at every stream start.
      *
      * So the previous state is saved with `isMute()` and put back by
      * `restoreAudio()`. A signage panel left muted after the app exits would
@@ -721,7 +722,24 @@
       preparedDurationMs =
         got.ok && typeof got.value === 'number' && got.value > 0 ? got.value : null;
 
-      muteAudio();
+      // Silence belongs to THIS player, not to the TV. AVPlay's
+      // disableAudioStream() (TV since 6.5, B2B; allowed in IDLE/READY/
+      // PLAYING/PAUSED) switches off the audio of this instance only. The TV's
+      // own mute was the first port, and it has a cost the bench showed on
+      // 2026-11-10: the panel paints its crossed-speaker OSD at every stream
+      // start while muted, and AVPlay starts a stream at every seam -- an icon
+      // blinking over the customer's content all day. Per clip, because the
+      // API leaves re-enabling to the application and says nothing about
+      // open(); the call is cheap and idempotent. The TV mute stays as the
+      // fallback for a panel that lacks the method or refuses it -- with its
+      // OSD, which is still better than an audible salon.
+      let silenced = false;
+      if (typeof p.disableAudioStream === 'function') {
+        silenced = attempt('disableAudioStream', () => p.disableAudioStream()).ok;
+      }
+      if (!silenced) {
+        muteAudio();
+      }
 
       // Rule 4: here, between prepare and play -- not before, not on a timer.
       release();

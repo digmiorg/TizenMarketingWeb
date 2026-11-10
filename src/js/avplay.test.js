@@ -158,6 +158,7 @@ function fakePanel(overrides) {
     setDisplayRotation: record('setDisplayRotation'),
     setDisplayMethod: record('setDisplayMethod'),
     setVideoStillMode: record('setVideoStillMode'),
+    disableAudioStream: record('disableAudioStream'),
     getDuration: () => 15000,
     getCurrentTime: () => 0,
     setListener: (listener) => {
@@ -166,6 +167,11 @@ function fakePanel(overrides) {
       return 'OK';
     },
   };
+  // A panel older than 6.5, or one that never had the per-player switch:
+  // the TV-mute fallback is then the only silence there is.
+  if (behaviour.noAudioStreamApi) {
+    delete player.disableAudioStream;
+  }
   const audio = {
     muted: false,
     isMute: record('isMute'),
@@ -232,8 +238,7 @@ test('createPlayer: the native calls run in Samsung order, release between prepa
     'prepare',
     'setDisplayRect',
     'setDisplayMethod',
-    'isMute',
-    'setMute',
+    'disableAudioStream',
     'setVideoStillMode',
     'play',
   ]);
@@ -498,11 +503,44 @@ test('createPlayer: without the avplayer <object> it refuses rather than playing
   assert.match(player.lastError(), /application\/avplayer/);
 });
 
-test('createPlayer: playback is silent, and close() puts the mute back', () => {
-  // The <video> element carried `muted`, scoped to the element. AVPlay has no
-  // equivalent, so this reaches for the TV's own mute - which means it must
-  // also hand it back, or a signage panel stays muted for good.
+test('createPlayer: silence is per player - disableAudioStream after prepare, and the TV mute is never touched', () => {
+  // The TV's own mute paints the panel's crossed-speaker OSD at every stream
+  // start, and AVPlay starts a stream at every seam: an icon blinking over
+  // the customer's content all day (bench, 2026-11-10). With the per-player
+  // switch available the TV mute must not be called at all -- nothing to
+  // announce, nothing to hand back on exit.
   const panel = fakePanel();
+  const player = makePlayer(panel);
+
+  player.play('http://example/a.mp4', { width: 1080, height: 1920 });
+  player.play('http://example/b.mp4', { width: 1080, height: 1920 });
+
+  assert.equal(panel.args.disableAudioStream.length, 2, 'silence is per clip; open() may reset it');
+  assert.equal(panel.args.setMute, undefined, 'the TV mute was touched although the player can silence itself');
+  assert.equal(panel.args.isMute, undefined);
+  const prepare = panel.calls.indexOf('prepare');
+  const quiet = panel.calls.indexOf('disableAudioStream');
+  const play = panel.calls.indexOf('play');
+  assert.ok(prepare < quiet && quiet < play, 'disableAudioStream must sit between prepare() and play()');
+
+  player.close();
+  assert.equal(panel.audio.muted, false, 'close() unmuted a TV that was never muted');
+});
+
+test('createPlayer: a panel that REFUSES disableAudioStream falls back to the TV mute', () => {
+  const panel = fakePanel({ disableAudioStream: () => { throw new Error('NotSupportedError'); } });
+  const player = makePlayer(panel);
+
+  player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+
+  assert.deepEqual(panel.args.setMute[0], [true], 'a refused per-player switch left playback audible');
+});
+
+test('createPlayer: without the per-player switch, playback is silent via the TV mute, and close() puts it back', () => {
+  // The <video> element carried `muted`, scoped to the element. On a panel
+  // without disableAudioStream this reaches for the TV's own mute - which
+  // means it must also hand it back, or a signage panel stays muted for good.
+  const panel = fakePanel({ noAudioStreamApi: true });
   const player = makePlayer(panel);
 
   player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
@@ -515,10 +553,9 @@ test('createPlayer: playback is silent, and close() puts the mute back', () => {
 
 test('createPlayer: stop() does NOT toggle the mute - that is once per session', () => {
   // stop() runs at every video->image seam. Restoring there would flip the
-  // panel's mute once per boundary in a mixed playlist, and if this firmware
-  // shows an OSD for a programmatic mute that is an icon blinking over the
-  // customer's content all day.
-  const panel = fakePanel();
+  // panel's mute once per boundary in a mixed playlist, and this firmware
+  // DOES show an OSD for a programmatic mute (bench, 2026-11-10).
+  const panel = fakePanel({ noAudioStreamApi: true });
   const player = makePlayer(panel);
 
   player.play('http://example/a.mp4', { width: 1080, height: 1920 });
@@ -533,7 +570,7 @@ test('createPlayer: muting twice does not record our own mute as the old state',
   // `true` BECAUSE WE MUTED IT, records that as "how we found it", and then
   // refuses to unmute for ever. The customer's TV is silent on every input
   // until somebody picks up the remote.
-  const panel = fakePanel();
+  const panel = fakePanel({ noAudioStreamApi: true });
   const player = makePlayer(panel);
 
   player.play('http://example/a.mp4', { width: 1080, height: 1920 });
@@ -547,7 +584,7 @@ test('createPlayer: an unreadable mute state is still undone on the way out', ()
   // isMute() threw, so we cannot know what it was - but we DID mute it, and
   // leaving a panel silent for good is the harm the docblock commits to
   // avoiding. Undoing our own change is the smaller risk.
-  const panel = fakePanel({ isMuteThrows: true });
+  const panel = fakePanel({ noAudioStreamApi: true, isMuteThrows: true });
   const player = makePlayer(panel);
 
   player.play('http://example/a.mp4', { width: 1080, height: 1920 });
@@ -804,7 +841,7 @@ test('createPlayer: a missing tvaudiocontrol does not stop playback', () => {
 test('createPlayer: a mute that throws does not stop playback either', () => {
   // Without the tv.audio privilege setMute raises SecurityError. The screen
   // should play, loudly and wrongly, rather than show nothing.
-  const panel = fakePanel({
+  const panel = fakePanel({ noAudioStreamApi: true,
     setMute: () => {
       throw new Error('SecurityError');
     },
@@ -823,7 +860,7 @@ test('createPlayer: an unmute that throws is retried, not recorded as done', () 
   // the matter: nothing retries, and the panel stays muted with this file
   // believing it handed the audio back.
   let failUnmute = true;
-  const panel = fakePanel({
+  const panel = fakePanel({ noAudioStreamApi: true,
     setMute: (mute) => {
       if (mute === false && failUnmute) {
         throw new Error('UnknownError');
