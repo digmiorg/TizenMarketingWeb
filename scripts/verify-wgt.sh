@@ -119,6 +119,61 @@ fi
 # because the two move independently: a renewal is a new certificate over the
 # same key. Which of the two a display actually binds on is argued, with
 # sources, at the top of scripts/author-identity.sh.
+# The signatures have to COVER the package, not merely exist: every file a
+# signature references must hash to the digest it states, and every file in
+# the package (except the signature files themselves) must be referenced by
+# the author signature. A package whose signature was copied from another
+# build - which is what a hand-produced, externally re-signed package can
+# be - has files with no digest, or digests for other bytes, and a display
+# refuses it at install. This is a direct check of the <Reference> list, not
+# a verification of the <SignatureValue> itself (that needs the certificate
+# chain a display holds); it is what tells a borrowed signature from a real
+# one.
+for sig in author-signature.xml signature1.xml; do
+    [ -f "$WORK/pkg/$sig" ] || continue
+    # -I: the package being verified is untrusted input.
+    if python3 -I - "$WORK/pkg" "$sig" <<'PY'
+import base64, hashlib, os, re, sys, urllib.parse
+pkg, sig = sys.argv[1], sys.argv[2]
+xml = open(os.path.join(pkg, sig)).read()
+refs = re.findall(r'<Reference URI="([^"]*)">.*?<DigestMethod Algorithm="([^"]*)".*?<DigestValue>(.*?)</DigestValue>', xml, re.S)
+algos = {'sha1': hashlib.sha1, 'sha256': hashlib.sha256, 'sha384': hashlib.sha384, 'sha512': hashlib.sha512}
+problems = []
+referenced = set()
+for uri, alg, dv in refs:
+    if uri.startswith('#'):
+        continue
+    name = urllib.parse.unquote(uri)
+    referenced.add(name)
+    path = os.path.join(pkg, name)
+    if not os.path.isfile(path):
+        problems.append('references %s, which is not in the package' % name)
+        continue
+    h = next((f for k, f in algos.items() if alg.endswith('#' + k)), None)
+    if h is None:
+        problems.append('uses an unknown digest algorithm for %s: %s' % (name, alg))
+        continue
+    if base64.b64encode(h(open(path, 'rb').read()).digest()).decode() != re.sub(r'\s', '', dv):
+        problems.append('states a digest for %s that does not match its bytes' % name)
+if sig == 'author-signature.xml':
+    for root, _, files in os.walk(pkg):
+        for f in files:
+            rel = os.path.relpath(os.path.join(root, f), pkg)
+            if rel == 'author-signature.xml' or re.match(r'signature\d+\.xml$', rel):
+                continue
+            if rel not in referenced:
+                problems.append('does not cover %s' % rel)
+for p in problems:
+    print('        ' + p)
+sys.exit(1 if problems else 0)
+PY
+    then
+        ok "$sig covers the package: every digest matches, nothing uncovered"
+    else
+        bad "$sig does not cover this package (see above) - a display refuses it at install"
+    fi
+done
+
 if [ -f "$WORK/pkg/author-signature.xml" ]; then
     # Written out rather than piped so the expiry check below can read the same
     # bytes without extracting them a second time.
@@ -174,6 +229,33 @@ PY
             if ! openssl x509 -inform DER -in "$WORK/author.der" \
                  -checkend $(( days * 86400 )) -noout >/dev/null 2>&1; then
                 warn "the author certificate expires within $days days, or already has — renew it from the existing key (Certificate Manager: 'Use an existing author certificate'); a renewal over a new key is a different author, which means a manual reinstall on every installed screen"
+                break
+            fi
+        done
+    fi
+fi
+
+# The distributor certificate too: a channel served from a Samsung
+# re-signing (b2b/) depends on one that lapses before the author's, and a
+# fresh panel checks it at install. A warning, like the author's; the fix is
+# a re-sign and a version bump, not a renewal from a key we hold.
+if [ -f "$WORK/pkg/signature1.xml" ]; then
+    python3 -I - "$WORK/pkg/signature1.xml" "$WORK/distributor.der" <<'PY' || true
+import base64, re, sys
+xml = open(sys.argv[1]).read()
+certs = re.findall(r'<[^>]*X509Certificate>\s*([A-Za-z0-9+/=\s]+?)\s*</[^>]*X509Certificate>', xml)
+if certs:
+    with open(sys.argv[2], 'wb') as f:
+        f.write(base64.b64decode(re.sub(r'\s', '', certs[0])))
+PY
+    if [ -f "$WORK/distributor.der" ]; then
+        printf '  info  distributor certificate\n'
+        openssl x509 -inform DER -in "$WORK/distributor.der" -noout -subject -enddate \
+            2>/dev/null | sed 's/^/          /' || true
+        for days in 30 90; do
+            if ! openssl x509 -inform DER -in "$WORK/distributor.der" \
+                 -checkend $(( days * 86400 )) -noout >/dev/null 2>&1; then
+                warn "the distributor certificate expires within $days days, or already has - a package re-signed after that needs a version bump, or displays never download it"
                 break
             fi
         done

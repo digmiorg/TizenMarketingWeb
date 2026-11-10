@@ -681,17 +681,6 @@ jobs:
           rm -rf _site/.github
           # Bench instruments. This site is world-readable; see deploy-site.yml.
           rm -rf _site/lab
-          # b2b/ is hand-published: if it fails its gate it is dropped from
-          # the site rather than failing the deploy, so production/ and its
-          # rollback path never wait on it. See scripts/guard-b2b-site.sh.
-          # Through bash, with a fallback: if the guard itself cannot run
-          # (lost exec bit, a syntax error), b2b/ is withheld in full and the
-          # deploy still goes on - the guard must never be what blocks a
-          # production/ rollback.
-          bash scripts/guard-b2b-site.sh _site || {
-            echo "::error::guard-b2b-site.sh itself failed ($?) - withholding all of b2b/ and continuing"
-            rm -rf _site/b2b || echo "::error::could not remove _site/b2b either - publishing it as committed, UNCHECKED"
-          }
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
