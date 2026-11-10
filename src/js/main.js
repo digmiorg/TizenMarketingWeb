@@ -1227,6 +1227,13 @@ function displayMediaContent(data) {
             planeHeld = true;
             loopsDisabledUntilNextPlay = false;
             setPlaneVisible(true);
+            // The Stage readout is the line a bench reads to see which
+            // rotation and rect THIS clip got (onRotation has already run
+            // inside play()). Nothing else refreshes it on a clip start, so
+            // with the HUD open it kept showing the previous clip's values
+            // until an image or a key press came along -- stale in exactly
+            // the measurement it exists for.
+            updateStageGeometry();
             onScreenKind = 'video';
             updateCaption();
             return;
