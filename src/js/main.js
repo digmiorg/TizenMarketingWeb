@@ -1159,10 +1159,10 @@ function displayMediaContent(data) {
         const gate = window.DigmiAvplay.coverGate({ hasClock: avplay.hasClock() });
         const since = monotonicNow();
         const drop = () => {
-          window.avplayCovering = false;
           if (token !== renderToken || !isCurrentGeneration()) {
-            return;
+            return; // a newer render owns the stage and its own flag
           }
+          window.avplayCovering = false;
           // Same paint: the page goes transparent as the still goes away.
           setPlaneVisible(true);
           clearStage();
@@ -1245,6 +1245,12 @@ function displayMediaContent(data) {
         // plane for 20 s behind a 30 s slot -- derived from the code, not
         // seen on a panel.
         slotEndsAt = 0;
+        // Every render starts uncovered. The flag is otherwise cleared only by
+        // drop(), and a render that is superseded while its still is covering
+        // never reaches drop() -- the HUD would then say "covered" over the
+        // next clip, image or pairing view, in the one view that exists for
+        // diagnosis.
+        window.avplayCovering = false;
         const isVideo = !!mediaItem.video;
         const fullsize = mediaItem.fullsize_url || mediaItem.fullsize;
         // The blurred backdrop behind the slide. It is NOT one source for both
@@ -1433,6 +1439,7 @@ function displayMediaContent(data) {
         slotEndsAt = 0;
         avplayDurationMs = null;
         planeHeld = false;
+        window.avplayCovering = false;
         if (andClose) {
           // Hands the instance back to the system. Without it the player
           // stays allocated to a page that is going away, and the next
