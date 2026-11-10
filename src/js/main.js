@@ -503,6 +503,16 @@ function updateStageGeometry() {
   // tell an engineer what is actually being shown. The rect is not reported
   // because this file no longer chooses one -- it is always the full screen,
   // with setDisplayMethod deciding the letterbox inside it.
+  if (window.avplayCovering) {
+    // A clip is starting BEHIND the still on the stage; the still is what
+    // is on the glass until the clock has moved. Saying "image" here would
+    // hide the one fact a dead-plane diagnosis needs.
+    readout.textContent = 'viewport ' + viewport + ', avplay starting behind the still (covered), rect ' +
+      (window.avplayRect || '?') + ', rotation ' + (window.avplayRotation || 'unset');
+
+    return;
+  }
+
   if (window.avplayOnPlane) {
     readout.textContent = 'viewport ' + viewport + ', avplay rect ' + (window.avplayRect || '?') +
       ' (letterboxed), rotation ' + (window.avplayRotation || 'unset') +
@@ -1146,9 +1156,10 @@ function displayMediaContent(data) {
        * newer render or a teardown owns the stage from then on.
        */
       function dropStillWhenClockMoves(token) {
-        const gate = window.DigmiAvplay.coverGate();
+        const gate = window.DigmiAvplay.coverGate({ hasClock: avplay.hasClock() });
         const since = monotonicNow();
         const drop = () => {
+          window.avplayCovering = false;
           if (token !== renderToken || !isCurrentGeneration()) {
             return;
           }
@@ -1162,10 +1173,10 @@ function displayMediaContent(data) {
             clearInterval(poll);
             return;
           }
-          // One read per tick. A clock that throws is reported by attempt()
-          // once and then answers null, which the gate turns into a drop after
-          // the hold -- so a missing clock costs one log line, not three
-          // hundred, and not five seconds of hidden video per seam.
+          // One quiet read per tick (currentTime() does not log). A missing
+          // clock was declared to the gate up front; a throwing one is 'wait',
+          // bounded to a second, because right after play() the player may
+          // simply not be PLAYING yet.
           const decision = gate.tick(avplay.currentTime(), monotonicNow() - since);
           if (decision === 'wait') {
             return;
@@ -1261,6 +1272,15 @@ function displayMediaContent(data) {
           ? window.DigmiAvplay.seamPlan(onScreenKind, isVideo ? 'video' : 'image')
           : { freeze: false, coverMustBePainted: false };
 
+        // Rule 1, in ONE place and before anything asynchronous: leaving a
+        // video freezes the plane, whatever is arriving. The frozen frame is
+        // what the viewer sees for the length of stop/open/prepare (video),
+        // or of the decode until the image is painted over it (image). A
+        // plane that is not held has nothing to freeze.
+        if (useAvplay && seam.freeze && planeHeld) {
+          avplay.freeze();
+        }
+
         /** The caption, which is independent of how the media is rendered. */
         function updateCaption() {
           if (mediaItem.campaign_name || mediaItem.campaignName) {
@@ -1272,12 +1292,6 @@ function displayMediaContent(data) {
         }
 
         if (useAvplay && isVideo) {
-          // Freeze BEFORE the stage is touched. The frozen frame is what the
-          // viewer sees for the length of stop/open/prepare, and the player
-          // releases it between prepare() and play().
-          if (seam.freeze) {
-            avplay.freeze();
-          }
           // A still on the stage is NOT cleared here. It is the cover: the
           // page is opaque under it, so open/prepare/play happen behind it,
           // and it comes down only once the new stream's clock has actually
@@ -1311,6 +1325,7 @@ function displayMediaContent(data) {
             // The drop makes the page transparent and empties the stage in
             // the same paint, revealing a plane that is already live.
             if (stillCovers) {
+              window.avplayCovering = true;
               dropStillWhenClockMoves(mine);
             } else {
               setPlaneVisible(true);
@@ -1368,14 +1383,6 @@ function displayMediaContent(data) {
         // decoded swap is already instantaneous, which is the effect the fade
         // was there to soften.
         const className = 'main-media';
-        // Rule 1, before anything asynchronous: the decode below takes
-        // hundreds of milliseconds, and a stream that ends inside that window
-        // leaves a black plane behind a transparent page. Freezing here holds
-        // the last frame until the image is painted over it, whatever the
-        // stream does meanwhile. stop() under the cover releases it.
-        if (useAvplay && seam.freeze && planeHeld) {
-          avplay.freeze();
-        }
         Promise.all([
           decodedImage(fullsize, className),
           poster ? decodedImage(poster, 'background') : Promise.resolve(null),

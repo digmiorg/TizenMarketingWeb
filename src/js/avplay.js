@@ -148,37 +148,56 @@
    * 150 ms of clock progress past the first reading means the picture is
    * live, 250 ms more of hold covers an engine that reports a frame before
    * it paints, and 5 s with a clock that never moves is a dead plane that a
-   * still must not hide. A clock that is missing altogether (null on the
-   * first reading) cannot be waited for: the still comes down after the hold
-   * instead, or every clip after an image would lose its first five seconds.
+   * still must not hide.
    *
-   * @param {{progressMs?: number, holdMs?: number, deadlineMs?: number}} [opts]
+   * ABSENCE and FAILURE are different things, and the probe kept them apart:
+   * its watchStart() catches a throwing getCurrentTime() and keeps waiting.
+   * A clock that is MISSING (`hasClock: false`, known synchronously from
+   * `typeof`) cannot be waited for, so the still comes down after the hold --
+   * otherwise every clip after an image would lose its first five seconds. A
+   * clock that is present but answers nothing (a throw, a non-number) is
+   * 'wait': right after play() the player may not be PLAYING yet, and
+   * dropping the still then is the black seam this gate exists to prevent.
+   * Bounded, though: nothing for a whole second (`maxNullMs`) is a player
+   * that has left PLAYING, and that is a dead plane, dropped now.
+   *
+   * @param {{hasClock?: boolean, progressMs?: number, holdMs?: number, deadlineMs?: number, maxNullMs?: number}} [opts]
    * @returns {{ tick(t: (number|null), elapsedMs: number): ('wait'|'drop-after-hold'|'drop-now'), holdMs: number }}
    */
   function coverGate(opts) {
     const o = opts || {};
+    const hasClock = o.hasClock === undefined ? true : !!o.hasClock;
     const progressMs = o.progressMs === undefined ? 150 : o.progressMs;
     const holdMs = o.holdMs === undefined ? 250 : o.holdMs;
     const deadlineMs = o.deadlineMs === undefined ? 5000 : o.deadlineMs;
+    const maxNullMs = o.maxNullMs === undefined ? 1000 : o.maxNullMs;
     let base = null;
     let decided = false;
+    let nullSince = null;
     return {
       holdMs,
       tick(t, elapsedMs) {
         if (decided) {
           return 'wait';
         }
+        if (!hasClock) {
+          decided = true;
+          return 'drop-after-hold';
+        }
         if (elapsedMs > deadlineMs) {
           decided = true;
           return 'drop-now';
         }
         if (t === null) {
-          if (base === null) {
+          if (nullSince === null) {
+            nullSince = elapsedMs;
+          } else if (elapsedMs - nullSince > maxNullMs) {
             decided = true;
-            return 'drop-after-hold';
+            return 'drop-now';
           }
           return 'wait';
         }
+        nullSince = null;
         if (base === null || t < base) {
           base = t;
           return 'wait';
@@ -766,14 +785,32 @@
       attempt('close', () => p.close());
     }
 
-    /** The millisecond position of the current stream, or null. */
-    function currentTime() {
+    /** Is there a clock to poll at all? Knowable without calling it. */
+    function hasClock() {
       const p = player;
-      if (!p || typeof p.getCurrentTime !== 'function') {
+      return !!p && typeof p.getCurrentTime === 'function';
+    }
+
+    /**
+     * The millisecond position of the current stream, or null.
+     *
+     * Read QUIETLY, not through attempt(): the cover gate polls this every
+     * 16 ms, and a player that has left PLAYING throws on every call, which
+     * through attempt() is a log line per tick and a `lastError` that keeps
+     * being overwritten. The gate bounds the streak and decides; this only
+     * answers. NaN is null: it compares as neither more nor less than the
+     * base, and the still would sit over a live clip until the deadline.
+     */
+    function currentTime() {
+      if (!hasClock()) {
         return null;
       }
-      const got = attempt('getCurrentTime', () => p.getCurrentTime());
-      return got.ok && typeof got.value === 'number' ? got.value : null;
+      try {
+        const t = player.getCurrentTime();
+        return typeof t === 'number' && Number.isFinite(t) ? t : null;
+      } catch (e) {
+        return null;
+      }
     }
 
     api.play = play;
@@ -782,6 +819,7 @@
     api.freeze = freeze;
     api.release = release;
     api.currentTime = currentTime;
+    api.hasClock = hasClock;
     api.durationMs = function () {
       return preparedDurationMs;
     };
