@@ -75,13 +75,15 @@
  * keys 6-9 as this is written. Samsung also lists a B2B-only
  * `setStreamingProperty('PORTRAIT_MODE', ...)` (since 3.0) -- untried.
  *
- * That matters, because Samsung's guide says the parameters are interpreted
- * in a space that "is always treated as 1920x1080 px, regardless of the
- * application resolution", and that an app at another resolution "must
- * calculate the values". The probe did no such calculation and its video
- * filled the screen correctly for 482 seams. Both cannot be true of this
- * panel, and only the full-screen form has been seen to work -- so that is
- * the only form this file uses. An earlier draft computed a letterboxed rect
+ * Samsung's guide says the parameters are interpreted in a space that "is
+ * always treated as 1920x1080 px, regardless of the application resolution".
+ * In landscape the probe's viewport WAS 1920x1080, so the measured form and
+ * the document agree there, and the question never arose. In portrait the
+ * viewport is 1080x1920 and the document says the rotation moves the
+ * coordinate origin -- whether that space also swaps its axes is not stated
+ * and not yet measured. The HUD shows the rect sent, so the bench can tell:
+ * a clip cropped to 1080x1080 after a turn means the axes did not swap and
+ * the rect must be 1920x1080 regardless. Only the full-screen form is used. An earlier draft computed a letterboxed rect
  * and laid the blurred backdrop in the margins around it; that was removed,
  * because no non-full-screen rect has ever been measured here and, if the
  * document is right about the coordinate space, such a rect lands partly off
@@ -184,8 +186,18 @@
     const rotationOverride = typeof opts.rotation === 'function' ? opts.rotation : () => null;
     const onRotation = typeof opts.onRotation === 'function' ? opts.onRotation : () => {};
     const ROTATIONS = ['NONE', '90', '180', '270'];
+    // What a portrait viewport gets when the web layer reports angle 0 -- a
+    // panel that rotates in its compositor can do exactly that. Set from the
+    // bench with the remote keys, not derived: which way round AVPlay counts
+    // is not knowable from the page. null until measured, and null means
+    // "not turned, say so on the HUD".
+    const PORTRAIT_FALLBACK = null;
 
-    function resolveRotation() {
+    /**
+     * @param {{width: number, height: number}} viewport
+     * @return {{value: string, source: string}}
+     */
+    function resolveRotation(viewport) {
       const forced = rotationOverride();
       if (forced && ROTATIONS.indexOf(String(forced)) > -1) {
         return { value: String(forced), source: 'override' };
@@ -193,8 +205,17 @@
       const scr = opts.screen || (scope && scope.screen);
       const orientation = scr && scr.orientation;
       const angle = orientation && typeof orientation.angle === 'number' ? orientation.angle : 0;
-      const byAngle = { 0: 'NONE', 90: '90', 180: '180', 270: '270' };
-      return { value: byAngle[angle] || 'NONE', source: orientation ? 'screen' : 'default' };
+      const byAngle = { 90: '90', 180: '180', 270: '270' };
+      if (byAngle[angle]) {
+        return { value: byAngle[angle], source: 'screen' };
+      }
+      const portrait = !!viewport && viewport.height > viewport.width;
+      if (portrait) {
+        return PORTRAIT_FALLBACK
+          ? { value: PORTRAIT_FALLBACK, source: 'viewport' }
+          : { value: 'NONE', source: 'unmeasured' };
+      }
+      return { value: 'NONE', source: 'landscape' };
     }
     const log = opts.log || function () {};
     const api = {};
@@ -520,18 +541,36 @@
       // origin of coordinates. So, Application should call setDisplayRect()
       // again after calling this API." Allowed in IDLE/READY/PLAYING/PAUSED;
       // after prepare() the player is READY. Since 4.0.
-      const rotation = resolveRotation();
-      if (typeof p.setDisplayRotation === 'function') {
+      const rotation = resolveRotation(screen);
+      let turnedState;
+      if (rotation.value === 'NONE' && rotation.source !== 'override') {
+        // Landscape, or portrait that nobody has measured yet: the plane is
+        // NOT touched. The 482 measured seams ran without this call (the probe
+        // sent an invalid value, so it never took), and a landscape fleet
+        // must keep the exact sequence that was measured. An override of NONE
+        // is different -- it exists to undo an earlier turn, so it is sent.
+        turnedState = 'skipped';
+        if (rotation.source === 'unmeasured') {
+          log('portrait viewport but no rotation is known for this panel: press 7 or 9 on the remote with the HUD open');
+        }
+      } else if (typeof p.setDisplayRotation === 'function') {
         const turned = attempt('setDisplayRotation', () =>
           p.setDisplayRotation('PLAYER_DISPLAY_ROTATION_' + rotation.value),
         );
+        turnedState = turned.ok ? 'applied' : 'refused';
         if (!turned.ok) {
           log('setDisplayRotation was refused: video will be drawn in the panel\'s PHYSICAL orientation');
         }
       } else {
+        turnedState = 'absent';
         log('setDisplayRotation is absent: video will be drawn in the panel\'s PHYSICAL orientation');
       }
-      onRotation(rotation.value, rotation.source);
+      // The HUD reads this. The state is part of it on purpose: a value that
+      // was refused must not read as a value that took, in the middle of the
+      // one measurement that decides the direction.
+      onRotation(rotation.value, rotation.source, turnedState, {
+        x: 0, y: 0, width: screen.width, height: screen.height,
+      });
 
       // The rect, in the space the rotation just defined. Measured in ONE form
       // only, and only in landscape; see the note at the top of this file.

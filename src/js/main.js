@@ -116,10 +116,12 @@ function showReloadModal() {
  * registration -- nor take the rest of this file down, since this runs at
  * module level.
  */
-// 6-9 turn the video plane (NONE/90/180/270) on the next clip -- the probe's
-// own bench control, kept because which way a portrait panel wants is not
-// knowable in advance. Read back on the HUD's Stage line.
-const REMOTE_KEYS_TO_REGISTER = ['Info', '6', '7', '8', '9'];
+// With the HUD open, 6-9 turn the video plane (NONE/90/180/270) on the next
+// clip and 5 goes back to automatic -- the probe's own bench control, kept
+// because which way a portrait panel wants is not knowable in advance. Read
+// back on the HUD's Stage line. Only with the HUD open: a customer leaning on
+// the remote must not be able to turn every advert sideways for weeks.
+const REMOTE_KEYS_TO_REGISTER = ['Info', '5', '6', '7', '8', '9'];
 
 REMOTE_KEYS_TO_REGISTER.forEach((keyName) => {
   try {
@@ -134,11 +136,20 @@ REMOTE_KEYS_TO_REGISTER.forEach((keyName) => {
 document.addEventListener('keydown', function (e) {
   let deviceInfoElement;
 
-  // Digits 6-9: rotation override for the AVPlay plane. Takes effect when the
-  // next clip starts; the current one is not touched.
-  if (e.keyCode >= 54 && e.keyCode <= 57) {
-    window.avplayRotationOverride = ['NONE', '90', '180', '270'][e.keyCode - 54];
-    console.log('[avplay] rotation override set to ' + window.avplayRotationOverride + ' - applies on the next clip');
+  // Digits 5-9 with the HUD open: 5 = automatic, 6-9 = NONE/90/180/270 for
+  // the AVPlay plane. Takes effect when the next clip starts; the current one
+  // is not touched. Survives a playlist change on purpose (that is what a
+  // bench measurement needs) and a reload clears it.
+  if (e.keyCode >= 53 && e.keyCode <= 57) {
+    if (e.repeat) {
+      return;
+    }
+    const hud = document.querySelector('.device-info');
+    if (!hud || !hud.classList.contains('visible')) {
+      return;
+    }
+    window.avplayRotationOverride = [null, 'NONE', '90', '180', '270'][e.keyCode - 53];
+    console.log('[avplay] rotation override: ' + (window.avplayRotationOverride || 'automatic') + ' - applies on the next clip');
     updateStageGeometry();
     e.preventDefault();
     return;
@@ -485,9 +496,10 @@ function updateStageGeometry() {
   // because this file no longer chooses one -- it is always the full screen,
   // with setDisplayMethod deciding the letterbox inside it.
   if (window.avplayOnPlane) {
-    readout.textContent = 'viewport ' + viewport + ', avplay full screen (letterboxed), rotation ' +
-      (window.avplayRotation || 'unset') +
-      (window.avplayRotationOverride ? ', next: ' + window.avplayRotationOverride + ' (keys 6-9)' : ' (keys 6-9 to override)');
+    readout.textContent = 'viewport ' + viewport + ', avplay rect ' + (window.avplayRect || '?') +
+      ' (letterboxed), rotation ' + (window.avplayRotation || 'unset') +
+      (window.avplayRotationOverride ? ', next: ' + window.avplayRotationOverride : ', next: automatic') +
+      ' [5=auto 6=none 7=90 8=180 9=270]';
 
     return;
   }
@@ -886,8 +898,9 @@ function getSharedAvplay() {
   sharedAvplay = window.DigmiAvplay.createPlayer({
     log: (line) => console.log('[avplay] ' + line),
     rotation: () => window.avplayRotationOverride || null,
-    onRotation: (value, source) => {
-      window.avplayRotation = value + ' (' + source + ')';
+    onRotation: (value, source, state, rect) => {
+      window.avplayRotation = value + ' (' + source + ', ' + state + ')';
+      window.avplayRect = rect ? rect.width + 'x' + rect.height + ' at ' + rect.x + ',' + rect.y : '?';
     },
     onStreamCompleted: () => {
       if (avplayHooks.onStreamCompleted) {
