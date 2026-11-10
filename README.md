@@ -97,15 +97,21 @@ scripts/verify-wgt.sh b2b/<version>                      # descriptor vs package
 scripts/author-identity-gate.sh b2b/<version>/DigmiMarketing.wgt b2b/latest    # verdict = exit status:
 case $? in 2) echo 'DIFFERENT AUTHOR KEY - do not publish';; 1) echo 'b2b/latest is broken - fix it first';; esac
 cmp b2b/latest/DigmiMarketing.wgt b2b/<version>/DigmiMarketing.wgt            # after step 3
+scripts/verify-wgt.sh b2b/latest                        # after step 3: the copied descriptor too
 ```
 
 and after each merge, that Pages serves the bytes you committed — only the
 version directory after step 1, both after step 3:
 
 ```sh
-scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <ver> DigmiMarketing b2b/<version>/DigmiMarketing.wgt b2b/<version>                # after step 1
-scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <ver> DigmiMarketing b2b/<version>/DigmiMarketing.wgt b2b/latest b2b/<version>     # after step 3
+scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <sssp-ver> DigmiMarketing b2b/<version>/DigmiMarketing.wgt b2b/<version>                # after step 1
+scripts/check-served.sh https://digmiorg.github.io/TizenMarketingWeb/ <sssp-ver> DigmiMarketing b2b/<version>/DigmiMarketing.wgt b2b/latest b2b/<version>     # after step 3
 ```
+
+`<sssp-ver>` is the integer from the descriptor (`10013` for 1.0.13), not the
+semver: with `1.0.13` the script polls until it times out and then reports
+the served package as 'not this package'.
+
 
 A re-sign of an already published version cannot be rolled out: `<ver>` comes
 from the semver, so displays would not download it again. A new distributor
