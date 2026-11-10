@@ -1,21 +1,86 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<widget xmlns:tizen="http://tizen.org/ns/widgets" xmlns="http://www.w3.org/ns/widgets" id="https://portal.digmi.eu" version="1.0.11" height="1920" width="1080" viewmodes="fullscreen">
+<!--
+  This file is the SSSP sideload's configuration. It is also the INPUT to the
+  store package, but not the whole of it: scripts/build-seller-office-wgt.sh
+  rewrites three elements at build time, because the two channels disagree
+  about them and one file cannot satisfy both.
+
+      element                here (SSSP)                store build writes
+      tizen:application id   E1lTJzhcnm.DigmiMarketing  E1lTJzhcnm.DigmiSignage
+      name                   DigmiMarketing             Digmi Marketing
+      tizen:profile          tv-samsung                 tv
+
+  Keeping the SSSP values here rather than the store's is deliberate. A panel
+  running the sideload identifies its pairing by `localStorage.myUUID` (see
+  src/js/main.js), and whether changing the Tizen ID makes an SSSP install a
+  new application rather than an upgrade is NOT measured. If it does, that
+  storage goes with it; a panel whose `tizenid` capability throws then invents
+  a fresh UUID, the portal's pairing points at an id the screen no longer
+  reports, and that is a site visit per screen. The store build rewrites the
+  id in a staged copy and never touches an installed sideload.
+-->
+<widget xmlns:tizen="http://tizen.org/ns/widgets" xmlns="http://www.w3.org/ns/widgets" id="https://portal.digmi.eu" version="1.0.12" height="1920" width="1080" viewmodes="fullscreen">
     <access origin="*" subdomains="true"></access>
-    <tizen:application id="E1lTJzhcnm.DigmiMarketing" package="E1lTJzhcnm" required_version="4.0"/>
+    <!-- 5.0, matching the package Seller Office accepted. This file said 4.0
+         until 2026-11-09, on the reasoning that a lower value admits more
+         panels and costs only a wider certification group.
+
+         What settled it is that required_version is not the gate. Seller
+         Office scopes service by MODEL GROUP, and on 2026-11-09 this app was
+         served to `24TV_STANDARD1_B2B` and `24TV_PREMIUM4_B2B`, both Tizen
+         8.0, with the other four groups down. So 4.0 admitted no panel that
+         exists, while diverging from the one configuration known to have
+         passed the pre-test.
+
+         The Chrome analysis is kept because it is the record of what was
+         checked, not because it still decides anything. Samsung's Web Engine
+         Specifications map 2018 / Tizen 4.0 / M56 and 2019 / Tizen 5.0 / M63.
+         src/css/brand.css targets Chrome 63; the gap down to 56 was checked
+         for the three features it uses (every min()/cqi value has a plain
+         fallback above it or sits behind an @supports test, CSS Grid Layout
+         Level 1 is listed as supported on Tizen 4.0, and no packaged
+         JavaScript uses anything past ES2017), and it held. If the service is
+         ever widened to an older model group, that analysis is the starting
+         point rather than something to redo.
+
+         Note for the SSSP channel: a sideloaded panel older than Tizen 5.0
+         will no longer install a new build. None is known to exist, and the
+         fleet's app comes from the store. -->
+    <tizen:application id="E1lTJzhcnm.DigmiMarketing" package="E1lTJzhcnm" required_version="5.0"/>
     <author href="https://digmi.se" email="conny@digmi.se">Digmi Group AB</author>
     <content src="index.html"/>
     <feature name="http://tizen.org/feature/screen.size.all"/>
     <icon src="icon.png"/>
     <tizen:metadata key="http://samsung.com/tv/metadata/prelaunch.support" value="true"/>
+    <!-- Present in the package Seller Office accepted, absent here until
+         2026-11-09. The widget element above declares portrait dimensions
+         (1080x1920) while the panels run landscape, and the accepted package
+         declares exactly the same dimensions alongside this line, so the
+         dimensions are not what decides orientation and they are left alone. -->
+    <tizen:metadata key="http://samsung.com/tv/metadata/screen/orientation" value="all"/>
     <name>DigmiMarketing</name>
     <tizen:privilege name="http://developer.samsung.com/privilege/avinfo.color"/>
     <tizen:privilege name="http://tizen.org/privilege/download"/>
+    <!-- Required by tizen.tvinputdevice.registerKey(), which src/js/main.js
+         calls so that INFO reaches the keydown handler at all. -->
     <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
     <tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
     <tizen:privilege name="http://tizen.org/privilege/filesystem.read"/>
     <tizen:privilege name="http://tizen.org/privilege/filesystem.write"/>
+    <!-- WARNING: Samsung's launch checklist says productinfo is for Samsung
+         Checkout and that "applications that do not have that feature should
+         not be declared arbitrarily". It is kept only because the accepted
+         package declares it and that package passed. Dropping it is the next
+         candidate if the pre-test ever complains about privileges. -->
     <tizen:privilege name="http://developer.samsung.com/privilege/productinfo"/>
-    <tizen:privilege name="http://developer.samsung.com/privilege/b2bcontrol"/>
+    <!-- b2bcontrol is NOT declared. The checklist reserves partner-level APIs
+         for Samsung Smart TV partners, and the accepted package does not
+         declare it. Nothing in the packaged app calls it: src/index.html loads
+         $B2BAPIS/b2bapis/b2bapis.js, but there is no call site. The bench
+         probe is unaffected because lab/avplay-probe/config.xml declares its
+         own copy of the privilege. Note for DTD-2130 (remote reboot, screen
+         capture): that task now has a config change to undo here, not only
+         code to write. -->
     <tizen:privilege name="http://tizen.org/privilege/application.launch"/>
     <tizen:profile name="tv-samsung"/>
     <tizen:setting screen-orientation="auto-rotation" context-menu="enable" background-support="disable" encryption="disable" install-location="auto" hwkey-event="enable"/>

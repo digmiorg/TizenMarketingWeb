@@ -1,4 +1,4 @@
-const appVersion = '1.0.11';
+const appVersion = '1.0.12';
 const baseUrl = 'https://portal.digmi.eu';
 // Shared tablet bearer. /api/v1/devices needs it (401 without); verify-device
 // does not, so it is no longer sent there. It lives in one place now because
@@ -79,6 +79,46 @@ function showReloadModal() {
   }, 1500);
 }
 
+/**
+ * Asks the panel for the remote keys this file handles but does not receive
+ * by default.
+ *
+ * Samsung delivers only a small set of keys to an application that has not
+ * asked for anything: the four arrows, ENTER and RETURN. Those are the keys
+ * the handler below has always acted on, which is why stepping a campaign and
+ * reloading have always worked without a line like this one. Everything else
+ * arrives only after `registerKey()` -- `lab/avplay-probe` is driven by the
+ * number keys and received nothing at all until it registered them.
+ *
+ * INFO is not in that set, so the case naming it below is very likely dead on
+ * a panel today. "Very likely" is honest: that is read off Samsung's rule and
+ * the probe's measurement of the number keys, not measured for INFO itself.
+ *
+ * EXIT is deliberately NOT registered, and must never be. Samsung's User
+ * Interaction Q&A: "To follow the policy, unregister the 'Exit' key and do not
+ * handle it in your application. The key's default behavior implements the
+ * policy", and "Do not open a popup after the 'Exit' key click ... any other
+ * behavior causes your application to fail its certification checks."
+ * Registering it would also take away the only way off a kiosk screen from the
+ * remote, recoverable only by another store release.
+ *
+ * The list is registered one key at a time and a failure is swallowed: a panel
+ * that does not offer a key throws, and that must not cost the others their
+ * registration -- nor take the rest of this file down, since this runs at
+ * module level.
+ */
+const REMOTE_KEYS_TO_REGISTER = ['Info'];
+
+REMOTE_KEYS_TO_REGISTER.forEach((keyName) => {
+  try {
+    window.tizen.tvinputdevice.registerKey(keyName);
+  } catch (error) {
+    if (window.console && console.warn) {
+      console.warn(`registerKey(${keyName}) failed:`, error);
+    }
+  }
+});
+
 document.addEventListener('keydown', function (e) {
   let deviceInfoElement;
 
@@ -122,10 +162,6 @@ document.addEventListener('keydown', function (e) {
       e.preventDefault();
       break;
     case window.tvKey.RETURN:
-      showReloadModal();
-      e.preventDefault();
-      break;
-    case window.tvKey.EXIT:
       showReloadModal();
       e.preventDefault();
       break;
@@ -703,7 +739,7 @@ function showRegistrationScreen(reason) {
   // No ordering subtlety here - this whole function is one synchronous block,
   // so nothing is painted between the display reset above and this call.
   //
-  // What DOES show the wrong face is a cold start or a RETURN/EXIT reload:
+  // What DOES show the wrong face is a cold start or a RETURN reload:
   // the markup carries the pairing face, so a switched-off screen shows the
   // QR code until the first verify-device answer lands, and keeps showing it
   // for as long as that answer does not come. That is inherent - the screen

@@ -11,6 +11,71 @@ Tizen Studio, which is how `production/latest/` came to serve 1.0.7 while 1.0.9
 sat unreleased beside it — the fleet follows `latest/`, so no screen ever saw
 it.
 
+## Two channels, and this file mostly describes one of them
+
+A screen can get this widget two different ways, and until 2026-11-09 only the
+first was written down here.
+
+| | **SSSP** (`production/`) | **TV Seller Office** (the store) |
+| --- | --- | --- |
+| Built by | `scripts/build-wgt.sh` + the two workflows | `scripts/build-seller-office-wgt.sh` |
+| Signed with | one of our own certificate profiles | nothing; the signature is copied |
+| Who verifies the signature | the panel, on download | Samsung, at upload |
+| Tizen ID | `E1lTJzhcnm.DigmiMarketing` | `E1lTJzhcnm.DigmiSignage` |
+| `<name>` | `DigmiMarketing` | `Digmi Marketing` |
+| Everything below this section | applies | does **not** apply |
+
+There is one `src/config.xml` and it holds the SSSP values. The store build
+rewrites the Tizen ID, `<name>` and `<tizen:profile>` in a staged copy, taking
+all three from the reference package, and verifies the result against it before
+packaging. `src/config.xml` keeps the SSSP values deliberately: changing the
+Tizen ID of an *installed* sideload may register a new application rather than
+upgrade one, and that would take `localStorage.myUUID` — the screen's pairing
+identity — with it. That is unmeasured, so the store build stays out of the
+way of it.
+
+The fleet's live app is the store one. The package this repository publishes
+under `production/latest/` is something else: measured 2026-11-09, it carries
+an author certificate `CN=Digmi` from **Tizen Developers CA** and a distributor
+certificate from **Tizen Test CA that expired 2022-10-27**. No store ever
+served that. It is a sideload, and the pipeline described in the rest of this
+file builds for it.
+
+Both are kept, because they are good at different things: the SSSP package is
+the one you can put on a bench panel in two minutes and power-cycle, and the
+store package is the one that reaches customers.
+
+### Releasing through Seller Office
+
+1. Download the most recently accepted package: Seller Office → Applications →
+   App Package → click the `.wgt` beside the newest version.
+2. `scripts/build-seller-office-wgt.sh <that file>`. It refuses the mistakes
+   that each cost an upload round trip: a version that does not exceed the
+   accepted one or is not `major.minor.patch`, a `config.xml` and `appVersion`
+   that disagree, a reference with no signature to copy, and an identity
+   rewrite that did not apply.
+3. Prove the *content* on the bench first, with the SSSP package built from the
+   same tree. The store package will not install over SSSP or sdb, because its
+   signature describes a different package.
+4. Upload, and let the pre-test run.
+
+**Why the signature is copied rather than produced.** The app is bound to an
+author certificate whose key nobody here holds, and Samsung requires a new
+package's author to match the previous version's. Copying the two signature
+files out of an accepted package is what the versions already in the store were
+built with. The evidence, and the durable alternative — recovering the original
+author key and renewing it with Samsung, which issues a new certificate over
+the same RSA key — are recorded in Notion rather than here, because this
+repository is public and served by GitHub Pages.
+
+⚠️ That route depends on the upload check behaving as it does today. If it
+changes, the key is the only way back in, and nobody has found it yet.
+
+⚠️ Alpha and beta versions cannot be submitted as a release version (Seller
+Office, Applications → App Package, version status descriptions, read
+2026-11-09). Plan two version numbers if you use them, or prove the build on
+the bench and skip them.
+
 ## How a display actually gets a new build
 
 The URL configured on a display is **a directory on a web server**, not a web
