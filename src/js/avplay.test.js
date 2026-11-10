@@ -527,6 +527,8 @@ test('createPlayer: silence is per player - disableAudioStream after prepare, an
 
   player.close();
   assert.equal(panel.audio.muted, false, 'close() unmuted a TV that was never muted');
+  assert.equal(panel.args.setMute, undefined, 'close() called setMute on a TV it never muted');
+  assert.equal(panel.args.isMute, undefined, 'close() read the TV mute it never touched');
 });
 
 test('createPlayer: a panel that REFUSES disableAudioStream falls back to the TV mute, once, and still plays', () => {
@@ -682,7 +684,7 @@ test('createPlayer: an unreadable mute state is still undone on the way out', ()
 test('createPlayer: a play that fails at the last step hands the mute back', () => {
   // The caller drops to the <video> path from here, and that path never
   // calls stop() or close() - so this is the last chance.
-  const panel = fakePanel({
+  const panel = fakePanel({ noAudioStreamApi: true,
     play: () => {
       throw new Error('PLAYER_ERROR_INVALID_OPERATION');
     },
@@ -690,18 +692,20 @@ test('createPlayer: a play that fails at the last step hands the mute back', () 
   const player = makePlayer(panel);
 
   assert.equal(player.play('http://example/a.mp4', { width: 1080, height: 1920 }).ok, false);
+  assert.deepEqual(panel.args.setMute[0], [true], 'the TV mute was never applied - the restoration below proves nothing');
   assert.equal(panel.audio.muted, false, 'the panel stayed muted with nothing playing');
 });
 
 test('createPlayer: a panel that was already muted is left muted', () => {
   // Somebody muted it on purpose. Unmuting it on our way out would be this
   // app changing a setting it never owned.
-  const panel = fakePanel({ isMuteValue: true });
+  const panel = fakePanel({ noAudioStreamApi: true, isMuteValue: true });
   const player = makePlayer(panel);
 
   player.play('http://example/clip.mp4', { width: 1080, height: 1920 });
   player.close();
 
+  assert.deepEqual(panel.args.setMute[0], [true], 'the TV mute was never applied - the restoration below proves nothing');
   assert.equal(panel.audio.muted, true, 'it unmuted a panel it found muted');
 });
 
@@ -709,7 +713,7 @@ test('createPlayer: close() stops, restores the audio and hands the instance bac
   // Samsung: "To remove the AVPlay instance, call the close() method."
   // Without it the player stays allocated to a page that is going away, and
   // the next getPlayer() answers QuotaExceededError until the panel restarts.
-  const panel = fakePanel();
+  const panel = fakePanel({ noAudioStreamApi: true });
   const player = makePlayer(panel);
   player.play('http://example/a.mp4', { width: 1080, height: 1920 });
   panel.calls.length = 0;
@@ -721,6 +725,7 @@ test('createPlayer: close() stops, restores the audio and hands the instance bac
     panel.calls.indexOf('stop') < panel.calls.indexOf('close'),
     'it closed before stopping',
   );
+  assert.deepEqual(panel.args.setMute[0], [true], 'the TV mute was never applied - the restoration below proves nothing');
   assert.equal(panel.audio.muted, false);
 });
 
@@ -975,7 +980,7 @@ test('createPlayer: a second session does not record our own mute as the panel\'
   // records it as the setting it found, and refuses to undo it for ever.
   //
   // One wrapper, two playlists: the record survives, and the panel comes back.
-  const panel = fakePanel();
+  const panel = fakePanel({ noAudioStreamApi: true });
   const player = makePlayer(panel);
 
   player.play('http://example/a.mp4', { width: 1080, height: 1920 });
