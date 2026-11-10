@@ -618,6 +618,26 @@ function stopPlayback() {
 }
 
 /**
+ * Did the part of a device payload that is RENDERED change?
+ *
+ * One answer for both callers -- fetchDeviceMedia() after a cache hit, and the
+ * rotation's wrap-around poll -- so the next field that starts to matter is
+ * added in one place. Only the media list is rendered: `location` feeds a
+ * status string and is updated in place, `playback`/`portrait_mode`/
+ * `keep_screen_on` are not read by this file at all, and `playback` differs
+ * between two fetches seconds apart (measured 2026-11-10), which is how a
+ * whole-payload comparison restarted the playlist from item 1 a few seconds
+ * after it had started.
+ *
+ * @param {Array|undefined} onScreen
+ * @param {Array|undefined} fetched
+ * @returns {boolean}
+ */
+function renderedPlaylistChanged(onScreen, fetched) {
+  return JSON.stringify(onScreen || []) !== JSON.stringify(fetched || []);
+}
+
+/**
  * Whether a non-empty playlist is on screen right now.
  *
  * Derived from the globals rather than kept as its own flag, because a flag
@@ -642,26 +662,6 @@ function stopPlayback() {
  * The cost of that design: any path that nulls the handle without restarting
  * is a silent restart from item 1, not a pause.
  */
-/**
- * Did the part of a device payload that is RENDERED change?
- *
- * One answer for both callers -- fetchDeviceMedia() after a cache hit, and the
- * rotation's wrap-around poll -- so the next field that starts to matter is
- * added in one place. Only the media list is rendered: `location` feeds a
- * status string and is updated in place, `playback`/`portrait_mode`/
- * `keep_screen_on` are not read by this file at all, and `playback` differs
- * between two fetches seconds apart (measured 2026-11-10), which is how a
- * whole-payload comparison restarted the playlist from item 1 a few seconds
- * after it had started.
- *
- * @param {Array|undefined} onScreen
- * @param {Array|undefined} fetched
- * @returns {boolean}
- */
-function renderedPlaylistChanged(onScreen, fetched) {
-  return JSON.stringify(onScreen || []) !== JSON.stringify(fetched || []);
-}
-
 function playlistIsOnScreen() {
   return typeof window.mediaLength === 'number'
     && window.mediaLength > 0
@@ -1750,14 +1750,28 @@ function displayMediaContent(data) {
        * render is skipped and only the timer is re-armed, for THIS item's
        * slot. Undefined means "no poll in between": render as before.
        */
+      // The render token the timer was last armed for. A key press renders
+      // AND arms (through this very function); a loop renders without arming.
+      // The poll resolver tells the two apart with it.
+      let armedForToken = -1;
+
       const continueRotation = (tokenAtTick) => {
         if (!isCurrentGeneration()) {
           return;
         }
 
+        const renderedMeanwhile = tokenAtTick !== undefined && renderToken !== tokenAtTick;
+        if (renderedMeanwhile && armedForToken === renderToken) {
+          // A key rendered the current item and armed its slot while the poll
+          // was in flight. Re-arming here would restart that slot at the
+          // poll's return instead of the key press: an image shown too long,
+          // a clip whose loop guard thinks the slot is not over and restarts
+          // it. The key owns the slot; the resolver has nothing left to do.
+          return;
+        }
+
         // The timer is still rearmed below: the wrap-around poll in the tick
         // has to keep running so a switched-off campaign is noticed.
-        const renderedMeanwhile = tokenAtTick !== undefined && renderToken !== tokenAtTick;
         if (!renderedMeanwhile && !singleImageAlreadyShowing()) {
           window.displayMedia(window.currentMediaIndex);
         }
@@ -1773,6 +1787,7 @@ function displayMediaContent(data) {
         window.rotationInterval = null;
 
         startRotationTimer();
+        armedForToken = renderToken;
       };
 
       /**
