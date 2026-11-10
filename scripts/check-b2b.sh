@@ -60,7 +60,9 @@
 set -Eeuo pipefail
 
 ROOT="${1:-b2b}"
+ROOT="${ROOT%/}"
 BASE_PATH="${CHECK_B2B_BASE_PATH:-b2b}"
+BASE_PATH="${BASE_PATH%/}"
 here="$(cd "$(dirname "$0")" && pwd)"
 
 # Anything this script did not plan for - a tool failing, a path that is not
@@ -416,19 +418,24 @@ for k in "$accept_key" "$replaced_key"; do
     [ -z "$k" ] && continue
     [[ "$k" =~ ^[0-9a-f]{64}$ ]] || { echo "cannot check: '$k' in .github/b2b-accept-key (or CHECK_B2B_ACCEPT_KEY/CHECK_B2B_REPLACED_KEY) is not a sha256"; exit 2; }
 done
-# Accepted mode: the file names exactly the key latest/ carries.
+# Accepted mode: the file names exactly the key latest/'s package carries -
+# read even when latest/ failed for some other reason, so a rotation PR with
+# a stray file in latest/ is told about the stray, not that every
+# re-signed directory carries "the wrong key".
 accepted=0
 latest_key=''
-if [ "$latest_ok" -eq 1 ]; then
+if [ -f "$ROOT/latest/sssp_config.xml" ]; then
     lwidget="$(widgetname_of "$ROOT/latest/sssp_config.xml")"
-    latest_key="$(key_of "$ROOT/latest/$lwidget.wgt")"
-    [ -n "$accept_key" ] && [ "$latest_key" = "$accept_key" ] && accepted=1
+    [ -f "$ROOT/latest/$lwidget.wgt" ] && latest_key="$(key_of "$ROOT/latest/$lwidget.wgt")"
+    if [ -n "$accept_key" ] && [ -n "$latest_key" ] && [ "$latest_key" = "$accept_key" ]; then
+        accepted=1
+        [ "$latest_ok" -eq 1 ] || echo "  note  .github/b2b-accept-key names latest/'s key, so it is the reference although latest/ failed above"
+    fi
 fi
 ref_key=''
 ref_cert=''
 ref_src=''
 if [ "$accepted" -eq 1 ]; then
-    lwidget="$(widgetname_of "$ROOT/latest/sssp_config.xml")"
     ref_key="$accept_key"; ref_cert="$(cert_of "$ROOT/latest/$lwidget.wgt")"; ref_src="$ROOT/latest (key accepted by .github/b2b-accept-key)"
     if [ -n "$base_key" ] && [ "$base_key" != "$accept_key" ]; then
         echo "== author key: ROTATION from $base_key ($CHECK_B2B_BASE) to $accept_key, accepted by .github/b2b-accept-key - every panel on the channel has to be emptied and re-pointed"
@@ -490,6 +497,11 @@ if [ -n "$ref_key" ]; then
     # directories the base already serves.
     several_old=0
     [ "$(printf '%s' "$old_keys" | wc -w | tr -d ' ')" -gt 1 ] && several_old=1
+    # The same rule in both modes - what Verify b2b passes is what the
+    # publish guard will keep: an older-key directory must carry the key
+    # the accept file's second line names (so the file is complete when it
+    # is reviewed), and with a base it must also be a directory the base
+    # already serves.
     for dir in ${old_dirs[@]+"${old_dirs[@]}"}; do
         name="$(basename "$dir")"
         okey="$(key_of "$dir/$(widgetname_of "$dir/sssp_config.xml").wgt")"
@@ -497,23 +509,20 @@ if [ -n "$ref_key" ]; then
             echo "  FAIL  $dir carries one of several older keys - nothing says which one panels run; only one older key may remain (remove the earlier rotation's leftovers first)"
             mark_failed "$dir"
             key_fails=$((key_fails + 1))
-        elif [ "$base_has_latest" -eq 1 ]; then
-            if git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/sssp_config.xml" 2>/dev/null; then
-                echo "  ok    $dir still carries the older key - kept for panels not yet re-pointed"
-            else
-                echo "  FAIL  $dir carries an older key and $CHECK_B2B_BASE does not serve it - a new directory must carry the accepted key"
-                mark_failed "$dir"
-                key_fails=$((key_fails + 1))
-            fi
-        elif [ -n "$replaced_key" ] && [ "$okey" = "$replaced_key" ]; then
-            # No base (the publish guard): only the key the accept file says
-            # is being replaced is an older key. Anything else is a package
-            # on a third key, admitted by nothing.
-            echo "  ok    $dir still carries the replaced key - kept for panels not yet re-pointed"
-        else
+        elif [ -z "$replaced_key" ]; then
+            echo "  FAIL  $dir carries an older key but .github/b2b-accept-key has no second line naming the key being replaced - add it, or remove the directory"
+            mark_failed "$dir"
+            key_fails=$((key_fails + 1))
+        elif [ "$okey" != "$replaced_key" ]; then
             echo "  FAIL  $dir carries key $okey, which is neither the accepted key nor the replaced key named on line 2 of .github/b2b-accept-key"
             mark_failed "$dir"
             key_fails=$((key_fails + 1))
+        elif [ "$base_has_latest" -eq 1 ] && ! git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/sssp_config.xml" 2>/dev/null; then
+            echo "  FAIL  $dir carries the replaced key and $CHECK_B2B_BASE does not serve it - a new directory must carry the accepted key"
+            mark_failed "$dir"
+            key_fails=$((key_fails + 1))
+        else
+            echo "  ok    $dir still carries the replaced key - kept for panels not yet re-pointed"
         fi
     done
     [ "$key_fails" -eq 0 ] && echo "  ok    every directory carries it"
@@ -559,8 +568,8 @@ if [ "$base_has_latest" -eq 1 ] && [ "$latest_ok" -eq 1 ]; then
         echo "  FAIL  $ROOT/latest goes from <ver>$base_ver</ver> to <ver>$new_ver</ver> - displays never download a lower <ver>, so this is a silent freeze, not a rollback"
         mark_failed "$ROOT/latest"
     elif [ "$new_ver" = "$base_ver" ]; then
-        lw=("$ROOT/latest"/*.wgt)
-        if same_file "${lw[0]}" "$base_wgt_tmp"; then
+        lwgt="$ROOT/latest/$(widgetname_of "$ROOT/latest/sssp_config.xml").wgt"
+        if same_file "$lwgt" "$base_wgt_tmp"; then
             echo "  ok    <ver>$new_ver</ver> and the package are unchanged"
         else
             echo "  FAIL  the package in $ROOT/latest changed but <ver>$new_ver</ver> did not - no display would ever download it (a re-sign needs a version bump)"
@@ -603,12 +612,12 @@ if [ -n "${CHECK_B2B_BASE:-}" ] && git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH" 
     for dir in ${versions[@]+"${versions[@]}"}; do
         is_failed "$dir" && continue
         name="$(basename "$dir")"
-        dw=("$dir"/*.wgt)
-        if git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/$(basename "${dw[0]}")" 2>/dev/null; then
+        dwname="$(widgetname_of "$dir/sssp_config.xml").wgt"
+        if git cat-file -e "$CHECK_B2B_BASE:$BASE_PATH/$name/$dwname" 2>/dev/null; then
             vt="$(mktemp)"
             tmpfiles="$tmpfiles $vt"
-            git cat-file blob "$CHECK_B2B_BASE:$BASE_PATH/$name/$(basename "${dw[0]}")" > "$vt"
-            if ! same_file "${dw[0]}" "$vt"; then
+            git cat-file blob "$CHECK_B2B_BASE:$BASE_PATH/$name/$dwname" > "$vt"
+            if ! same_file "$dir/$dwname" "$vt"; then
                 echo "  FAIL  $dir is already served by $CHECK_B2B_BASE with other bytes - a published version is immutable, publish a new one instead"
                 mark_failed "$dir"
             fi
