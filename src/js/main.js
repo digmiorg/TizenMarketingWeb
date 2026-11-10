@@ -440,8 +440,11 @@ async function fetchDeviceMedia(uuid) {
 
     // Render again only if what is RENDERED changed (renderedPlaylistChanged
     // says what that is). A location that changed is written into the
-    // playlist that is already on screen -- `cachedData` IS that closure's
-    // `data` -- rather than rebuilding it from item 1 for a status string.
+    // playlist that is already on screen rather than rebuilding it from item
+    // 1 for a status string: displayMediaContent(cachedData) captured this
+    // very object as its `data` -- but only when the cached payload had a
+    // non-empty campaign_media; with an empty one no closure was built, and
+    // the mutation below is then harmless.
     if (!cachedData) {
       displayMediaContent(data);
     } else {
@@ -1689,8 +1692,15 @@ function displayMediaContent(data) {
                 }
 
                 // Immediately display the first item of the new content
+                // A changed playlist overrides any key step made while this poll was
+                // in flight: the viewer stepped through a playlist that no longer
+                // exists, so index 0 of the new one is the only right place to be.
                 window.displayMedia(0);
                 startRotationTimer();
+                // Mark the timer as armed for this render, so an OVERLAPPING poll's
+                // resolver (two ticks during one slow fetch) sees a timer that is
+                // already armed and neither re-renders nor restarts the first slot.
+                armedForToken = renderToken;
                 updateStageGeometry();
 
                 return true; // Data changed and updated
