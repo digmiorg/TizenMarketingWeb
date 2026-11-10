@@ -282,8 +282,12 @@
     // reused clip after clip (stop/open, never close), so a turn applied for
     // one clip stays on the plane for the next unless something sends NONE.
     let lastSentRotation = null;
-    // Set once the panel has refused disableAudioStream; the TV mute is then
-    // used directly for the rest of this instance.
+    // Audio-stream state, per native instance; both reset in close().
+    //   audioStreamDisabled: disableAudioStream() has succeeded on THIS
+    //     instance, so it is silent whatever a later call answers.
+    //   audioStreamRefused: the panel refused it before it ever succeeded;
+    //     the TV mute is used directly for the rest of this instance.
+    let audioStreamDisabled = false;
     let audioStreamRefused = false;
 
     /**
@@ -398,6 +402,66 @@
       }
       player = got.value;
       return player;
+    }
+
+    /**
+     * Silence THIS player for playback, with the TV mute as the fallback.
+     *
+     * AVPlay's disableAudioStream() (TV since 6.5, B2B; allowed in IDLE/
+     * READY/PLAYING/PAUSED) switches off the audio of this instance only. The
+     * TV's own mute was the first port, and it has a cost the bench showed
+     * on 2026-11-10: the panel paints its crossed-speaker OSD at every stream
+     * start while muted, and AVPlay starts a stream at every seam -- an icon
+     * blinking over the customer's content all day.
+     *
+     * Called per clip, because the API leaves re-enabling to the application
+     * and says nothing about open(). Whether a second call on an already
+     * silent instance is a no-op is NOT documented, so a failure AFTER a
+     * success is read as "already silent", not as a refusal: muting the TV
+     * on top of a disabled stream would bring the OSD straight back. Only a
+     * refusal before any success falls back to the TV mute, once per
+     * instance -- trying again every clip would log a line per seam and
+     * overwrite lastError with a failure that play() survives.
+     *
+     * @param {object} p - the native player, READY
+     */
+    function silenceAudio(p) {
+      if (!audioStreamRefused && typeof p.disableAudioStream === 'function') {
+        if (attempt('disableAudioStream', () => p.disableAudioStream()).ok) {
+          audioStreamDisabled = true;
+          return;
+        }
+        if (audioStreamDisabled) {
+          return; // silent since an earlier clip; the repeat call is the undocumented one
+        }
+        audioStreamRefused = true;
+      }
+      muteAudio();
+    }
+
+    /**
+     * Hand the audio stream back, if and only if this instance disabled it.
+     *
+     * Samsung puts enable/disable on the application, and enableAudioStream()
+     * is documented as a SWITCH between instances: "disables audio stream of
+     * current active player instance and then enable Audio for the player
+     * instance for which enableAudioStream() has been called". So it is never
+     * called on an instance that did not disable anything -- on a never-opened
+     * instance it would throw (NONE is not an allowed state), and with another
+     * instance active on the panel it would mute THAT one. Whether a disabled
+     * stream outlives close() is not documented and not measured; handing it
+     * back on our own instance costs one call in IDLE.
+     *
+     * @param {object} p - the native player
+     */
+    function releaseAudioStream(p) {
+      if (!audioStreamDisabled) {
+        return;
+      }
+      if (typeof p.enableAudioStream === 'function') {
+        attempt('enableAudioStream', () => p.enableAudioStream());
+      }
+      audioStreamDisabled = false;
     }
 
     /**
@@ -725,40 +789,19 @@
       preparedDurationMs =
         got.ok && typeof got.value === 'number' && got.value > 0 ? got.value : null;
 
-      // Silence belongs to THIS player, not to the TV. AVPlay's
-      // disableAudioStream() (TV since 6.5, B2B; allowed in IDLE/READY/
-      // PLAYING/PAUSED) switches off the audio of this instance only. The TV's
-      // own mute was the first port, and it has a cost the bench showed on
-      // 2026-11-10: the panel paints its crossed-speaker OSD at every stream
-      // start while muted, and AVPlay starts a stream at every seam -- an icon
-      // blinking over the customer's content all day. Per clip, because the
-      // API leaves re-enabling to the application and says nothing about
-      // open(). Whether a second call is a no-op is not documented; it has
-      // not misbehaved. The TV mute stays as the fallback for a panel that
-      // lacks the method or refuses it -- with its OSD, which is still better
-      // than an audible salon. A refusal is remembered for the instance:
-      // trying again every clip would log a line per seam and overwrite
-      // lastError with a failure that play() survives.
-      let silenced = false;
-      if (!audioStreamRefused && typeof p.disableAudioStream === 'function') {
-        silenced = attempt('disableAudioStream', () => p.disableAudioStream()).ok;
-        if (!silenced) {
-          audioStreamRefused = true;
-        }
-      }
-      if (!silenced) {
-        muteAudio();
-      }
+      silenceAudio(p);
 
       // Rule 4: here, between prepare and play -- not before, not on a timer.
       release();
 
       const played = attempt('play', () => p.play());
       if (!played.ok) {
-        // Nothing is going to play, so nothing justifies holding the panel's
-        // mute. The caller drops to the <video> path from here, and that path
-        // never calls stop(), so this is the last chance to hand it back.
+        // Nothing is going to play, so nothing justifies holding either kind
+        // of silence. The caller drops to the <video> path from here without
+        // close(), so this is the last chance to hand back the TV mute AND the
+        // per-player stream.
         restoreAudio();
+        releaseAudioStream(p);
         return { ok: false, durationMs: null };
       }
       return { ok: true, durationMs: preparedDurationMs };
@@ -786,9 +829,9 @@
       release();
       // The mute is NOT restored here. stop() runs at every video->image
       // seam, so restoring would toggle the panel's mute once per boundary
-      // in a mixed playlist -- and if this firmware shows its own OSD for a
-      // programmatic mute, that is an icon blinking over the customer's
-      // content all day. The mute belongs to the session, so close() is what
+      // in a mixed playlist -- and this firmware DOES show its own
+      // OSD for a programmatic mute (bench, 2026-11-10): an icon blinking over
+      // the customer's content all day. The mute belongs to the session, so close() is what
       // hands it back.
     }
 
@@ -809,15 +852,14 @@
       if (!p) {
         return;
       }
-      // Samsung puts enable/disable of the audio stream on the application.
-      // Whether a disabled stream outlives close() on the system player is
-      // not documented and not measured; handing it back costs one call in
-      // IDLE (allowed) and keeps the next app, or the panel's own player, from
-      // inheriting our silence.
-      if (typeof p.enableAudioStream === 'function') {
-        attempt('enableAudioStream', () => p.enableAudioStream());
-      }
+      releaseAudioStream(p);
       attempt('close', () => p.close());
+      // Per-instance state dies with the instance. The wrapper is normally
+      // dropped after close() too (main.js nulls it), but a refusal or a
+      // rotation measured on one native instance must not be carried onto a
+      // fresh one by a caller that keeps the wrapper.
+      audioStreamRefused = false;
+      lastSentRotation = null;
     }
 
     /** Is there a clock to poll at all? Knowable without calling it. */

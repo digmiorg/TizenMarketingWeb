@@ -556,6 +556,71 @@ test('createPlayer: close() hands the audio stream back, so the next instance do
   assert.ok(panel.calls.indexOf('enableAudioStream') < panel.calls.indexOf('close'), 'enable must come before close()');
 });
 
+test('createPlayer: a disable that FAILS after an earlier success is "already silent", not a refusal', () => {
+  // Whether a second disableAudioStream() on an already silent instance is a
+  // no-op is undocumented. Reading its failure as a refusal would mute the
+  // TV on top of a disabled stream -- and bring the blinking OSD straight
+  // back for the rest of the session, the exact symptom this fixes.
+  let calls = 0;
+  const panel = fakePanel({ disableAudioStream: () => { calls += 1; if (calls > 1) { throw new Error('InvalidStateError'); } return 'OK'; } });
+  const player = makePlayer(panel);
+
+  player.play('http://example/a.mp4', { width: 1080, height: 1920 });
+  const second = player.play('http://example/b.mp4', { width: 1080, height: 1920 });
+  player.play('http://example/c.mp4', { width: 1080, height: 1920 });
+
+  assert.equal(second.ok, true);
+  assert.equal(panel.args.setMute, undefined, 'the TV was muted on top of a stream that is already silent');
+  assert.equal(panel.args.disableAudioStream.length, 3, 'a failure after a success must not latch a refusal');
+});
+
+test('createPlayer: enableAudioStream is only called for a stream WE disabled, and a throw does not block close()', () => {
+  // enableAudioStream() is a SWITCH between instances: on an instance that
+  // never disabled anything it would throw (NONE) or mute another instance.
+  // And whatever it answers, p.close() must still run -- a skipped close()
+  // leaves the instance allocated to a dead page until the panel restarts.
+  const never = fakePanel();
+  const a = makePlayer(never);
+  a.freeze();
+  a.close();
+  assert.equal(never.calls.indexOf('enableAudioStream'), -1, 'enable was called on an instance that never disabled');
+  assert.ok(never.calls.indexOf('close') > -1);
+
+  const refused = fakePanel({ disableAudioStream: () => { throw new Error('NotSupportedError'); } });
+  const b = makePlayer(refused);
+  b.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+  b.close();
+  assert.equal(refused.calls.indexOf('enableAudioStream'), -1, 'enable was called after a refused disable');
+
+  const throwing = fakePanel({ enableAudioStream: () => { throw new Error('InvalidStateError'); } });
+  const c = makePlayer(throwing);
+  c.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+  c.close();
+  assert.ok(throwing.calls.indexOf('enableAudioStream') > -1);
+  assert.ok(throwing.calls.indexOf('close') > throwing.calls.indexOf('enableAudioStream'), 'a throwing enable blocked close()');
+});
+
+test('createPlayer: a play() that fails hands the audio stream back too, and a refusal is forgotten by close()', () => {
+  // The caller drops to <video> without close() after a failed play(), so
+  // both kinds of silence are released there. And a refusal belongs to the
+  // native instance: after close() a fresh instance gets the per-player
+  // switch tried again rather than the TV mute with its OSD.
+  const failing = fakePanel({ play: () => { throw new Error('UnknownError'); } });
+  const a = makePlayer(failing);
+  const result = a.play('http://example/clip.mp4', { width: 1080, height: 1920 });
+  assert.equal(result.ok, false);
+  assert.ok(failing.calls.indexOf('enableAudioStream') > failing.calls.indexOf('disableAudioStream'), 'the stream stayed disabled after a failed play()');
+
+  let refuse = true;
+  const panel = fakePanel({ disableAudioStream: () => { if (refuse) { throw new Error('NotSupportedError'); } return 'OK'; } });
+  const b = makePlayer(panel);
+  b.play('http://example/a.mp4', { width: 1080, height: 1920 });
+  b.close();
+  refuse = false;
+  b.play('http://example/b.mp4', { width: 1080, height: 1920 });
+  assert.equal(panel.args.disableAudioStream.length, 2, 'a refusal on the old instance was carried onto the new one');
+});
+
 test('createPlayer: without the per-player switch, playback is silent via the TV mute, and close() puts it back', () => {
   // The <video> element carried `muted`, scoped to the element. On a panel
   // without disableAudioStream this reaches for the TV's own mute - which
