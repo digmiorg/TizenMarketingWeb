@@ -503,6 +503,16 @@ function updateStageGeometry() {
   // tell an engineer what is actually being shown. The rect is not reported
   // because this file no longer chooses one -- it is always the full screen,
   // with setDisplayMethod deciding the letterbox inside it.
+  if (window.avplayCovering) {
+    // A clip is starting BEHIND the still on the stage; the still is what
+    // is on the glass until the clock has moved. Saying "image" here would
+    // hide the one fact a dead-plane diagnosis needs.
+    readout.textContent = 'viewport ' + viewport + ', avplay starting behind the still (covered), rect ' +
+      (window.avplayRect || '?') + ', rotation ' + (window.avplayRotation || 'unset');
+
+    return;
+  }
+
   if (window.avplayOnPlane) {
     readout.textContent = 'viewport ' + viewport + ', avplay rect ' + (window.avplayRect || '?') +
       ' (letterboxed), rotation ' + (window.avplayRotation || 'unset') +
@@ -1127,6 +1137,60 @@ function displayMediaContent(data) {
         }
       }
 
+      /**
+       * Take the still down once the new stream's clock has moved.
+       *
+       * The probe's watchStart(), ported: poll getCurrentTime() every 16 ms,
+       * remember the first reading as the base, and when the clock is more
+       * than 150 ms past it the picture is live -- hold the cover 250 ms
+       * more (an engine can report a clock a frame before it paints), then
+       * clear the stage. Numbers are the probe's, measured; not retuned.
+       *
+       * The deadline is the one case a cover must NOT win: a clock that never
+       * moves is a dead plane, and a still that hides it forever is a screen
+       * nobody knows is broken. After 5 s the still comes down and the log
+       * says so. The error path does not come here: a refused play() falls
+       * to the <video> branch, which clears the stage itself.
+       *
+       * Guarded on the render token and the generation on every tick, so a
+       * newer render or a teardown owns the stage from then on.
+       */
+      function dropStillWhenClockMoves(token) {
+        const gate = window.DigmiAvplay.coverGate({ hasClock: avplay.hasClock() });
+        const since = monotonicNow();
+        const drop = () => {
+          if (token !== renderToken || !isCurrentGeneration()) {
+            return; // a newer render owns the stage and its own flag
+          }
+          window.avplayCovering = false;
+          // Same paint: the page goes transparent as the still goes away.
+          setPlaneVisible(true);
+          clearStage();
+          updateStageGeometry();
+        };
+        const poll = setInterval(() => {
+          if (token !== renderToken || !isCurrentGeneration()) {
+            clearInterval(poll);
+            return;
+          }
+          // One quiet read per tick (currentTime() does not log). A missing
+          // clock was declared to the gate up front; a throwing one is 'wait',
+          // bounded to a second, because right after play() the player may
+          // simply not be PLAYING yet.
+          const decision = gate.tick(avplay.currentTime(), monotonicNow() - since);
+          if (decision === 'wait') {
+            return;
+          }
+          clearInterval(poll);
+          if (decision === 'drop-now') {
+            console.log('[avplay] no picture within the deadline: dropping the still over a plane that never moved');
+            drop();
+            return;
+          }
+          setTimeout(drop, gate.holdMs);
+        }, 16);
+      }
+
       /** Two frames, so the browser has actually painted before we continue. */
       function afterPaint() {
         return new Promise((resolve) => {
@@ -1181,6 +1245,12 @@ function displayMediaContent(data) {
         // plane for 20 s behind a 30 s slot -- derived from the code, not
         // seen on a panel.
         slotEndsAt = 0;
+        // Every render starts uncovered. The flag is otherwise cleared only by
+        // drop(), and a render that is superseded while its still is covering
+        // never reaches drop() -- the HUD would then say "covered" over the
+        // next clip, image or pairing view, in the one view that exists for
+        // diagnosis.
+        window.avplayCovering = false;
         const isVideo = !!mediaItem.video;
         const fullsize = mediaItem.fullsize_url || mediaItem.fullsize;
         // The blurred backdrop behind the slide. It is NOT one source for both
@@ -1208,6 +1278,15 @@ function displayMediaContent(data) {
           ? window.DigmiAvplay.seamPlan(onScreenKind, isVideo ? 'video' : 'image')
           : { freeze: false, coverMustBePainted: false };
 
+        // Rule 1, in ONE place and before anything asynchronous: leaving a
+        // video freezes the plane, whatever is arriving. The frozen frame is
+        // what the viewer sees for the length of stop/open/prepare (video),
+        // or of the decode until the image is painted over it (image). A
+        // plane that is not held has nothing to freeze.
+        if (useAvplay && seam.freeze && planeHeld) {
+          avplay.freeze();
+        }
+
         /** The caption, which is independent of how the media is rendered. */
         function updateCaption() {
           if (mediaItem.campaign_name || mediaItem.campaignName) {
@@ -1219,13 +1298,17 @@ function displayMediaContent(data) {
         }
 
         if (useAvplay && isVideo) {
-          // Freeze BEFORE the stage is touched. The frozen frame is what the
-          // viewer sees for the length of stop/open/prepare, and the player
-          // releases it between prepare() and play().
-          if (seam.freeze) {
-            avplay.freeze();
+          // A still on the stage is NOT cleared here. It is the cover: the
+          // page is opaque under it, so open/prepare/play happen behind it,
+          // and it comes down only once the new stream's clock has actually
+          // moved (the probe's startBehindCard). Clearing first showed the
+          // page's dark background until the first frame -- black at every
+          // image->video seam on the bench, 2026-11-10. Video->video has no
+          // still to keep, and the freeze covers that seam.
+          const stillCovers = onScreenKind === 'image';
+          if (!stillCovers) {
+            clearStage();
           }
-          clearStage();
           const result = avplay.play(fullsize, {
             width: window.innerWidth,
             height: window.innerHeight,
@@ -1242,7 +1325,17 @@ function displayMediaContent(data) {
             avplayDurationMs = result.durationMs;
             planeHeld = true;
             loopsDisabledUntilNextPlay = false;
-            setPlaneVisible(true);
+            // With a still covering, the page stays OPAQUE until the still
+            // comes down: the blurred backdrop has soft edges, and a
+            // transparent page under it would show the plane through them.
+            // The drop makes the page transparent and empties the stage in
+            // the same paint, revealing a plane that is already live.
+            if (stillCovers) {
+              window.avplayCovering = true;
+              dropStillWhenClockMoves(mine);
+            } else {
+              setPlaneVisible(true);
+            }
             // The Stage readout is the line a bench reads to see which
             // rotation and rect THIS clip got (onRotation has already run
             // inside play()). Nothing else refreshes it on a clip start, so
@@ -1346,6 +1439,7 @@ function displayMediaContent(data) {
         slotEndsAt = 0;
         avplayDurationMs = null;
         planeHeld = false;
+        window.avplayCovering = false;
         if (andClose) {
           // Hands the instance back to the system. Without it the player
           // stays allocated to a page that is going away, and the next

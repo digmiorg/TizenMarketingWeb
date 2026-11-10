@@ -107,13 +107,18 @@
   /**
    * What a seam needs, given what is leaving and what is arriving.
    *
-   * `freeze` is rule 3: the plane is about to be torn down with nothing
-   * opaque over it. `coverMustBePainted` says the arriving item is itself the
-   * cover, so the caller must not touch the plane until that item is decoded
-   * AND painted -- an image that has merely been asked for is transparent,
-   * and the plane shows through for the whole decode.
+   * `freeze` is rule 1: LEAVING a video is what needs the freeze, whatever
+   * comes next. The probe's own words, in its advance(): "A card is opaque,
+   * but it is not opaque until it is PAINTED, and the plane does not hold
+   * its last frame on its own: the bench showed black here." An arriving
+   * image lands only after an asynchronous decode, and a stream that ends
+   * during that decode leaves a black plane behind a transparent page.
+   * `coverMustBePainted` says the arriving item is itself the cover, so the
+   * caller must not stop the plane until that item is decoded AND painted.
    *
-   * Leaving an image needs neither: there is no stream to tear down.
+   * Leaving an image needs neither: there is no stream to tear down. What
+   * it DOES need is for the still to stay up until the new clock has moved
+   * -- that is the caller's job (the probe's startBehindCard), not a flag.
    *
    * @param {('video'|'image'|'none')} from
    * @param {('video'|'image'|'none')} to
@@ -123,12 +128,86 @@
     const leavingVideo = from === 'video';
     const arrivingImage = to === 'image';
     return {
-      // Leaving a video always needs the freeze EXCEPT when an opaque image
-      // is arriving to cover the plane itself. A decoded, painted image is a
+      // An earlier version exempted video->image ("a painted image is a
       // complete cover, and freezing as well would hold a frame nobody can
-      // see while risking a stuck freeze on the error paths.
-      freeze: leavingVideo && !arrivingImage,
+      // see"). It was wrong by exactly the decode: seen black on the bench
+      // 2026-11-10, video->image, after the port shipped. The freeze is
+      // released by the next play() and by stop() under the cover; no path
+      // leaves it held.
+      freeze: leavingVideo,
       coverMustBePainted: arrivingImage && leavingVideo,
+    };
+  }
+
+  /**
+   * When to take a still down that is covering a starting clip.
+   *
+   * The probe's watchStart(), as a decision without a timer: the caller
+   * polls the player's clock and feeds each reading here, with the time
+   * elapsed since the clip was started. Measured numbers, not retuned:
+   * 150 ms of clock progress past the first reading means the picture is
+   * live, 250 ms more of hold covers an engine that reports a frame before
+   * it paints, and 5 s with a clock that never moves is a dead plane that a
+   * still must not hide.
+   *
+   * ABSENCE and FAILURE are different things, and the probe kept them apart:
+   * its watchStart() catches a throwing getCurrentTime() and keeps waiting.
+   * A clock that is MISSING (`hasClock: false`, known synchronously from
+   * `typeof`) cannot be waited for, so the still comes down after the hold --
+   * otherwise every clip after an image would lose its first five seconds. A
+   * clock that is present but answers nothing (a throw, a non-number) is
+   * 'wait': right after play() the player may not be PLAYING yet, and
+   * dropping the still then is the black seam this gate exists to prevent.
+   * Bounded, though: nothing for a whole second (`maxNullMs`) is a player
+   * that has left PLAYING, and that is a dead plane, dropped now.
+   *
+   * @param {{hasClock?: boolean, progressMs?: number, holdMs?: number, deadlineMs?: number, maxNullMs?: number}} [opts]
+   * @returns {{ tick(t: (number|null), elapsedMs: number): ('wait'|'drop-after-hold'|'drop-now'), holdMs: number }}
+   */
+  function coverGate(opts) {
+    const o = opts || {};
+    const hasClock = o.hasClock === undefined ? true : !!o.hasClock;
+    const progressMs = o.progressMs === undefined ? 150 : o.progressMs;
+    const holdMs = o.holdMs === undefined ? 250 : o.holdMs;
+    const deadlineMs = o.deadlineMs === undefined ? 5000 : o.deadlineMs;
+    const maxNullMs = o.maxNullMs === undefined ? 1000 : o.maxNullMs;
+    let base = null;
+    let decided = false;
+    let nullSince = null;
+    return {
+      holdMs,
+      tick(t, elapsedMs) {
+        if (decided) {
+          return 'wait';
+        }
+        if (!hasClock) {
+          decided = true;
+          return 'drop-after-hold';
+        }
+        if (elapsedMs > deadlineMs) {
+          decided = true;
+          return 'drop-now';
+        }
+        if (t === null) {
+          if (nullSince === null) {
+            nullSince = elapsedMs;
+          } else if (elapsedMs - nullSince > maxNullMs) {
+            decided = true;
+            return 'drop-now';
+          }
+          return 'wait';
+        }
+        nullSince = null;
+        if (base === null || t < base) {
+          base = t;
+          return 'wait';
+        }
+        if (t > base + progressMs) {
+          decided = true;
+          return 'drop-after-hold';
+        }
+        return 'wait';
+      },
     };
   }
 
@@ -706,14 +785,32 @@
       attempt('close', () => p.close());
     }
 
-    /** The millisecond position of the current stream, or null. */
-    function currentTime() {
+    /** Is there a clock to poll at all? Knowable without calling it. */
+    function hasClock() {
       const p = player;
-      if (!p || typeof p.getCurrentTime !== 'function') {
+      return !!p && typeof p.getCurrentTime === 'function';
+    }
+
+    /**
+     * The millisecond position of the current stream, or null.
+     *
+     * Read QUIETLY, not through attempt(): the cover gate polls this every
+     * 16 ms, and a player that has left PLAYING throws on every call, which
+     * through attempt() is a log line per tick and a `lastError` that keeps
+     * being overwritten. The gate bounds the streak and decides; this only
+     * answers. NaN is null: it compares as neither more nor less than the
+     * base, and the still would sit over a live clip until the deadline.
+     */
+    function currentTime() {
+      if (!hasClock()) {
         return null;
       }
-      const got = attempt('getCurrentTime', () => p.getCurrentTime());
-      return got.ok && typeof got.value === 'number' ? got.value : null;
+      try {
+        const t = player.getCurrentTime();
+        return typeof t === 'number' && Number.isFinite(t) ? t : null;
+      } catch (e) {
+        return null;
+      }
     }
 
     api.play = play;
@@ -722,6 +819,7 @@
     api.freeze = freeze;
     api.release = release;
     api.currentTime = currentTime;
+    api.hasClock = hasClock;
     api.durationMs = function () {
       return preparedDurationMs;
     };
@@ -736,6 +834,7 @@
 
   const moduleApi = {
     seamPlan: seamPlan,
+    coverGate: coverGate,
     isAvailable: isAvailable,
     createPlayer: createPlayer,
   };

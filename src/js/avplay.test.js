@@ -1,16 +1,110 @@
 // Run: node --test src/js/avplay.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { seamPlan, isAvailable, createPlayer } = require('./avplay.js');
+const { seamPlan, coverGate, isAvailable, createPlayer } = require('./avplay.js');
 
 test('seamPlan: leaving a video for another video needs the freeze', () => {
   assert.deepEqual(seamPlan('video', 'video'), { freeze: true, coverMustBePainted: false });
 });
 
-test('seamPlan: an arriving image is the cover, and must be painted first', () => {
+test('coverGate: the still comes down after the hold once the clock has moved 150 ms past its first reading', () => {
+  // The probe's watchStart(): base is the first reading, and an earlier
+  // clock (the previous stream's) resets it rather than counting as progress.
+  const gate = coverGate();
+  assert.equal(gate.tick(900, 16), 'wait', 'the first reading is the base, not progress');
+  assert.equal(gate.tick(1000, 32), 'wait', '100 ms is under the 150 ms gate');
+  assert.equal(gate.tick(40, 48), 'wait', 'a clock that went back is a new base');
+  assert.equal(gate.tick(150, 64), 'wait', '110 ms past the NEW base is still under the gate');
+  assert.equal(gate.tick(200, 80), 'drop-after-hold');
+  assert.equal(gate.tick(300, 96), 'wait', 'decided once; later ticks are inert');
+  assert.equal(gate.holdMs, 250);
+});
+
+test('coverGate: a clock that never moves hits the 5 s deadline and drops NOW, logged by the caller', () => {
+  const gate = coverGate();
+  assert.equal(gate.tick(500, 16), 'wait');
+  assert.equal(gate.tick(500, 4999), 'wait');
+  assert.equal(gate.tick(500, 5001), 'drop-now');
+});
+
+test('coverGate: a MISSING clock drops after the hold; a clock that merely FAILS first is waited for', () => {
+  // Absence is known synchronously (typeof) and cannot be waited for, or
+  // every clip after an image would lose its first five seconds. A throw on
+  // the first tick is different: right after play() the player may not be
+  // PLAYING yet, and dropping the still then is the black seam this gate
+  // exists to prevent -- the probe's watchStart() catches and keeps waiting.
+  const missing = coverGate({ hasClock: false });
+  assert.equal(missing.tick(null, 16), 'drop-after-hold');
+
+  const slowStart = coverGate();
+  assert.equal(slowStart.tick(null, 16), 'wait', 'a first-tick failure dropped the still');
+  assert.equal(slowStart.tick(null, 200), 'wait');
+  assert.equal(slowStart.tick(0, 400), 'wait', 'the first real reading is the base');
+  assert.equal(slowStart.tick(200, 500), 'drop-after-hold');
+
+  const glitch = coverGate();
+  assert.equal(glitch.tick(100, 16), 'wait');
+  assert.equal(glitch.tick(null, 32), 'wait');
+  assert.equal(glitch.tick(300, 48), 'drop-after-hold');
+});
+
+test('createPlayer: currentTime() is quiet and finite, and hasClock() is a typeof check', () => {
+  // NaN compares as neither more nor less than the base, so a NaN clock
+  // would hold the still over a live clip until the deadline. And a throwing
+  // clock must not log per tick: the gate polls it every 16 ms.
+  const lines = [];
+  const nan = fakePanel();
+  nan.player.getCurrentTime = () => NaN;
+  const a = makePlayer(nan, { log: (line) => lines.push(line) });
+  a.play('http://example/clip.mp4', { width: 1920, height: 1080 });
+  assert.equal(a.currentTime(), null, 'NaN was handed to the gate as a number');
+  assert.equal(a.hasClock(), true);
+
+  const throwing = fakePanel();
+  throwing.player.getCurrentTime = () => { throw new Error('InvalidStateError'); };
+  const b = makePlayer(throwing, { log: (line) => lines.push(line) });
+  b.play('http://example/clip.mp4', { width: 1920, height: 1080 });
+  const before = lines.length;
+  for (let i = 0; i < 50; i++) {
+    assert.equal(b.currentTime(), null);
+  }
+  assert.equal(lines.length, before, 'a throwing clock logged on every poll');
+
+  const absent = fakePanel();
+  delete absent.player.getCurrentTime;
+  const c = makePlayer(absent);
+  c.play('http://example/clip.mp4', { width: 1920, height: 1080 });
+  assert.equal(c.hasClock(), false);
+  assert.equal(c.currentTime(), null);
+});
+
+test('coverGate: a clock that stops answering for a whole second is a dead plane, dropped NOW', () => {
+  // A player that left PLAYING throws on every call. Waiting the full 5 s
+  // deadline would hide a dead plane behind the still for five seconds per
+  // seam; a second of nothing is enough to know. The deadline still wins
+  // first when it comes first.
+  const gate = coverGate();
+  assert.equal(gate.tick(100, 16), 'wait');
+  assert.equal(gate.tick(null, 32), 'wait');
+  assert.equal(gate.tick(null, 900), 'wait');
+  assert.equal(gate.tick(null, 1040), 'drop-now');
+
+  const late = coverGate();
+  assert.equal(late.tick(100, 4500), 'wait');
+  assert.equal(late.tick(null, 4600), 'wait');
+  assert.equal(late.tick(null, 5001), 'drop-now', 'the deadline must be checked before the null branch');
+});
+
+test('seamPlan: an arriving image is the cover, must be painted first - and the video is STILL frozen', () => {
+  // The port shipped with this seam exempted from the freeze ("a painted
+  // image is a complete cover") and the bench showed black at every
+  // video->image seam: the image lands only after an asynchronous decode,
+  // and a stream that ends inside that window leaves a black plane. Rule 1,
+  // in the probe's words: "LEAVING a video is what needs the freeze,
+  // whatever comes next."
   // The decisive one. An image that has merely been asked for is transparent,
   // and the plane shows through for the whole decode.
-  assert.deepEqual(seamPlan('video', 'image'), { freeze: false, coverMustBePainted: true });
+  assert.deepEqual(seamPlan('video', 'image'), { freeze: true, coverMustBePainted: true });
 });
 
 test('seamPlan: leaving an image needs nothing - there is no stream to tear down', () => {
