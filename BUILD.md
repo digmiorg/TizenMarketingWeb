@@ -1,9 +1,11 @@
 # Building and releasing DigmiMarketing
 
-The widget's source lives in `src/`. Everything under `production/` and
-`staging/` is build output.
+The widget's source lives in `src/`. Everything under `production/`,
+`staging/` and `b2b/` is build output.
 
-Releases go through two workflows, not a laptop. **Release widget** builds,
+Releases to `production/` go through two workflows, not a laptop (`b2b/` is the
+exception: built by `scripts/build-wgt.sh`, re-signed by Samsung's tool and
+committed by hand — see README). **Release widget** builds,
 signs and publishes `production/<version>/`. **Promote release** copies an
 already-published version into the two directories the fleet follows, and never
 builds or signs anything. Before they existed the package was built by hand in
@@ -11,19 +13,19 @@ Tizen Studio, which is how `production/latest/` came to serve 1.0.7 while 1.0.9
 sat unreleased beside it — the fleet follows `latest/`, so no screen ever saw
 it.
 
-## Two channels, and this file mostly describes one of them
+## Three channels, and this file mostly describes one of them
 
-A screen can get this widget two different ways, and until 2026-11-09 only the
-first was written down here.
+A screen can get this widget three different ways; until 2026-11-09 only the
+first was written down here, and the third arrived on 2026-11-10.
 
-| | **SSSP** (`production/`) | **TV Seller Office** (the store) |
-| --- | --- | --- |
-| Built by | `scripts/build-wgt.sh` + the two workflows | `scripts/build-seller-office-wgt.sh` |
-| Signed with | one of our own certificate profiles | nothing; the signature is copied |
-| Who verifies the signature | the panel, on download | Samsung, at upload |
-| Tizen ID | `E1lTJzhcnm.DigmiMarketing` | `E1lTJzhcnm.DigmiSignage` |
-| `<name>` | `DigmiMarketing` | `Digmi Marketing` |
-| Everything below this section | applies | does **not** apply |
+| | **SSSP** (`production/`) | **TV Seller Office** (the store) | **TBM Custom App (URL)** (`b2b/`) |
+| --- | --- | --- | --- |
+| Built by | `scripts/build-wgt.sh` + the two workflows | `scripts/build-seller-office-wgt.sh` | `scripts/build-wgt.sh`, then Seller Office's *B2B App Certificate Re-signing Tool*, by hand |
+| Signed with | one of our own certificate profiles | nothing; the signature is copied | our author signature kept; distributor replaced by Samsung's `VD B2B Distributor Partner Signer` (no DUID) |
+| Who verifies the signature | the panel, on download | Samsung, at upload | the panel, on download |
+| Tizen ID | `E1lTJzhcnm.DigmiMarketing` | `E1lTJzhcnm.DigmiSignage` | `E1lTJzhcnm.DigmiMarketing` |
+| `<name>` | `DigmiMarketing` | `Digmi Marketing` | `DigmiMarketing` |
+| Everything below this section | applies | does **not** apply | applies to the build; the serving is described in README only |
 
 There is one `src/config.xml` and it holds the SSSP values. The store build
 rewrites the Tizen ID, `<name>` and `<tizen:profile>` in a staged copy, taking
@@ -509,18 +511,25 @@ row is the honest answer to a question Samsung's own pages leave open for
 sideloaded apps: it does not block the renewal, and it does not pretend the
 renewal is proven. **Watch the first screen take that update.**
 
-None of this is theoretical here. The three published packages carry three
-different keys, not merely three certificates (measured 2026-11-03 with
-`scripts/author-identity.sh`):
+None of this is theoretical here. The published packages carry four
+different keys, not merely four certificates (the first three measured
+2026-11-03, the fourth 2026-11-10, with `scripts/author-identity.sh`):
 
 | Release | Signing key | Author certificate |
 | --- | --- | --- |
 | 1.0.5 | `b279b279…` | `7461c1fb…`, `CN=Digmi AB` |
 | 1.0.7 (live) | `c442303c…` | `e318dc37…`, `CN=Digmi`, Tizen Developers CA, expires **2027-01-01** |
 | 1.0.9 | `b31d589c…` | `35c211a7…` (never distributable: different key, already expired) |
+| 1.0.13 (`b2b/`, 2026-11-10) | `c0d67d24…` | `670295c0…`, `O=Digmi Sweden AB`, Samsung VD Author CA, expires **2027-11-03**; distributor re-signed by Samsung, expires 2027-01-01 |
 
 The key changed at every release, which is why the fleet cannot be updated from
 a laptop that happens to have a certificate on it.
+
+The fourth row is served from Pages under `b2b/` and carries a fourth key. All
+four packages share the package id `E1lTJzhcnm`, so — if Tizen keys the author
+check on the package id, as its package model suggests and no panel has yet
+measured — none of them can update a display that runs another; the display
+must be emptied first.
 
 Every build prints the key, the certificate and the expiry, and warns at 90 and
 then 30 days out — because a certificate that lapses before the next release
@@ -572,6 +581,14 @@ This is the question that decides whether display number 51 can be sold, and it
 is the one to put to Samsung in their own vocabulary: *does distributing a
 signage Custom App through Seller Office and TBM replace the pseudo-distributor
 certificate, as app-store submission does?*
+
+**Part of the answer arrived on 2026-11-10.** Seller Office → Tools has a *B2B
+App Certificate Re-signing Tool*: upload a .wgt, get it back with the
+distributor signature replaced by Samsung's `VD B2B Distributor Partner Signer`,
+which names no DUID at all. That package is committed under `b2b/` (see
+README). Still unconfirmed: that a panel installs it through TBM Custom App
+(URL) — the first run is pending — and that the same swap happens to a store
+submission on its way to the fleet.
 
 ### The production route as Samsung describes it
 
