@@ -134,7 +134,7 @@ if certs:
         f.write(base64.b64decode(re.sub(r'\s', '', certs[0])))
 PY
 
-    if [ -f "$WORK/pkg/author-signature.xml" ] && [ ! -f "$WORK/author.der" ]; then
+    if [ ! -f "$WORK/author.der" ]; then
         # A signature with no certificate in it is one no display can bind
         # an author to, and one no gate here can compare.
         bad "author-signature.xml carries no X509Certificate"

@@ -36,6 +36,12 @@
 # tree, for when ROOT is somewhere else (the publish guard checks the
 # assembled site's copy at _site/b2b).
 #
+# A deliberate change of author key - the channel moving to a new key, which
+# means every panel on it has to be emptied and re-pointed - is sanctioned by
+# committing the new key's sha256 to .github/b2b-accept-key (or passing it as
+# CHECK_B2B_ACCEPT_KEY). That file is in the pull request's diff, so the
+# rotation is reviewed where it happens instead of by merging a red check.
+#
 # With CHECK_B2B_FAILED_LIST set to a file path, the directories that failed
 # are written there one per line, so the publish guard can drop exactly
 # those from the site and keep the rest serving.
@@ -56,7 +62,7 @@ trap 'echo "cannot check: unexpected error at line $LINENO"; exit 2' ERR
 tmpfiles=''
 trap 'rm -f $tmpfiles' EXIT
 
-for tool in unzip openssl python3 sed diff cmp mktemp find basename git; do
+for tool in unzip openssl python3 sed cmp mktemp find basename git; do
     command -v "$tool" >/dev/null 2>&1 || { echo "cannot check: $tool is not installed"; exit 2; }
 done
 
@@ -81,18 +87,8 @@ package_version() {
     unzip -p "$1" config.xml | sed -n 's|.*<widget [^>]*version="\([0-9.]*\)".*|\1|p' | head -1 || true
 }
 
-# Two trees byte-identical? 0 yes, 1 no; anything diff cannot do is "could
-# not check" (diff inside an `if` would not reach the ERR trap).
-same_tree() {
-    local rc=0
-    diff -rq "$1" "$2" >/dev/null 2>&1 || rc=$?
-    case "$rc" in
-        0|1) return "$rc" ;;
-        *) echo "cannot check: diff failed ($rc) comparing $1 with $2"; exit 2 ;;
-    esac
-}
-
-# Two files byte-identical? Same contract as same_tree.
+# Two files byte-identical? 0 yes, 1 no; anything cmp cannot do is "could not
+# check" (cmp inside an `if` would not reach the ERR trap).
 same_file() {
     local rc=0
     cmp -s "$1" "$2" || rc=$?
@@ -115,6 +111,18 @@ extra_entries() {
             *) printf '%s ' "$(basename "$n")" ;;
         esac
     done
+}
+
+# Do two directories serve the same package - same descriptor, same
+# <widgetname>.wgt? Stray entries beside them do not count here; they are
+# a fault of the directory that carries them, not of the package.
+same_pkg() {
+    local a="$1" b="$2" wa wb
+    wa="$(widgetname_of "$a/sssp_config.xml")"; wb="$(widgetname_of "$b/sssp_config.xml")"
+    [ "$wa" = "$wb" ] || return 1
+    [ -f "$a/$wa.wgt" ] && [ -f "$b/$wb.wgt" ] || return 1
+    same_file "$a/sssp_config.xml" "$b/sssp_config.xml" || return 1
+    same_file "$a/$wa.wgt" "$b/$wb.wgt"
 }
 
 # A semver as the integer <ver> build-wgt.sh derives: major*10000+minor*100+patch.
@@ -190,17 +198,19 @@ for entry in "$ROOT"/*/; do
         mark_failed "$dir"
         continue
     fi
-    extra="$(extra_entries "$dir" "$(widgetname_of "$dir/sssp_config.xml")")"
+    widget="$(widgetname_of "$dir/sssp_config.xml")"
+    # A stray entry beside the descriptor and the package is a fault of this
+    # directory - it is withheld - but not of the package: the checks below
+    # still run, and a latest/ that serves the same package is still vouched
+    # for by it.
+    extra="$(extra_entries "$dir" "$widget")"
     if [ -n "$extra" ]; then
         echo "  FAIL  unexpected entries beside the descriptor and the package: $extra"
         mark_failed "$dir"
-        continue
     fi
     [ "$name" = latest ] && continue
 
-    # extra_entries has left exactly the descriptor and <widgetname>.wgt;
-    # the display asks for that file and nothing else.
-    widget="$(widgetname_of "$dir/sssp_config.xml")"
+    # The display asks for <widgetname>.wgt and nothing else.
     wgt="$dir/$widget.wgt"
     if [ ! -f "$wgt" ]; then
         echo "  FAIL  the descriptor advertises <widgetname>$widget</widgetname> but $widget.wgt is not here, so a display would 404"
@@ -304,21 +314,26 @@ elif is_failed "$ROOT/latest"; then
 else
     # A good version directory it mirrors is what counts; a stray copy of
     # the same bytes under a bad name does not take latest/ down with it.
+    # versions holds the directories whose PACKAGE passed every check (a
+    # stray entry beside it may still have failed the directory). One of
+    # them serving the same package vouches for latest/.
     match=''
     for dir in ${versions[@]+"${versions[@]}"}; do
-        if same_tree "$ROOT/latest" "$dir"; then
+        if same_pkg "$ROOT/latest" "$dir"; then
             match="$dir"
             break
         fi
     done
-    # No good one: byte-identical to a directory that failed means it
-    # carries the same fault, and it is the directory every panel follows.
-    # Checked before "no version directory" so a mirrored fault is never
-    # hidden behind that.
+    # None: the same package as a directory whose package failed means
+    # latest/ carries the same fault, and it is the directory every panel
+    # follows. Checked before "no version directory" so a mirrored fault is
+    # never hidden behind that.
     mirrored_fault=''
     if [ -z "$match" ]; then
         for dir in ${candidates[@]+"${candidates[@]}"}; do
-            if is_failed "$dir" && same_tree "$ROOT/latest" "$dir"; then
+            is_failed "$dir" || continue
+            [ -f "$dir/sssp_config.xml" ] || continue
+            if same_pkg "$ROOT/latest" "$dir"; then
                 mirrored_fault="$dir"
                 break
             fi
@@ -327,9 +342,11 @@ else
     if [ -n "$mirrored_fault" ]; then
         echo "  FAIL  $ROOT/latest is identical to $mirrored_fault, which failed above"
         mark_failed "$ROOT/latest"
-    elif [ "${#versions[@]}" -eq 0 ]; then
-        echo "  FAIL  no version directory to compare $ROOT/latest with"
-        fail=1
+        elif [ "${#versions[@]}" -eq 0 ]; then
+        # No version directory vouches for it: not a proven package, and it
+        # is the directory every panel follows - withheld, not advisory.
+        echo "  FAIL  no version directory to compare $ROOT/latest with - latest/ must mirror a published version"
+        mark_failed "$ROOT/latest"
     elif [ -z "$match" ]; then
         echo "  FAIL  $ROOT/latest is not identical to any version directory"
         mark_failed "$ROOT/latest"
@@ -356,10 +373,26 @@ cert_of() {
     case "$c" in none) c='' ;; esac
     printf '%s' "$c"
 }
+rotating=0
+accept_key="${CHECK_B2B_ACCEPT_KEY:-}"
+if [ -z "$accept_key" ] && [ -f "$here/../.github/b2b-accept-key" ]; then
+    # First line, hex only: a trailing newline or a stray space is not a key.
+    accept_key="$(head -1 "$here/../.github/b2b-accept-key" | tr -cd '0-9a-f' || true)"
+fi
 ref_key=''
 ref_cert=''
 ref_src=''
-if [ -n "$base_key" ]; then
+if [ -n "$base_key" ] && [ "$latest_ok" -eq 1 ] && [ -n "$accept_key" ] \
+   && [ "$(key_of "$(printf '%s' "$ROOT"/latest/*.wgt)")" = "$accept_key" ] && [ "$accept_key" != "$base_key" ]; then
+    # A sanctioned rotation: latest/ carries exactly the accepted key, which
+    # is not the base's. The accepted key becomes the reference for every
+    # directory; the base's key is left behind on purpose.
+    lw=("$ROOT/latest"/*.wgt)
+    ref_key="$accept_key"; ref_cert="$(cert_of "${lw[0]}")"; ref_src="$ROOT/latest (rotation accepted by .github/b2b-accept-key)"
+    rotating=1
+    echo "== author key: ROTATION from $base_key ($CHECK_B2B_BASE) to $accept_key, accepted by .github/b2b-accept-key - every panel on the channel has to be emptied and re-pointed"
+    [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::b2b/ changes author key (accepted rotation) - panels on the channel will refuse the update until the app is uninstalled on them"
+elif [ -n "$base_key" ]; then
     ref_key="$base_key"; ref_cert="$(cert_of "$base_wgt_tmp")"; ref_src="$CHECK_B2B_BASE's $BASE_PATH/latest"
 elif [ "$base_has_latest" -eq 1 ]; then
     # The problem is in the base, not in this change: could not check.
@@ -390,6 +423,10 @@ if [ -n "$ref_key" ]; then
             echo "  FAIL  could not read the author key of $dir"
             mark_failed "$dir"
             key_fails=$((key_fails + 1))
+        elif [ "$rotating" -eq 1 ] && [ "$key" = "$base_key" ]; then
+            # The old key, during an accepted rotation: still what the
+            # panels not yet re-pointed can run. Kept.
+            echo "  ok    $dir still carries the old key $base_key - kept for panels not yet re-pointed"
         elif [ "$key" != "$ref_key" ]; then
             echo "  FAIL  $dir is signed with author key $key, not $ref_key - panels on the channel would refuse it"
             mark_failed "$dir"

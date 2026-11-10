@@ -84,7 +84,9 @@ jobs:
           kept="$(for d in _site/b2b/*/; do d="${d%/}"; [ "$(basename "$d")" = latest ] && continue; diff -rq _site/b2b/latest "$d" >/dev/null && echo "$d" && break; done)"
           test -n "$kept"
           sed -i 's|<size>[0-9]*</size>|<size>1</size>|' _site/b2b/latest/sssp_config.xml
-          bash scripts/guard-b2b-site.sh _site
+          # A rehearsal: no step summary, and its ::error:: must not show up
+          # as a real annotation on a green run.
+          GITHUB_STEP_SUMMARY='' bash scripts/guard-b2b-site.sh _site 2>&1 | sed 's/^::error::/[rehearsal] /'
           test ! -e _site/b2b/latest
           test -f "$kept/sssp_config.xml"
           rm -rf _site
