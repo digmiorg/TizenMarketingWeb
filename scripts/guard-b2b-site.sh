@@ -50,6 +50,7 @@ dropped=''
 while IFS= read -r dir; do
     [ -n "$dir" ] || continue
     case "$dir" in
+        *..*|"$SITE"/b2b/|"$SITE"/b2b) echo "::error::refusing to remove '$dir'"; exit 1 ;;
         "$SITE"/b2b/*) ;;
         *) echo "::error::refusing to remove '$dir': not under $SITE/b2b"; exit 1 ;;
     esac

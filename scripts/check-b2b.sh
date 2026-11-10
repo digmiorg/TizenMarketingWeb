@@ -190,27 +190,46 @@ else
         echo "  FAIL  expected exactly one .wgt in $ROOT/latest, found ${#latest_wgts[@]}"
         mark_failed "$ROOT/latest"
     else
-        # One gate call: latest/'s package is the candidate, every version
-        # directory is a served directory, and the gate prints each one's
-        # key. stdout passes through: a renewal over the same key is a
-        # ::warning:: the gate prints, and it belongs in the CI summary. A
-        # mismatch is charged to the version directories, not to latest/,
-        # which is the fleet's path and keeps serving.
-        rc=0
-        "$here/author-identity-gate.sh" "${latest_wgts[0]}" "${versions[@]}" | sed 's/^/        /' || rc="${PIPESTATUS[0]}"
-        case "$rc" in
-            0) echo "  ok    every version carries the author key $ROOT/latest serves" ;;
-            2) echo "  FAIL  a version directory is signed with a different author key than $ROOT/latest - panels on the channel would refuse it (see the keys above)"
-               for dir in "${versions[@]}"; do mark_failed "$dir"; done ;;
-            *) echo "  FAIL  author-identity-gate.sh could not compare the versions with $ROOT/latest (exit $rc)"
-               for dir in "${versions[@]}"; do mark_failed "$dir"; done ;;
-        esac
+        # Per directory, so that exactly the directory with the other key is
+        # charged - latest/ is the fleet's path and keeps serving, and a good
+        # version beside a bad one keeps serving too. author-identity.sh
+        # prints the package's signing-key hash (what a display binds on).
+        latest_key="$("$here/author-identity.sh" "${latest_wgts[0]}" 2>/dev/null || true)"
+        if [ -z "$latest_key" ]; then
+            echo "  FAIL  could not read the author key of $ROOT/latest"
+            mark_failed "$ROOT/latest"
+        else
+            differing=0
+            for dir in "${versions[@]}"; do
+                vwgts=("$dir"/*.wgt)
+                key="$("$here/author-identity.sh" "${vwgts[0]}" 2>/dev/null || true)"
+                if [ "$key" = "$latest_key" ]; then
+                    continue
+                fi
+                echo "  FAIL  $dir is signed with author key ${key:-?} but $ROOT/latest serves $latest_key - panels on the channel would refuse it"
+                mark_failed "$dir"
+                differing=$((differing + 1))
+            done
+            if [ "$differing" -eq 0 ]; then
+                echo "  ok    every version carries the author key $ROOT/latest serves ($latest_key)"
+            elif [ "$differing" -eq "${#versions[@]}" ]; then
+                # Every version differs from latest/: more likely latest/ is
+                # the one that changed key. Say so; the versions are still
+                # the ones withheld, because latest/ is what the fleet follows.
+                echo "  note  $ROOT/latest differs from every version directory - if latest/ is the one that changed key, that is the directory to fix"
+            fi
+        fi
     fi
 
     # latest/ must never advertise a lower <ver> than it did before: a
     # display compares <ver> only and would stay on the higher one, with no
     # error anywhere.
     if [ -n "${CHECK_B2B_BASE:-}" ]; then
+        # A base that does not resolve is "could not check", never "nothing
+        # to go backwards from" - otherwise a wrong ref in the workflow would
+        # turn this rule off on every pull request without anyone seeing it.
+        git rev-parse --verify -q "$CHECK_B2B_BASE^{commit}" >/dev/null 2>&1 \
+            || { echo "cannot check: base $CHECK_B2B_BASE does not resolve to a commit"; exit 2; }
         base_cfg="$(git show "$CHECK_B2B_BASE:$ROOT/latest/sssp_config.xml" 2>/dev/null || true)"
         if [ -n "$base_cfg" ]; then
             base_ver="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' | head -1 || true)"
@@ -228,7 +247,10 @@ else
 fi
 
 if [ -n "${CHECK_B2B_FAILED_LIST:-}" ]; then
+    # Word splitting is the point; pathname expansion is not.
+    set -f
     printf '%s\n' $failed_dirs > "$CHECK_B2B_FAILED_LIST"
+    set +f
 fi
 
 [ "$fail" -eq 0 ] && echo "$ROOT/ looks consistent"

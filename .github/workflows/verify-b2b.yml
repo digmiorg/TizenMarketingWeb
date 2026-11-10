@@ -44,10 +44,20 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = pull_request ]; then
             git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-            echo "ref=origin/${{ github.base_ref }}" >> "$GITHUB_OUTPUT"
+            echo "ref=FETCH_HEAD" >> "$GITHUB_OUTPUT"
           else
-            git fetch --no-tags --depth=2 origin "${{ github.ref }}"
-            echo "ref=HEAD~1" >> "$GITHUB_OUTPUT"
+            # The state of main before this push - not HEAD~1, which is only
+            # that for a single-commit push. A new branch has no before.
+            before="${{ github.event.before }}"
+            if [ "$before" = "0000000000000000000000000000000000000000" ]; then
+              echo "no before-sha (new branch) - skipping the backwards check"
+              echo "ref=" >> "$GITHUB_OUTPUT"
+            elif git fetch --no-tags --depth=1 origin "$before"; then
+              echo "ref=$before" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::before-sha $before is gone (force-push?) - skipping the backwards check"
+              echo "ref=" >> "$GITHUB_OUTPUT"
+            fi
           fi
       - run: scripts/check-b2b.sh b2b
         env:
@@ -64,8 +74,11 @@ jobs:
           git archive HEAD | tar -x -C _site
           scripts/guard-b2b-site.sh _site
           test -f _site/b2b/latest/sssp_config.xml
+          # The version directory latest/ mirrors today, whichever that is.
+          kept="$(for d in _site/b2b/*/; do d="${d%/}"; [ "$(basename "$d")" = latest ] && continue; diff -rq _site/b2b/latest "$d" >/dev/null && echo "$d" && break; done)"
+          test -n "$kept"
           sed -i 's|<size>[0-9]*</size>|<size>1</size>|' _site/b2b/latest/sssp_config.xml
           scripts/guard-b2b-site.sh _site
           test ! -e _site/b2b/latest
-          test -f _site/b2b/1.0.13/sssp_config.xml
+          test -f "$kept/sssp_config.xml"
           rm -rf _site
