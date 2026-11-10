@@ -5,17 +5,25 @@
 name: Verify b2b
 on:
   pull_request:
-    paths:
+    paths: &paths
       - 'b2b/**'
       - 'scripts/check-b2b.sh'
       - 'scripts/verify-wgt.sh'
+      - 'scripts/author-identity-gate.sh'
+      - 'scripts/author-identity.sh'
       - '.github/workflows/verify-b2b.yml'
-permissions:
-  contents: read
+  # Also on main, so a merge made while the check was red (or a direct push)
+  # is at least visible beside the Deploy site run that published it.
+  push:
+    branches: [main]
+    paths: *paths
+permissions: {}
 jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - run: scripts/check-b2b.sh b2b

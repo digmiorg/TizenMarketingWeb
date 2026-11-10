@@ -76,18 +76,18 @@ This directory is NOT written by CI. To publish a version, mirror the
 `1.0.13/`, before any panel test, because no panel followed `b2b/latest/` yet.
 From the second version on, the order above applies.
 
-`scripts/check-b2b.sh` runs on every pull request that touches `b2b/` (the
-**Verify b2b** workflow): `verify-wgt.sh` on each directory with a descriptor,
-and `b2b/latest/` identical to the highest-numbered version directory. What it
-cannot see is the author key and the `<ver>` to beat, so run these by hand
-before the commit — the gate's verdict is its **exit status**, it prints no
-FAIL text of its own:
+`scripts/check-b2b.sh` runs on every pull request that touches `b2b/` and on
+`main` (the **Verify b2b** workflow): `verify-wgt.sh` on each directory with a
+descriptor; the directory name, the package's `config.xml` version and `<ver>`
+agree (`1.0.14` → `10014`); no two versions share a `<ver>`; every version
+carries the author key `b2b/latest/` serves; and `b2b/latest/` is identical to
+one of the version directories — behind the highest one is allowed and
+reported (that is step 1), different from all of them is not. What it cannot
+see is what Pages already serves, so before the commit also run:
 
 ```sh
 scripts/check-b2b.sh b2b                                 # what CI will run
-scripts/served-baseline.sh b2b/latest                    # <ver> to beat
-scripts/author-identity-gate.sh b2b/<version>/DigmiMarketing.wgt b2b/latest \
-  || echo 'DIFFERENT AUTHOR KEY - do not publish'        # 0 same, 2 different, 1 broken
+scripts/served-baseline.sh b2b/latest                    # <ver> the new one has to beat
 ```
 
 and after each merge, that Pages serves the bytes you committed — only the
