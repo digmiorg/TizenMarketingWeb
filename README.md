@@ -64,23 +64,26 @@ panel that had to fall back to a generated id (no `tizenid`) gets a new one and
 has to be paired again; plan for that before uninstalling. To tell the two
 apart before you uninstall: open the INFO panel on the screen and compare its
 **DUID** field (read from `tizenid` on every start) with the device id the
-portal shows — equal means the pairing survives, different means re-pair.
+portal shows — equal is a strong indication the pairing survives, different
+means re-pair. An indication, not a guarantee: `getUUID()` generates a new id
+if the `tizenid` read fails on the first start after the reinstall, so check
+the pairing in the portal after every reinstall and re-pair if needed.
 
 This directory is NOT written by CI. To publish a version, mirror the
 `production/` flow (prove on one panel first, then widen):
 
 1. Build with the profile the channel already serves —
    `scripts/build-wgt.sh Digmi_Samsung_Partner_2026` — upload
-   `.build/out/DigmiMarketing.wgt` to the Samsung tool and commit the result as
-   `b2b/<version>/DigmiMarketing.wgt` only, with `.build/out/sssp_config.xml`
-   copied next to it and `<size>` replaced by
-   `wc -c < b2b/<version>/DigmiMarketing.wgt`. Any other profile has another
-   author key, and panels already on `b2b/` would refuse the update —
-   `scripts/check-b2b.sh` (below, and in CI) compares the key with
+   `.build/out/DigmiMarketing.wgt` to the Samsung tool and commit **two
+   files** to `b2b/<version>/` and nothing to `latest/` yet: the result as
+   `DigmiMarketing.wgt`, and `.build/out/sssp_config.xml` with `<size>`
+   replaced by `wc -c < b2b/<version>/DigmiMarketing.wgt`. Any other profile
+   has another author key, and panels already on `b2b/` would refuse the
+   update — `scripts/check-b2b.sh` (below, and in CI) compares the key with
    `b2b/latest/` and fails on a mismatch. `<ver>` stays the integer
    `build-wgt.sh` derived (1.0.13 → `10013`); `<widgetname>` must equal
-   config.xml `<name>` and the .wgt file name (`verify-wgt.sh` checks the
-   former, the display needs the latter).
+   config.xml `<name>` and the .wgt file name — `check-b2b.sh` checks both,
+   and a version directory without a descriptor fails outright.
 2. Point one panel at `b2b/<version>/` through TBM Custom App (URL) and watch
    it install and play. From the second version on, make that a panel that
    already runs `b2b/latest/`, so the *update* path is what gets proven, not
@@ -95,20 +98,25 @@ This directory is NOT written by CI. To publish a version, mirror the
 `1.0.13/`, before any panel test, because no panel followed `b2b/latest/` yet.
 From the second version on, the order above applies.
 
-`scripts/check-b2b.sh` runs on every pull request that touches `b2b/` and on
-`main` (the **Verify b2b** workflow): `verify-wgt.sh` on each directory with a
-descriptor; the directory name, the package's `config.xml` version and `<ver>`
+`scripts/check-b2b.sh` runs on every pull request and on pushes to `main`
+that touch `b2b/` (the **Verify b2b** workflow): every directory has a
+descriptor and passes `verify-wgt.sh`; the directory name, the package's `config.xml` version and `<ver>`
 agree (`1.0.14` → `10014`); no two versions share a `<ver>`; every version
 carries the author key `b2b/latest/` serves; and `b2b/latest/` is identical to
 one of the version directories — behind the highest one is allowed and
-reported (that is step 1), different from all of them is not. The three
-workflows that publish the Pages site run the same check and, if `b2b/` on
-`main` fails it, publish the site **without** `b2b/` (`::error::` in the run)
-rather than fail — Deploy site is also the rollback path for `production/`,
-and a broken `b2b/` must never stand between a revert and the panels. Panels
-on `b2b/latest/` then 404 on the descriptor and are expected to keep what they
-have (documented SSSP behaviour, not yet measured for TBM Custom App URL)
-until `b2b/` is fixed. Before the commit also run:
+reported (that is step 1), different from all of them is not; and `latest/`'s
+`<ver>` never goes below what the base branch already serves — a lower `<ver>`
+is a silent freeze, not a rollback, because displays compare `<ver>` only. The
+three workflows that publish the Pages site run the same check and, if `b2b/`
+on `main` fails it, publish the site **without the failing directories**
+(`::error::` and a step-summary block in the run) rather than fail — Deploy
+site is also the rollback path for `production/`, and a broken `b2b/` must
+never stand between a revert and the panels. `latest/` is withheld only when
+`latest/` itself is broken, so a bad new version directory never blanks the
+fleet's path. Panels pointed at a withheld directory 404 on the descriptor
+and are expected to keep what they have (documented SSSP behaviour, not yet
+measured for TBM Custom App URL) until `b2b/` is fixed. Before the commit
+also run:
 
 ```sh
 scripts/check-b2b.sh b2b                                 # what CI will run

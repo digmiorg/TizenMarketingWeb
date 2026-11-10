@@ -1,21 +1,39 @@
 #!/usr/bin/env bash
 #
 # The gates production/ gets from its two workflows, for the hand-published
-# b2b/ channel. For every b2b/<version>/ that carries a descriptor:
+# b2b/ channel. For every b2b/<version>/:
 #
+#   * it carries a descriptor at all (a .wgt without one is invisible to a
+#     display, and would otherwise be invisible to this script too);
 #   * scripts/verify-wgt.sh passes (descriptor vs package, signatures);
+#   * the package is named <widgetname>.wgt, which is the file a display
+#     asks for;
 #   * the directory name is the package's config.xml version, and <ver> is
 #     that version encoded the way scripts/build-wgt.sh encodes it
-#     (major*10000 + minor*100 + patch) — this channel is where <ver> is
-#     typed by hand, and a wrong one means displays never re-download;
+#     (major*10000 + minor*100 + patch, minor and patch below 100) — this
+#     channel is where <ver> is typed by hand, and a wrong one means displays
+#     never re-download;
 #   * no two version directories advertise the same <ver>;
 #   * the package carries the same author key as b2b/latest/ serves
 #     (scripts/author-identity-gate.sh), or panels on the channel refuse it.
 #
-# b2b/latest/ must be byte-for-byte one of the version directories. It is
-# allowed to be BEHIND the highest <ver>: that is the README's step 1, a new
-# version committed alone to be proven on one panel before latest/ follows.
-# It is reported, not failed. Run by the Verify b2b workflow and by hand.
+# b2b/latest/ must exist and be byte-for-byte one of the version directories.
+# It is allowed to be BEHIND the highest <ver>: that is the README's step 1, a
+# new version committed alone to be proven on one panel before latest/
+# follows. It is reported, not failed. What it may not do is go BACKWARDS:
+# with CHECK_B2B_BASE set to a git ref (the workflows set it to the base of
+# the pull request), latest/'s <ver> must not be lower than the <ver> that ref
+# serves, because a display compares <ver> only and would never download the
+# lower one — the silent freeze served-baseline.sh exists to prevent for
+# production/.
+#
+# Exit status: 0 consistent, 1 something is broken, 2 could not check (a
+# tool this script needs is missing) — the publish guard treats 2 as its own
+# failure, not as a broken b2b/.
+#
+# With CHECK_B2B_FAILED_LIST set to a file path, the directories that failed
+# are written there one per line, so the publish guard can drop exactly
+# those from the site and keep the rest serving.
 #
 # Usage: scripts/check-b2b.sh [b2b-dir]   (default: b2b)
 
@@ -24,13 +42,17 @@ set -euo pipefail
 ROOT="${1:-b2b}"
 here="$(cd "$(dirname "$0")" && pwd)"
 
+for tool in unzip openssl python3 sed; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "cannot check: $tool is not installed"; exit 2; }
+done
+
 [ -d "$ROOT" ] || { echo "no $ROOT/ directory"; exit 1; }
 
 # The <ver> a directory's descriptor advertises, raw (may be non-numeric).
 ver_of() {
     # `|| true`: head closes the pipe, and under pipefail that SIGPIPE would
     # take the script down before it could report what it read.
-    sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' "$1/sssp_config.xml" | head -1 || true
+    sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' "$1" | head -1 || true
 }
 
 # The <widgetname> a directory's descriptor advertises: the file a display asks for.
@@ -51,18 +73,32 @@ encode() {
 }
 
 fail=0
+failed_dirs=''
+mark_failed() {
+    case " $failed_dirs " in
+        *" $1 "*) ;;
+        *) failed_dirs="$failed_dirs $1" ;;
+    esac
+    fail=1
+}
+
 highest=''
 highest_dir=''
 seen_vers=' '
 versions=()
 
-for cfg in "$ROOT"/*/sssp_config.xml; do
-    [ -f "$cfg" ] || continue
-    dir="${cfg%/sssp_config.xml}"
+for entry in "$ROOT"/*/; do
+    [ -d "$entry" ] || continue
+    dir="${entry%/}"
     name="$(basename "$dir")"
     echo "== $dir"
+    if [ ! -f "$dir/sssp_config.xml" ]; then
+        echo "  FAIL  no sssp_config.xml - a display pointed here gets a 404 and keeps its old build"
+        mark_failed "$dir"
+        continue
+    fi
     if ! "$here/verify-wgt.sh" "$dir"; then
-        fail=1
+        mark_failed "$dir"
         continue
     fi
     [ "$name" = latest ] && continue
@@ -70,7 +106,7 @@ for cfg in "$ROOT"/*/sssp_config.xml; do
     wgts=("$dir"/*.wgt)
     if [ "${#wgts[@]}" -ne 1 ] || [ ! -f "${wgts[0]}" ]; then
         echo "  FAIL  expected exactly one .wgt in $dir, found ${#wgts[@]}"
-        fail=1
+        mark_failed "$dir"
         continue
     fi
     wgt="${wgts[0]}"
@@ -80,17 +116,17 @@ for cfg in "$ROOT"/*/sssp_config.xml; do
         # under any other name is a 404 on Pages and a panel that keeps its
         # old build without a word.
         echo "  FAIL  package is $(basename "$wgt") but the descriptor advertises <widgetname>$widget</widgetname>, so a display would fetch $widget.wgt"
-        fail=1
+        mark_failed "$dir"
     fi
     pkgver="$(package_version "$wgt")"
     if [ "$pkgver" != "$name" ]; then
         echo "  FAIL  directory is $name but the package's config.xml says $pkgver"
-        fail=1
+        mark_failed "$dir"
     fi
-    ver="$(ver_of "$dir")"
+    ver="$(ver_of "$dir/sssp_config.xml")"
     if ! [[ "$ver" =~ ^[0-9]+$ ]]; then
         echo "  FAIL  <ver>$ver</ver> is not an integer"
-        fail=1
+        mark_failed "$dir"
         continue
     fi
     # Same contract as build-wgt.sh: three numeric parts, minor and patch
@@ -98,21 +134,21 @@ for cfg in "$ROOT"/*/sssp_config.xml; do
     # be 10100). Anything else is refused here, not silently skipped.
     if ! [[ "$pkgver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "  FAIL  package version '$pkgver' is not major.minor.patch, so <ver> cannot be derived from it"
-        fail=1
+        mark_failed "$dir"
         continue
     fi
     IFS=. read -r _ pminor ppatch <<< "$pkgver"
     if [ "$((10#$pminor))" -ge 100 ] || [ "$((10#$ppatch))" -ge 100 ]; then
         echo "  FAIL  package version $pkgver has a minor or patch of 100 or more, which collides in the <ver> encoding"
-        fail=1
+        mark_failed "$dir"
         continue
     fi
     if [ "$ver" != "$(encode "$pkgver")" ]; then
         echo "  FAIL  <ver>$ver</ver> is not $pkgver encoded ($(encode "$pkgver"))"
-        fail=1
+        mark_failed "$dir"
     fi
     case "$seen_vers" in
-        *" $ver "*) echo "  FAIL  <ver>$ver</ver> is advertised by more than one version directory"; fail=1 ;;
+        *" $ver "*) echo "  FAIL  <ver>$ver</ver> is advertised by more than one version directory"; mark_failed "$dir" ;;
     esac
     seen_vers="$seen_vers$ver "
     versions+=("$dir")
@@ -122,54 +158,77 @@ for cfg in "$ROOT"/*/sssp_config.xml; do
     fi
 done
 
+echo "== $ROOT/latest"
 if [ ! -d "$ROOT/latest" ]; then
     # Every panel on the channel follows latest/; without it they 404 on
     # the descriptor, and no version is compared with any other.
-    echo "== $ROOT/latest"
     echo "  FAIL  $ROOT/latest is missing"
     fail=1
+elif [ "${#versions[@]}" -eq 0 ]; then
+    echo "  FAIL  no version directory to compare $ROOT/latest with"
+    fail=1
 else
-    echo "== $ROOT/latest"
-    if [ "${#versions[@]}" -eq 0 ]; then
-        echo "  FAIL  no version directory to compare $ROOT/latest with"
-        fail=1
-    else
-        match=''
-        for dir in "${versions[@]}"; do
-            if diff -rq "$ROOT/latest" "$dir" >/dev/null 2>&1; then
-                match="$dir"
-                break
-            fi
-        done
-        if [ -z "$match" ]; then
-            echo "  FAIL  $ROOT/latest is not identical to any version directory"
-            fail=1
-        elif [ "$match" = "$highest_dir" ]; then
-            echo "  ok    identical to $match, the highest <ver> ($highest)"
-        else
-            echo "  note  identical to $match; $highest_dir (<ver>$highest</ver>) is not on latest/ yet (README step 1 - prove it on a panel first)"
-            [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice::$ROOT/latest serves $match, not $highest_dir"
+    match=''
+    for dir in "${versions[@]}"; do
+        if diff -rq "$ROOT/latest" "$dir" >/dev/null 2>&1; then
+            match="$dir"
+            break
         fi
+    done
+    if [ -z "$match" ]; then
+        echo "  FAIL  $ROOT/latest is not identical to any version directory"
+        mark_failed "$ROOT/latest"
+    elif [ "$match" = "$highest_dir" ]; then
+        echo "  ok    identical to $match, the highest <ver> ($highest)"
+    else
+        echo "  note  identical to $match; $highest_dir (<ver>$highest</ver>) is not on latest/ yet (README step 1 - prove it on a panel first)"
+        [ -n "${GITHUB_ACTIONS:-}" ] && echo "::notice::$ROOT/latest serves $match, not $highest_dir"
+    fi
+
+    latest_wgts=("$ROOT/latest"/*.wgt)
+    if [ "${#latest_wgts[@]}" -ne 1 ] || [ ! -f "${latest_wgts[0]}" ]; then
+        echo "  FAIL  expected exactly one .wgt in $ROOT/latest, found ${#latest_wgts[@]}"
+        mark_failed "$ROOT/latest"
+    else
         # One gate call: latest/'s package is the candidate, every version
         # directory is a served directory, and the gate prints each one's
         # key. stdout passes through: a renewal over the same key is a
-        # ::warning:: the gate prints, and it belongs in the CI summary.
-        latest_wgts=("$ROOT/latest"/*.wgt)
-        if [ ! -f "${latest_wgts[0]}" ]; then
-            echo "  FAIL  $ROOT/latest holds no .wgt to compare author keys with"
-            fail=1
-            latest_wgts=()
-        fi
+        # ::warning:: the gate prints, and it belongs in the CI summary. A
+        # mismatch is charged to the version directories, not to latest/,
+        # which is the fleet's path and keeps serving.
         rc=0
-        if [ "${#latest_wgts[@]}" -eq 1 ]; then
-            "$here/author-identity-gate.sh" "${latest_wgts[0]}" "${versions[@]}" | sed 's/^/        /' || rc="${PIPESTATUS[0]}"
-            case "$rc" in
-                0) echo "  ok    every version carries the author key $ROOT/latest serves" ;;
-                2) echo "  FAIL  a version directory is signed with a different author key than $ROOT/latest - panels on the channel would refuse it (see the keys above)"; fail=1 ;;
-                *) echo "  FAIL  author-identity-gate.sh could not compare the versions with $ROOT/latest (exit $rc)"; fail=1 ;;
-            esac
+        "$here/author-identity-gate.sh" "${latest_wgts[0]}" "${versions[@]}" | sed 's/^/        /' || rc="${PIPESTATUS[0]}"
+        case "$rc" in
+            0) echo "  ok    every version carries the author key $ROOT/latest serves" ;;
+            2) echo "  FAIL  a version directory is signed with a different author key than $ROOT/latest - panels on the channel would refuse it (see the keys above)"
+               for dir in "${versions[@]}"; do mark_failed "$dir"; done ;;
+            *) echo "  FAIL  author-identity-gate.sh could not compare the versions with $ROOT/latest (exit $rc)"
+               for dir in "${versions[@]}"; do mark_failed "$dir"; done ;;
+        esac
+    fi
+
+    # latest/ must never advertise a lower <ver> than it did before: a
+    # display compares <ver> only and would stay on the higher one, with no
+    # error anywhere.
+    if [ -n "${CHECK_B2B_BASE:-}" ]; then
+        base_cfg="$(git show "$CHECK_B2B_BASE:$ROOT/latest/sssp_config.xml" 2>/dev/null || true)"
+        if [ -n "$base_cfg" ]; then
+            base_ver="$(printf '%s\n' "$base_cfg" | sed -n 's|.*<ver>\(.*\)</ver>.*|\1|p' | head -1 || true)"
+            new_ver="$(ver_of "$ROOT/latest/sssp_config.xml")"
+            if [[ "$base_ver" =~ ^[0-9]+$ ]] && [[ "$new_ver" =~ ^[0-9]+$ ]] && [ "$new_ver" -lt "$base_ver" ]; then
+                echo "  FAIL  $ROOT/latest goes from <ver>$base_ver</ver> ($CHECK_B2B_BASE) to <ver>$new_ver</ver> - displays never download a lower <ver>, so this is a silent freeze, not a rollback"
+                mark_failed "$ROOT/latest"
+            else
+                echo "  ok    <ver>$new_ver</ver> is not below $CHECK_B2B_BASE's <ver>${base_ver:-none}</ver>"
+            fi
+        else
+            echo "  ok    $CHECK_B2B_BASE serves no $ROOT/latest yet - nothing to go backwards from"
         fi
     fi
+fi
+
+if [ -n "${CHECK_B2B_FAILED_LIST:-}" ]; then
+    printf '%s\n' $failed_dirs > "$CHECK_B2B_FAILED_LIST"
 fi
 
 [ "$fail" -eq 0 ] && echo "$ROOT/ looks consistent"
