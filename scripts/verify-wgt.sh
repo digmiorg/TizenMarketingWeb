@@ -137,6 +137,12 @@ import base64, hashlib, os, re, sys, urllib.parse
 pkg, sig = sys.argv[1], sys.argv[2]
 xml = open(os.path.join(pkg, sig)).read()
 refs = re.findall(r'<Reference URI="([^"]*)">.*?<DigestMethod Algorithm="([^"]*)".*?<DigestValue>(.*?)</DigestValue>', xml, re.S)
+# Every <Reference> must have been understood: a signer that writes the
+# element another way (other attributes, single quotes) would otherwise
+# leave signature1.xml with no references and a false 'covers'.
+if len(refs) != xml.count('<Reference '):
+    print('        has %d <Reference> elements but %d could be parsed' % (xml.count('<Reference '), len(refs)))
+    sys.exit(1)
 algos = {'sha1': hashlib.sha1, 'sha256': hashlib.sha256, 'sha384': hashlib.sha384, 'sha512': hashlib.sha512}
 problems = []
 referenced = set()
@@ -236,9 +242,10 @@ PY
 fi
 
 # The distributor certificate too: a channel served from a Samsung
-# re-signing (b2b/) depends on one that lapses before the author's, and a
-# fresh panel checks it at install. A warning, like the author's; the fix is
-# a re-sign and a version bump, not a renewal from a key we hold.
+# re-signing (b2b/) depends on one that lapses before the author's. Whether a
+# panel checks it at install is unconfirmed - production/latest carries one
+# that expired 2022-10-27 and installs - but a re-sign after the expiry needs
+# a version bump either way. A warning, like the author's.
 if [ -f "$WORK/pkg/signature1.xml" ]; then
     python3 -I - "$WORK/pkg/signature1.xml" "$WORK/distributor.der" <<'PY' || true
 import base64, re, sys
