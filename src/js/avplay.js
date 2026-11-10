@@ -140,6 +140,59 @@
   }
 
   /**
+   * When to take a still down that is covering a starting clip.
+   *
+   * The probe's watchStart(), as a decision without a timer: the caller
+   * polls the player's clock and feeds each reading here, with the time
+   * elapsed since the clip was started. Measured numbers, not retuned:
+   * 150 ms of clock progress past the first reading means the picture is
+   * live, 250 ms more of hold covers an engine that reports a frame before
+   * it paints, and 5 s with a clock that never moves is a dead plane that a
+   * still must not hide. A clock that is missing altogether (null on the
+   * first reading) cannot be waited for: the still comes down after the hold
+   * instead, or every clip after an image would lose its first five seconds.
+   *
+   * @param {{progressMs?: number, holdMs?: number, deadlineMs?: number}} [opts]
+   * @returns {{ tick(t: (number|null), elapsedMs: number): ('wait'|'drop-after-hold'|'drop-now'), holdMs: number }}
+   */
+  function coverGate(opts) {
+    const o = opts || {};
+    const progressMs = o.progressMs === undefined ? 150 : o.progressMs;
+    const holdMs = o.holdMs === undefined ? 250 : o.holdMs;
+    const deadlineMs = o.deadlineMs === undefined ? 5000 : o.deadlineMs;
+    let base = null;
+    let decided = false;
+    return {
+      holdMs,
+      tick(t, elapsedMs) {
+        if (decided) {
+          return 'wait';
+        }
+        if (elapsedMs > deadlineMs) {
+          decided = true;
+          return 'drop-now';
+        }
+        if (t === null) {
+          if (base === null) {
+            decided = true;
+            return 'drop-after-hold';
+          }
+          return 'wait';
+        }
+        if (base === null || t < base) {
+          base = t;
+          return 'wait';
+        }
+        if (t > base + progressMs) {
+          decided = true;
+          return 'drop-after-hold';
+        }
+        return 'wait';
+      },
+    };
+  }
+
+  /**
    * Is AVPlay usable in this runtime?
    *
    * Checked by NAME rather than by calling anything: rule 5 says a throw
@@ -743,6 +796,7 @@
 
   const moduleApi = {
     seamPlan: seamPlan,
+    coverGate: coverGate,
     isAvailable: isAvailable,
     createPlayer: createPlayer,
   };

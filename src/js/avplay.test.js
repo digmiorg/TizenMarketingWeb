@@ -1,10 +1,44 @@
 // Run: node --test src/js/avplay.test.js
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { seamPlan, isAvailable, createPlayer } = require('./avplay.js');
+const { seamPlan, coverGate, isAvailable, createPlayer } = require('./avplay.js');
 
 test('seamPlan: leaving a video for another video needs the freeze', () => {
   assert.deepEqual(seamPlan('video', 'video'), { freeze: true, coverMustBePainted: false });
+});
+
+test('coverGate: the still comes down after the hold once the clock has moved 150 ms past its first reading', () => {
+  // The probe's watchStart(): base is the first reading, and an earlier
+  // clock (the previous stream's) resets it rather than counting as progress.
+  const gate = coverGate();
+  assert.equal(gate.tick(900, 16), 'wait', 'the first reading is the base, not progress');
+  assert.equal(gate.tick(1000, 32), 'wait', '100 ms is under the 150 ms gate');
+  assert.equal(gate.tick(40, 48), 'wait', 'a clock that went back is a new base');
+  assert.equal(gate.tick(150, 64), 'wait', '110 ms past the NEW base is still under the gate');
+  assert.equal(gate.tick(200, 80), 'drop-after-hold');
+  assert.equal(gate.tick(300, 96), 'wait', 'decided once; later ticks are inert');
+  assert.equal(gate.holdMs, 250);
+});
+
+test('coverGate: a clock that never moves hits the 5 s deadline and drops NOW, logged by the caller', () => {
+  const gate = coverGate();
+  assert.equal(gate.tick(500, 16), 'wait');
+  assert.equal(gate.tick(500, 4999), 'wait');
+  assert.equal(gate.tick(500, 5001), 'drop-now');
+});
+
+test('coverGate: a MISSING clock drops after the hold, not after the deadline', () => {
+  // Without this every clip after an image would lose its first five seconds
+  // on a panel whose getCurrentTime is absent or throws. A clock that was
+  // there and then answers null mid-way keeps waiting -- that is a glitch,
+  // not an absence.
+  const missing = coverGate();
+  assert.equal(missing.tick(null, 16), 'drop-after-hold');
+
+  const glitch = coverGate();
+  assert.equal(glitch.tick(100, 16), 'wait');
+  assert.equal(glitch.tick(null, 32), 'wait');
+  assert.equal(glitch.tick(300, 48), 'drop-after-hold');
 });
 
 test('seamPlan: leaving a video for an image STILL needs the freeze - the image arrives after a decode', () => {

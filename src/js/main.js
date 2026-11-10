@@ -1146,38 +1146,37 @@ function displayMediaContent(data) {
        * newer render or a teardown owns the stage from then on.
        */
       function dropStillWhenClockMoves(token) {
-        const PROGRESS_MS = 150;
-        const HOLD_MS = 250;
-        const DEADLINE_MS = 5000;
+        const gate = window.DigmiAvplay.coverGate();
         const since = monotonicNow();
-        let base = null;
+        const drop = () => {
+          if (token !== renderToken || !isCurrentGeneration()) {
+            return;
+          }
+          // Same paint: the page goes transparent as the still goes away.
+          setPlaneVisible(true);
+          clearStage();
+          updateStageGeometry();
+        };
         const poll = setInterval(() => {
           if (token !== renderToken || !isCurrentGeneration()) {
             clearInterval(poll);
             return;
           }
-          if (monotonicNow() - since > DEADLINE_MS) {
-            clearInterval(poll);
-            console.log('[avplay] no picture within ' + DEADLINE_MS + ' ms: dropping the still over a plane that never moved');
-            clearStage();
+          // One read per tick. A clock that throws is reported by attempt()
+          // once and then answers null, which the gate turns into a drop after
+          // the hold -- so a missing clock costs one log line, not three
+          // hundred, and not five seconds of hidden video per seam.
+          const decision = gate.tick(avplay.currentTime(), monotonicNow() - since);
+          if (decision === 'wait') {
             return;
           }
-          const t = avplay.currentTime();
-          if (t === null) {
+          clearInterval(poll);
+          if (decision === 'drop-now') {
+            console.log('[avplay] no picture within the deadline: dropping the still over a plane that never moved');
+            drop();
             return;
           }
-          if (base === null || t < base) {
-            base = t;
-            return;
-          }
-          if (t > base + PROGRESS_MS) {
-            clearInterval(poll);
-            setTimeout(() => {
-              if (token === renderToken && isCurrentGeneration()) {
-                clearStage();
-              }
-            }, HOLD_MS);
-          }
+          setTimeout(drop, gate.holdMs);
         }, 16);
       }
 
@@ -1306,13 +1305,15 @@ function displayMediaContent(data) {
             avplayDurationMs = result.durationMs;
             planeHeld = true;
             loopsDisabledUntilNextPlay = false;
-            // Transparent page now, while the still (if any) is still on top
-            // of it: the cover is the image, not the page colour, so this
-            // paints nothing new. When the clock has moved, dropping the
-            // image reveals a plane that is already live.
-            setPlaneVisible(true);
+            // With a still covering, the page stays OPAQUE until the still
+            // comes down: the blurred backdrop has soft edges, and a
+            // transparent page under it would show the plane through them.
+            // The drop makes the page transparent and empties the stage in
+            // the same paint, revealing a plane that is already live.
             if (stillCovers) {
               dropStillWhenClockMoves(mine);
+            } else {
+              setPlaneVisible(true);
             }
             // The Stage readout is the line a bench reads to see which
             // rotation and rect THIS clip got (onRotation has already run
