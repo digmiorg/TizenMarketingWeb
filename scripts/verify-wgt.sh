@@ -111,14 +111,8 @@ else
     bad "appVersion is $bundle_version but config.xml says $config_version"
 fi
 
-# --- the signing identity ----------------------------------------------------
-# Printed, not asserted: a change of signing KEY is the thing that makes
-# installed screens refuse an update, so it belongs in the build log where
-# someone can compare it against the previous release. The certificate hash is
-# printed beside it because that is what names one particular certificate, and
-# because the two move independently: a renewal is a new certificate over the
-# same key. Which of the two a display actually binds on is argued, with
-# sources, at the top of scripts/author-identity.sh.
+# --- the signatures cover the package ---
+#
 # The signatures have to COVER the package, not merely exist: every file a
 # signature references must hash to the digest it states, and every file the
 # signature is responsible for must be referenced - all files for the author
@@ -129,12 +123,19 @@ fi
 # This is a direct check of the <Reference> list, not a verification of the
 # <SignatureValue> itself (that needs the certificate chain a display holds);
 # it is what tells a borrowed signature from a real one.
-for sig in author-signature.xml signature1.xml; do
+# Every signature in the package: the author's, and every distributor
+# signature (signature1.xml, signature2.xml, ... - the widget spec allows
+# several, and a stale one from another build would be refused by a display
+# just the same).
+distributor_sigs="$(cd "$WORK/pkg" && ls signature[0-9]*.xml 2>/dev/null || true)"
+for sig in author-signature.xml $distributor_sigs; do
     [ -f "$WORK/pkg/$sig" ] || continue
     # -I: the package being verified is untrusted input, and so is every
     # URI in the signature - a reference that points outside the package is
-    # refused, never followed.
-    if python3 -I - "$WORK/pkg" "$sig" <<'PY'
+    # refused, never followed. Exit 1 = findings about the package; anything
+    # else = the checker itself failed, which is not the package's fault.
+    coverage_rc=0
+    python3 -I - "$WORK/pkg" "$sig" <<'PY' || coverage_rc=$?
 import base64, hashlib, os, re, sys, urllib.parse
 pkg, sig = sys.argv[1], sys.argv[2]
 xml = open(os.path.join(pkg, sig)).read()
@@ -183,11 +184,11 @@ for p in problems:
     print('        ' + p)
 sys.exit(1 if problems else 0)
 PY
-    then
-        ok "$sig covers the package: every digest matches, nothing uncovered"
-    else
-        bad "$sig does not cover this package (see above) - a display refuses it at install"
-    fi
+    case "$coverage_rc" in
+        0) ok "$sig covers the package: every digest matches, nothing uncovered" ;;
+        1) bad "$sig does not cover this package (see above) - a display refuses it at install" ;;
+        *) bad "could not check whether $sig covers the package (python3 exited $coverage_rc) - a checker fault, not necessarily the package's" ;;
+    esac
 done
 
 # The first certificate in a signature's <KeyInfo>, as DER, or no file when
@@ -219,6 +220,14 @@ warn_expiry() {
     done
 }
 
+# --- the signing identity ----------------------------------------------------
+# Printed, not asserted: a change of signing KEY is the thing that makes
+# installed screens refuse an update, so it belongs in the build log where
+# someone can compare it against the previous release. The certificate hash is
+# printed beside it because that is what names one particular certificate, and
+# because the two move independently: a renewal is a new certificate over the
+# same key. Which of the two a display actually binds on is argued, with
+# sources, at the top of scripts/author-identity.sh.
 if [ -f "$WORK/pkg/author-signature.xml" ]; then
     # Written out rather than piped so the expiry check below can read the same
     # bytes without extracting them a second time.
@@ -228,6 +237,10 @@ if [ -f "$WORK/pkg/author-signature.xml" ]; then
         # A signature with no certificate in it is one no display can bind
         # an author to, and one no gate here can compare.
         bad "author-signature.xml carries no X509Certificate"
+    elif ! openssl x509 -inform DER -in "$WORK/author.der" -noout >/dev/null 2>&1; then
+        # Present but not a certificate: nothing below could read it, and
+        # -checkend would call it "expired".
+        bad "author-signature.xml carries a certificate openssl cannot read"
     else
         # Both numbers, the same way round as everywhere else: the key is the
         # identity, the certificate is the label. Computed here rather than
@@ -261,26 +274,32 @@ if [ -f "$WORK/pkg/author-signature.xml" ]; then
     fi
 fi
 
-# The distributor certificate too: a channel served from a Samsung
+# The distributor certificates too: a channel served from a Samsung
 # re-signing (b2b/) depends on one that lapses before the author's. Whether a
 # panel checks it at install is unconfirmed - production/latest carries one
 # that expired 2022-10-27 and installs - but a re-sign after the expiry needs
-# a version bump either way. A warning, like the author's.
-if [ -f "$WORK/pkg/signature1.xml" ]; then
-    extract_first_cert "$WORK/pkg/signature1.xml" "$WORK/distributor.der"
-    if [ ! -f "$WORK/distributor.der" ]; then
-        bad "signature1.xml carries no X509Certificate"
-    elif ! openssl x509 -inform DER -in "$WORK/distributor.der" -noout >/dev/null 2>&1; then
+# a version bump either way. The expiry warning is for Samsung-issued
+# distributors only: the Tizen SDK test signer that production/ carries
+# lapsed in 2022 and is not something a re-sign would renew, so a standing
+# warning about it would only bury the author warning.
+for sig in $distributor_sigs; do
+    der="$WORK/distributor-${sig%.xml}.der"
+    extract_first_cert "$WORK/pkg/$sig" "$der"
+    if [ ! -f "$der" ]; then
+        bad "$sig carries no X509Certificate"
+    elif ! openssl x509 -inform DER -in "$der" -noout >/dev/null 2>&1; then
         # Present but not a certificate: a display cannot validate the
         # signature with it, and -checkend would read it as "expired".
-        bad "signature1.xml carries a certificate openssl cannot read"
+        bad "$sig carries a certificate openssl cannot read"
     else
-        printf '  info  distributor certificate\n'
-        openssl x509 -inform DER -in "$WORK/distributor.der" -noout -subject -enddate \
+        printf '  info  distributor certificate (%s)\n' "$sig"
+        openssl x509 -inform DER -in "$der" -noout -subject -enddate \
             2>/dev/null | sed 's/^/          /' || true
-        warn_expiry "$WORK/distributor.der" "the distributor certificate" "a package re-signed after that needs a version bump, or displays never download it"
+        if openssl x509 -inform DER -in "$der" -noout -issuer 2>/dev/null | grep -qi samsung; then
+            warn_expiry "$der" "the distributor certificate in $sig" "a package re-signed after that needs a version bump, or displays never download it"
+        fi
     fi
-fi
+done
 
 echo
 if [ "$fail" -eq 0 ]; then
