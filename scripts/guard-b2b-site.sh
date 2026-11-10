@@ -69,7 +69,7 @@ withhold_all() {
         {
             echo "### b2b/ withheld in full: it could not be checked"
             echo
-            echo "$1. An unchecked \`b2b/\` is never published, so none of it was. \`production/\` was published as usual. Panels on \`b2b/latest/\` get a 404 on the descriptor and keep the build they have."
+            echo "$1. An unchecked \`b2b/\` is never published, so none of it was. \`production/\` was published as usual. Panels on \`b2b/latest/\` get a 404 on the descriptor and are expected to keep the build they have (documented SSSP behaviour, not yet measured for TBM Custom App URL)."
         } >> "$GITHUB_STEP_SUMMARY"
     fi
     exit 0
@@ -126,7 +126,7 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         echo
         for d in "${dropped[@]}"; do echo "- \`$d\`"; done
         echo
-        echo "\`production/\` was published as usual. Panels pointed at a withheld directory get a 404 on the descriptor and keep the build they have. Fix \`b2b/\` on \`main\` to resume."
+        echo "\`production/\` was published as usual. Panels pointed at a withheld directory get a 404 on the descriptor and are expected to keep the build they have (documented SSSP behaviour, not yet measured for TBM Custom App URL). Fix \`b2b/\` on \`main\` to resume."
     } >> "$GITHUB_STEP_SUMMARY"
 fi
 exit 0
