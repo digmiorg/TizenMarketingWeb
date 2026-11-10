@@ -178,12 +178,14 @@ document.addEventListener('keydown', function (e) {
       break;
     case window.tvKey.LEFT:
       if (window.currentMediaIndex !== undefined && window.displayMedia) {
-        // Null it, don't just clear it. A cleared timer id is still a number,
-        // so playlistIsOnScreen() went on reporting a live playlist and
-        // checkDevice stayed gated - which is why stepping with the remote
-        // used to park the screen on one slide with no content polls at all,
-        // indefinitely. Nulled, the next pairing poll re-fetches and the
-        // rotation resumes within the backoff.
+        // Null it, don't just clear it: a cleared timer id is still a number,
+        // and playlistIsOnScreen() reads a number as a live playlist. Then
+        // render, then RESTART the timer below. Leaving it null is not a
+        // pause -- it is what the pairing loop reads as a dead playlist, and
+        // its next poll rebuilt the whole playlist from item 1 (bench,
+        // 2026-11-10: "key LEFT -> 15 at 197s >> playlist -> 1 at 200s"). The
+        // re-fetch is the safety net for a chain that died for other reasons,
+        // not the way a key press is meant to resume.
         clearInterval(window.rotationInterval);
         window.rotationInterval = null;
         window.currentMediaIndex =
@@ -457,8 +459,16 @@ async function fetchDeviceMedia(uuid) {
     // Cache the new data
     MediaStorage.save(uuid, data);
 
-    // Display new content if it's different from cache
-    if (!cachedData || JSON.stringify(cachedData) !== JSON.stringify(data)) {
+    // Render again only if what is RENDERED changed. This compared the whole
+    // payload, and the payload carries fields that differ between two
+    // fetches seconds apart (`playback` does, measured 2026-11-10) -- so a
+    // cache hit followed by the fresh answer rebuilt the playlist from item 1
+    // a few seconds after it had started. Same comparison as the rotation's
+    // own change branch: the media list, and the location when sent.
+    const cachedMedia = cachedData ? JSON.stringify(cachedData.campaign_media || []) : null;
+    const freshMedia = JSON.stringify(data.campaign_media || []);
+    const locationChanged = !!data.location && !!cachedData && data.location !== cachedData.location;
+    if (cachedMedia === null || cachedMedia !== freshMedia || locationChanged) {
       displayMediaContent(data);
     }
 
@@ -641,11 +651,15 @@ function stopPlayback() {
  * have stopped advancing are not "on screen" in any sense this gate cares
  * about, and treating them as such is what made a stalled chain permanent:
  * the gate kept checkDevice from re-fetching the very content that would have
- * rebuilt the chain. Measured: pressing LEFT/RIGHT on the remote clears the
- * rotation without restarting it, and the screen then sat on one slide with
- * zero content polls for as long as it was watched. With the rotation in the
- * gate, the next pairing poll re-fetches and the playlist resumes within the
- * backoff instead of never.
+ * rebuilt the chain. Measured once: LEFT/RIGHT on the remote cleared the
+ * rotation without restarting it, and the screen sat on one slide with zero
+ * content polls for as long as it was watched. With the rotation in the gate
+ * the next poll re-fetched -- and rebuilt the WHOLE playlist from item 1,
+ * which on the bench (2026-11-10) read as "the images are skipped". So the
+ * keys now restart the timer themselves and never trip this gate; the
+ * re-fetch remains the safety net for a chain that died for other reasons.
+ * The cost of that design: any path that nulls the handle without restarting
+ * is a silent restart from item 1, not a pause.
  */
 function playlistIsOnScreen() {
   return typeof window.mediaLength === 'number'
