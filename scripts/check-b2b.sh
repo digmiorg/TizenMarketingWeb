@@ -109,7 +109,7 @@ same_file() {
 extra_entries() {
     local d="$1" widget="$2" n
     for n in "$d"/* "$d"/.[!.]* "$d"/..?*; do
-        [ -e "$n" ] || continue
+        [ -e "$n" ] || [ -L "$n" ] || continue
         case "$(basename "$n")" in
             sssp_config.xml|"$widget.wgt") ;;
             *) printf '%s ' "$(basename "$n")" ;;
@@ -389,11 +389,7 @@ elif [ "${#versions[@]}" -gt 0 ]; then
 fi
 if [ -n "$ref_key" ]; then
     echo "== author key: every directory must carry $ref_key ($ref_src)"
-    to_check=()
-    for dir in ${versions[@]+"${versions[@]}"}; do
-        [ "$dir" = "$ROOT/latest" ] && continue
-        to_check+=("$dir")
-    done
+    to_check=(${versions[@]+"${versions[@]}"})
     # latest/ is compared too unless it IS the reference (then it would only
     # be compared with itself).
     [ "$latest_ok" -eq 1 ] && [ "$ref_src" != "$ROOT/latest" ] && to_check+=("$ROOT/latest")
