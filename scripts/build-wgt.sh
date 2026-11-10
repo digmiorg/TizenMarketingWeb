@@ -42,9 +42,17 @@ OUT_DIR="${BUILD_OUT_DIR:-.build/out}"
 #   * `.build/` matches it too, because a trailing `*` also matches nothing,
 #     which would take the reference directory down with it.
 #
-# So resolve first and compare resolved paths. `pwd -P` resolves symlinks, so a
-# symlinked component cannot redirect the cleanup out of the tree either, and
-# the target is required to be STRICTLY beneath .build/ rather than equal to it.
+# So resolve first and compare resolved paths, and require the target to be
+# STRICTLY beneath .build/ rather than equal to it.
+#
+# What this enforces is "beneath the RESOLVED .build/", which is not the same as
+# "inside the repository", and the difference is worth stating because a comment
+# that promises more than the code does is how the next person draws the wrong
+# conclusion. If `.build` is ITSELF a symlink, both sides resolve through it and
+# a path outside the repository is accepted -- measured, not argued. That is
+# deliberate: someone who symlinks their build directory onto another disk means
+# it. `pwd -P` does stop a symlinked component INSIDE the path from redirecting
+# the cleanup, which is the case that would otherwise be a surprise.
 # Pure shell on purpose: this script has no other interpreter dependency.
 #
 # The directory need not exist yet, so resolve the deepest existing ancestor
@@ -65,7 +73,7 @@ resolve_path() {
     # directory it picked, so without this the command substitution returns TWO
     # lines and the guard validates a different tree from the one `rm -rf`
     # later walks. `--` covers a directory whose name begins with a dash.
-    printf '%s\n' "$(CDPATH= cd -P -- "$p" && pwd -P)${rest:+/$rest}"
+    printf '%s\n' "$(CDPATH='' cd -P -- "$p" && pwd -P)${rest:+/$rest}"
 }
 
 assert_under_build() {
