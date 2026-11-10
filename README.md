@@ -58,9 +58,13 @@ way. Whether TBM can do that uninstall remotely is not known yet.
 Uninstalling also clears the widget's `localStorage`, where the device id
 (`myUUID`) lives. On a panel whose id came from Tizen's own `tizenid` — the
 normal case — the reinstalled widget reads the same id again and the pairing in
-portal.digmi.eu survives. A panel that had to fall back to a generated id (no
-`tizenid`) gets a new one and has to be paired again; plan for that before
-uninstalling.
+portal.digmi.eu is expected to survive (`tizenid` is a device id; that it is
+unchanged after an uninstall is not yet measured — check on the first panel). A
+panel that had to fall back to a generated id (no `tizenid`) gets a new one and
+has to be paired again; plan for that before uninstalling. To tell the two
+apart before you uninstall: open the INFO panel on the screen and compare its
+**DUID** field (read from `tizenid` on every start) with the device id the
+portal shows — equal means the pairing survives, different means re-pair.
 
 This directory is NOT written by CI. To publish a version, mirror the
 `production/` flow (prove on one panel first, then widen):
