@@ -38,11 +38,27 @@ DEVICES="$("$SDB" devices 2>&1 || true)"
 # The state field, not a substring: a panel named "device-x" must not count twice.
 TARGETS="$(printf '%s\n' "$DEVICES" | awk '$2 == "device" {print $1}')"
 COUNT="$(printf '%s\n' "$TARGETS" | grep -c . || true)"
-[ "$COUNT" = 1 ] || { echo "need exactly one connected panel, found $COUNT" >&2; exit 1; }
+[ "$COUNT" = 1 ] || {
+  echo "need exactly one connected panel, found $COUNT. sdb said:" >&2
+  printf '%s\n' "$DEVICES" >&2
+  echo "(a wedged sdb: sdb kill-server && sdb start-server && sdb connect <ip>)" >&2
+  exit 1
+}
 INSTALL="$("$TIZEN" install -n "$(basename "$OUT")" -s "$TARGETS" -- "$HERE/.build" 2>&1 || true)"
-printf '%s\n' "$INSTALL" | grep -E 'install completed|Fail|successfully' || true
 case "$INSTALL" in
-  *"install completed"*) ;;
-  *) echo "install did not complete; not launching" >&2; exit 1 ;;
+  *"install completed"*) printf '%s\n' "$INSTALL" | grep -E 'install completed|successfully' ;;
+  *)
+    echo "install did not complete; not launching. tizen said:" >&2
+    printf '%s\n' "$INSTALL" >&2
+    exit 1
+    ;;
 esac
-"$TIZEN" run -p DgmiLab002.ClockProbe -s "$TARGETS" | grep -E 'launched|Fail|successfully' || true
+RUN="$("$TIZEN" run -p DgmiLab002.ClockProbe -s "$TARGETS" 2>&1 || true)"
+case "$RUN" in
+  *"successfully launched"*) printf '%s\n' "$RUN" | grep -E 'launched' ;;
+  *)
+    echo "launch did not complete. tizen said:" >&2
+    printf '%s\n' "$RUN" >&2
+    exit 1
+    ;;
+esac

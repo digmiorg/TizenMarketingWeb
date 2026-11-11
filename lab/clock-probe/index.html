@@ -11,7 +11,9 @@
       .k { color: #8fb4d9; }
       .warn { color: #ff6b6b; }
       .ok { color: #7bd88f; }
-      #log { position: fixed; left: 0; right: 0; bottom: 0; height: 42vh; overflow: hidden; background: #000; padding: 20px 40px; font-size: 24px; white-space: pre-wrap; }
+      /* Newest line always visible: the box fills from the bottom and clips
+         the oldest at the top. */
+      #log { position: fixed; left: 0; right: 0; bottom: 0; height: 42vh; overflow: hidden; background: #000; padding: 20px 40px; font-size: 24px; white-space: pre-wrap; display: flex; flex-direction: column; justify-content: flex-end; }
       #keys { color: #c9d4de; font-size: 24px; white-space: pre-wrap; }
     </style>
   </head>
@@ -24,9 +26,10 @@
       <div class="row"><span class="k">portal drift    </span><span id="drift"></span></div>
       <div class="row"><span class="k">last action     </span><span id="action"></span></div>
       <div id="keys">1 setNTP ON pool.ntp.org Europe/Stockholm · 2 Europe/Amsterdam · 3 Europe/Paris
-4 setNTP OFF · 5 ON with zone Nowhere/Nowhere · 6 ON address 216.239.35.0 Europe/Stockholm
+4 setNTP OFF (Amsterdam) · 5 ON with zone Nowhere/Nowhere · 6 ON address 216.239.35.0 Europe/Amsterdam
 7 getNTP + drift again · 0 reload
-4 and 5 change the panel's real NTP state; 2 restores a working one (Stockholm is refused on QB43C)</div>
+4 and 5 change the panel's real NTP state; 2 restores a working one. Stockholm is refused on QB43C,
+so 4 and 6 use Amsterdam: a refusal of them then says something about OFF and the bare address.</div>
     </div>
     <div id="log"></div>
     <script>
@@ -36,7 +39,7 @@
       function stamp() { return new Date().toISOString().slice(11, 19); }
       function log(s) {
         lines.push(stamp() + ' ' + s);
-        if (lines.length > 14) lines.shift();
+        if (lines.length > 10) lines.shift();
         document.getElementById('log').textContent = lines.join('\n');
       }
       function set(id, text, cls) {
@@ -84,32 +87,40 @@
         setTimeout(readNtp, 1500);
         setTimeout(measureDrift, 3000);
       }
+      var PROBE_TIMEOUT_MS = 15000;
+      var probeInFlight = false;
       function measureDrift() {
+        if (probeInFlight) { log('probe already in flight'); return; }
+        probeInFlight = true;
         var sentAt = Date.now();
         set('drift', 'probing...');
-        fetch(PORTAL + '?t=' + sentAt, { method: 'HEAD', cache: 'no-store' }).then(function (res) {
+        var timedOut = new Promise(function (resolve, reject) {
+          setTimeout(function () { reject({ name: 'TimeoutError', message: 'no answer in ' + PROBE_TIMEOUT_MS + ' ms' }); }, PROBE_TIMEOUT_MS);
+        });
+        Promise.race([fetch(PORTAL + '?t=' + sentAt, { method: 'HEAD', cache: 'no-store' }), timedOut]).then(function (res) {
+          probeInFlight = false;
           var receivedAt = Date.now();
           var header = res.headers.get('Date');
           if (!header) { set('drift', 'HTTP ' + res.status + ' but no Date header', 'warn'); log('probe ' + res.status + ' no Date'); return; }
           var server = Date.parse(header);
+          if (isNaN(server)) { set('drift', 'HTTP ' + res.status + ' but Date unparseable: ' + header, 'warn'); log('probe ' + res.status + ' Date unparseable'); return; }
           var mid = (sentAt + receivedAt) / 2;
           var d = Math.round((mid - server) / 1000);
           set('drift', (d >= 0 ? '+' : '') + d + ' s  (HTTP ' + res.status + ', Date: ' + header + ')', Math.abs(d) > 60 ? 'warn' : 'ok');
           log('probe drift ' + d + ' s');
         }).catch(function (e) {
+          probeInFlight = false;
           set('drift', 'probe failed: ' + why(e), 'warn');
           log('probe failed ' + why(e));
         });
       }
       function keys() {
-        try {
-          var want = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-          var firstFailure = '';
-          for (var i = 0; i < want.length; i++) {
-            try { tizen.tvinputdevice.registerKey(want[i]); } catch (e) { if (!firstFailure) { firstFailure = want[i] + ': ' + why(e); } }
-          }
-          if (firstFailure) { log('registerKey failed, first: ' + firstFailure); }
-        } catch (e) { log('registerKey ' + why(e)); }
+        var want = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+        var firstFailure = '';
+        for (var i = 0; i < want.length; i++) {
+          try { tizen.tvinputdevice.registerKey(want[i]); } catch (e) { if (!firstFailure) { firstFailure = want[i] + ': ' + why(e); } }
+        }
+        if (firstFailure) { log('registerKey failed, first: ' + firstFailure); }
         document.addEventListener('keydown', function (e) {
           if (e.repeat) return;
           var k = e.keyCode;
@@ -117,9 +128,9 @@
           if (k === 49) setNtp('ON', 'pool.ntp.org', 'Europe/Stockholm');
           else if (k === 50) setNtp('ON', 'pool.ntp.org', 'Europe/Amsterdam');
           else if (k === 51) setNtp('ON', 'pool.ntp.org', 'Europe/Paris');
-          else if (k === 52) setNtp('OFF', 'pool.ntp.org', 'Europe/Stockholm');
+          else if (k === 52) setNtp('OFF', 'pool.ntp.org', 'Europe/Amsterdam');
           else if (k === 53) setNtp('ON', 'pool.ntp.org', 'Nowhere/Nowhere');
-          else if (k === 54) setNtp('ON', '216.239.35.0', 'Europe/Stockholm');
+          else if (k === 54) setNtp('ON', '216.239.35.0', 'Europe/Amsterdam');
           else if (k === 55) { readNtp(); measureDrift(); }
           else if (k === 48) location.reload();
         });
