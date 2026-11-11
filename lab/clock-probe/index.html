@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Digmi clock probe</title>
+    <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
+    <style>
+      html, body { margin: 0; height: 100%; background: #101820; color: #e8eef4; font-family: monospace; font-size: 30px; }
+      #readout { padding: 40px; }
+      .row { margin: 0 0 28px 0; }
+      .k { color: #8fb4d9; }
+      .warn { color: #ff6b6b; }
+      .ok { color: #7bd88f; }
+      #log { position: fixed; left: 0; right: 0; bottom: 0; height: 42vh; overflow: hidden; background: #000; padding: 20px 40px; font-size: 24px; white-space: pre-wrap; }
+      #keys { color: #c9d4de; font-size: 24px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="readout">
+      <div class="row"><span class="k">JS Date.now()   </span><span id="js"></span></div>
+      <div class="row"><span class="k">tizen.time      </span><span id="tz"></span></div>
+      <div class="row"><span class="k">time zone       </span><span id="zone"></span></div>
+      <div class="row"><span class="k">getNTP()        </span><span id="ntp"></span></div>
+      <div class="row"><span class="k">portal drift    </span><span id="drift"></span></div>
+      <div class="row"><span class="k">last action     </span><span id="action"></span></div>
+      <div id="keys">1 setNTP ON pool.ntp.org Europe/Stockholm · 2 Europe/Amsterdam · 3 Europe/Paris
+4 setNTP OFF · 5 ON with zone Nowhere/Nowhere · 6 ON address 216.239.35.0 Europe/Stockholm
+7 getNTP + drift again · 0 reload</div>
+    </div>
+    <div id="log"></div>
+    <script>
+      var PORTAL = 'https://portal.digmi.eu/up';
+      var FLOOR_MS = Date.parse('2026-11-11T00:00:00Z');
+      var lines = [];
+      function stamp() { return new Date().toISOString().slice(11, 19); }
+      function log(s) {
+        lines.push(stamp() + ' ' + s);
+        if (lines.length > 14) lines.shift();
+        document.getElementById('log').textContent = lines.join('\n');
+      }
+      function set(id, text, cls) {
+        var el = document.getElementById(id);
+        el.textContent = text;
+        el.className = cls || '';
+      }
+      function why(e) {
+        if (!e) return 'null';
+        return (e.name || '?') + ' code=' + (e.code !== undefined ? e.code : '?') + ' "' + (e.message || '') + '"';
+      }
+      function tick() {
+        var now = new Date();
+        set('js', now.toISOString() + '  (' + now.toString() + ')', now.getTime() < FLOOR_MS ? 'warn' : 'ok');
+        try {
+          set('tz', tizen.time.getCurrentDateTime().toString());
+        } catch (e) { set('tz', 'tizen.time: ' + why(e), 'warn'); }
+        try {
+          set('zone', tizen.time.getLocalTimezone());
+        } catch (e) { set('zone', why(e), 'warn'); }
+      }
+      function readNtp() {
+        try {
+          if (!window.webapis || !webapis.timer) { set('ntp', 'webapis.timer missing', 'warn'); return; }
+          if (typeof webapis.timer.getNTP !== 'function') { set('ntp', 'getNTP missing', 'warn'); return; }
+          var info = webapis.timer.getNTP();
+          set('ntp', JSON.stringify(info));
+          log('getNTP ' + JSON.stringify(info));
+        } catch (e) { set('ntp', why(e), 'warn'); log('getNTP threw ' + why(e)); }
+      }
+      function setNtp(use, address, timeZone) {
+        var pair = { use: use, address: address, timeZone: timeZone };
+        try {
+          if (!window.webapis || !webapis.timer || typeof webapis.timer.setNTP !== 'function') {
+            set('action', 'setNTP missing', 'warn');
+            return;
+          }
+          var r = webapis.timer.setNTP(pair);
+          set('action', 'setNTP ' + JSON.stringify(pair) + ' -> ' + String(r), 'ok');
+          log('setNTP ' + JSON.stringify(pair) + ' -> ' + String(r));
+        } catch (e) {
+          set('action', 'setNTP ' + JSON.stringify(pair) + ' THREW ' + why(e), 'warn');
+          log('setNTP ' + JSON.stringify(pair) + ' THREW ' + why(e));
+        }
+        setTimeout(readNtp, 1500);
+        setTimeout(measureDrift, 3000);
+      }
+      function measureDrift() {
+        var sentAt = Date.now();
+        set('drift', 'probing...');
+        fetch(PORTAL + '?t=' + sentAt, { method: 'HEAD', cache: 'no-store' }).then(function (res) {
+          var receivedAt = Date.now();
+          var header = res.headers.get('Date');
+          if (!header) { set('drift', 'HTTP ' + res.status + ' but no Date header', 'warn'); log('probe ' + res.status + ' no Date'); return; }
+          var server = Date.parse(header);
+          var mid = (sentAt + receivedAt) / 2;
+          var d = Math.round((mid - server) / 1000);
+          set('drift', (d >= 0 ? '+' : '') + d + ' s  (HTTP ' + res.status + ', Date: ' + header + ')', Math.abs(d) > 60 ? 'warn' : 'ok');
+          log('probe drift ' + d + ' s');
+        }).catch(function (e) {
+          set('drift', 'probe failed: ' + why(e), 'warn');
+          log('probe failed ' + why(e));
+        });
+      }
+      function keys() {
+        try {
+          var want = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+          for (var i = 0; i < want.length; i++) { try { tizen.tvinputdevice.registerKey(want[i]); } catch (e) {} }
+        } catch (e) { log('registerKey ' + why(e)); }
+        document.addEventListener('keydown', function (e) {
+          if (e.repeat) return;
+          var k = e.keyCode;
+          log('key ' + k);
+          if (k === 49) setNtp('ON', 'pool.ntp.org', 'Europe/Stockholm');
+          else if (k === 50) setNtp('ON', 'pool.ntp.org', 'Europe/Amsterdam');
+          else if (k === 51) setNtp('ON', 'pool.ntp.org', 'Europe/Paris');
+          else if (k === 52) setNtp('OFF', 'pool.ntp.org', 'Europe/Stockholm');
+          else if (k === 53) setNtp('ON', 'pool.ntp.org', 'Nowhere/Nowhere');
+          else if (k === 54) setNtp('ON', '216.239.35.0', 'Europe/Stockholm');
+          else if (k === 55) { readNtp(); measureDrift(); }
+          else if (k === 48) location.reload();
+        });
+      }
+      window.onload = function () {
+        log('clock probe up');
+        keys();
+        tick();
+        setInterval(tick, 1000);
+        readNtp();
+        measureDrift();
+      };
+    </script>
+  </body>
+</html>
