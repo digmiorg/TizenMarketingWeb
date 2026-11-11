@@ -19,20 +19,30 @@ STAGE="$HERE/.build/stage"
 rm -rf "$HERE/.build"
 mkdir -p "$STAGE"
 cp "$HERE/config.xml" "$HERE/index.html" "$HERE/icon.png" "$STAGE/"
-"$TIZEN" package -t wgt -s "$PROFILE" -- "$STAGE" >/dev/null
+"$TIZEN" package -t wgt -s "$PROFILE" -- "$STAGE"
 WGT="$(ls -t "$STAGE"/*.wgt 2>/dev/null | head -1 || true)"
 [ -n "$WGT" ] || { echo "package produced no .wgt" >&2; exit 1; }
 LISTING="$(unzip -l "$WGT")"
-case "$LISTING" in
-  *signature1.xml*) ;;
-  *) echo "the .wgt is unsigned (no signature1.xml): profile '$PROFILE' missing?" >&2; exit 1 ;;
-esac
+for SIG in author-signature.xml signature1.xml; do
+  case "$LISTING" in
+    *"$SIG"*) ;;
+    *) echo "the .wgt is unsigned (no $SIG): profile '$PROFILE' missing?" >&2; exit 1 ;;
+  esac
+done
 OUT="$HERE/.build/DigmiClockProbe.wgt"
 mv "$WGT" "$OUT"
 echo "built $OUT"
 [ "${1:-}" = install ] || exit 0
-TARGETS="$("$SDB" devices 2>/dev/null | awk '/device/ && !/List of/ {print $1}')"
+[ -x "$SDB" ] || { echo "sdb not found at $SDB" >&2; exit 1; }
+DEVICES="$("$SDB" devices 2>&1 || true)"
+# The state field, not a substring: a panel named "device-x" must not count twice.
+TARGETS="$(printf '%s\n' "$DEVICES" | awk '$2 == "device" {print $1}')"
 COUNT="$(printf '%s\n' "$TARGETS" | grep -c . || true)"
 [ "$COUNT" = 1 ] || { echo "need exactly one connected panel, found $COUNT" >&2; exit 1; }
-"$TIZEN" install -n "$(basename "$OUT")" -s "$TARGETS" -- "$HERE/.build" | grep -E 'install completed|Fail|successfully' || true
+INSTALL="$("$TIZEN" install -n "$(basename "$OUT")" -s "$TARGETS" -- "$HERE/.build" 2>&1 || true)"
+printf '%s\n' "$INSTALL" | grep -E 'install completed|Fail|successfully' || true
+case "$INSTALL" in
+  *"install completed"*) ;;
+  *) echo "install did not complete; not launching" >&2; exit 1 ;;
+esac
 "$TIZEN" run -p DgmiLab002.ClockProbe -s "$TARGETS" | grep -E 'launched|Fail|successfully' || true
