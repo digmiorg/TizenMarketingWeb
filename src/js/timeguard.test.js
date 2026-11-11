@@ -68,21 +68,47 @@ test('candidates: every zone with the host name first, then every zone with the 
   assert.deepEqual(pairs[5], { address: '216.239.35.0', timeZone: 'Europe/Paris', own: false });
 });
 
-test('candidates: a zone the panel already has leads, the CET defaults follow, no duplicates', () => {
+test('candidates: the zone the panel\'s wall clock has leads, the CET defaults follow, no duplicates', () => {
   // The certificate problem is a UTC problem; a Finnish panel keeps Helsinki.
-  const pairs = guard.candidates({ timeZone: 'Europe/Helsinki' });
+  const pairs = guard.candidates(undefined, 'Europe/Helsinki');
   assert.equal(pairs.length, 8);
   assert.deepEqual(pairs[0], { address: 'pool.ntp.org', timeZone: 'Europe/Helsinki', own: true });
   assert.deepEqual(pairs[1], { address: 'pool.ntp.org', timeZone: 'Europe/Stockholm', own: false });
   assert.deepEqual(pairs[4], { address: '216.239.35.0', timeZone: 'Europe/Helsinki', own: true });
-  assert.equal(guard.candidates({ timeZone: 'Europe/Paris' }).length, 6, 'a zone already in the defaults is not listed twice');
-  assert.deepEqual(guard.candidates({ timeZone: 'Europe/Paris' })[0], { address: 'pool.ntp.org', timeZone: 'Europe/Paris', own: false },
+  assert.equal(guard.candidates(undefined, 'Europe/Paris').length, 6, 'a zone already in the defaults is not listed twice');
+  assert.deepEqual(guard.candidates(undefined, 'Europe/Paris')[0], { address: 'pool.ntp.org', timeZone: 'Europe/Paris', own: false },
     'a default moved to the front is still a default: a refusal of it stops the search');
-  assert.equal(guard.candidates({ timeZone: '' }).length, 6, 'an empty zone is no zone');
-  assert.equal(guard.candidates({ timeZone: '   ' }).length, 6, 'a blank zone is no zone');
+  assert.equal(guard.candidates(undefined, '').length, 6, 'an empty zone is no zone');
+  assert.equal(guard.candidates(undefined, '   ').length, 6, 'a blank zone is no zone');
   assert.equal(guard.candidates({}).length, 6);
   assert.equal(guard.candidates(undefined).length, 6);
-  assert.equal(guard.candidates({ timeZone: 42 }).length, 6, 'a non-string zone is no zone');
+  assert.equal(guard.candidates(undefined, 42).length, 6, 'a non-string zone is no zone');
+  assert.equal(guard.candidates({ use: 'ON', timeZone: 42 }).length, 6, 'a non-string getNTP zone is no zone either');
+});
+
+test('candidates: the zone getNTP() reports counts only while NTP is ON; OFF reports a placeholder', () => {
+  // Measured on a QB43C 2026-11-11: NTP off, menu and tizen.time on
+  // Europe/Stockholm, getNTP() said Africa/Casablanca. Applying THAT would
+  // have moved the wall clock to Morocco.
+  const off = guard.candidates({ use: 'OFF', address: '', timeZone: 'Africa/Casablanca' });
+  assert.equal(off.length, 6);
+  assert.equal(off.some((pair) => pair.timeZone === 'Africa/Casablanca'), false, 'the placeholder is never tried');
+  assert.equal(guard.candidates({ timeZone: 'Africa/Casablanca' }).length, 6, 'no use field at all: the zone is not trusted either');
+  assert.deepEqual(guard.candidates({ use: 'ON', address: 'pool.ntp.org', timeZone: 'Europe/Helsinki' })[0],
+    { address: 'pool.ntp.org', timeZone: 'Europe/Helsinki', own: true }, 'NTP on: the reported zone is the one in force');
+  assert.deepEqual(guard.candidates({ use: 'ON', address: 'pool.ntp.org', timeZone: 'Europe/Paris' }, 'Europe/Helsinki')[0],
+    { address: 'pool.ntp.org', timeZone: 'Europe/Helsinki', own: true }, 'the wall clock beats what getNTP() says');
+  assert.equal(guard.candidates({ use: 'ON', address: 'pool.ntp.org', timeZone: 'Europe/Paris' }, 'Europe/Helsinki').length, 8,
+    'the getNTP() zone is not added as a second own zone');
+});
+
+test('readLocalZone: the Time API\'s zone, or nothing', () => {
+  assert.equal(guard.readLocalZone({ getLocalTimezone: () => 'Europe/Stockholm' }), 'Europe/Stockholm');
+  assert.equal(guard.readLocalZone({ getLocalTimezone: () => ' Europe/Stockholm ' }), 'Europe/Stockholm', 'trimmed');
+  assert.equal(guard.readLocalZone({ getLocalTimezone: () => { throw webApiError('SecurityError'); } }), '');
+  assert.equal(guard.readLocalZone({ getLocalTimezone: () => 42 }), '', 'a non-string is no zone');
+  assert.equal(guard.readLocalZone({}), '');
+  assert.equal(guard.readLocalZone(undefined), '');
 });
 
 test('candidates: an NTP server the panel already has leads too; a customer\'s internal server is kept', () => {
@@ -99,12 +125,13 @@ test('candidates: an NTP server the panel already has leads too; a customer\'s i
   assert.deepEqual(guard.candidates({ use: 'ON', address: ' 10.0.0.5 ' })[0].address, '10.0.0.5', 'trimmed');
 });
 
-test('candidates: a stale address on a panel with NTP OFF is ignored; its zone is still kept', () => {
+test('candidates: a stale address on a panel with NTP OFF is ignored; the wall-clock zone is still kept', () => {
   // Nobody chose that address while NTP was off; writing it back would make
   // the first try succeed and the defaults never run.
-  const pairs = guard.candidates({ use: 'OFF', address: 'stale.example', timeZone: 'Europe/Helsinki' });
+  const pairs = guard.candidates({ use: 'OFF', address: 'stale.example', timeZone: 'Africa/Casablanca' }, 'Europe/Helsinki');
   assert.equal(pairs.length, 8);
   assert.deepEqual(pairs[0], { address: 'pool.ntp.org', timeZone: 'Europe/Helsinki', own: true });
+  assert.equal(pairs.some((pair) => pair.address === 'stale.example'), false);
   assert.equal(guard.candidates({ address: 'stale.example' }).length, 6, 'no use field at all: the address is not trusted');
 });
 
@@ -237,7 +264,7 @@ test('applyNtp: every pair refused on value is reported as refused after all six
 
 test('applyNtp: an own zone the firmware refuses falls through to the CET defaults', () => {
   const timer = fakeTimer({ refuse: (info) => (info.timeZone === 'Europe/Helsinki' ? 'InvalidValuesError' : null) });
-  const result = guard.applyNtp(timer, guard.candidates({ timeZone: 'Europe/Helsinki' }));
+  const result = guard.applyNtp(timer, guard.candidates(undefined, 'Europe/Helsinki'));
   assert.deepEqual(result, { status: 'applied', address: 'pool.ntp.org', timeZone: 'Europe/Stockholm', attempts: 2 });
 });
 
@@ -451,6 +478,48 @@ test('run: the bench case: clock years BEHIND => its own server re-applied witho
     guard.formatReport(report),
     'NTP re-applied (ntp.customer.lan, Europe/Stockholm) · drift unknown (not probed, clock below floor), clock reads 2016-01-01 ⚠ clock is wrong'
   );
+});
+
+test('run: the measured bench panel: NTP off, getNTP() zone a placeholder, Stockholm refused => Amsterdam, never Casablanca', async () => {
+  // Everything in this test was read off a QB43C (Tizen 7.0) on 2026-11-11
+  // with lab/clock-probe, with the clock put below the floor here.
+  const timer = fakeTimer({
+    ntp: { use: 'OFF', address: '', timeZone: 'Africa/Casablanca' },
+    refuse: (info) => (info.timeZone === 'Europe/Stockholm' ? 'InvalidValuesError' : null),
+  });
+  const clock = Date.parse('2016-01-01T10:00:00Z');
+  const report = await guard.run({
+    timer: timer,
+    time: { getLocalTimezone: () => 'Europe/Stockholm' },
+    fetchFn: () => new Promise(() => {}),
+    url: 'u',
+    now: fakeNow([clock, clock]),
+  });
+  assert.deepEqual(timer.calls, [
+    { use: 'ON', address: 'pool.ntp.org', timeZone: 'Europe/Stockholm' },
+    { use: 'ON', address: 'pool.ntp.org', timeZone: 'Europe/Amsterdam' },
+  ]);
+  assert.deepEqual(report.result, { status: 'applied', address: 'pool.ntp.org', timeZone: 'Europe/Amsterdam', attempts: 2 });
+  assert.equal(
+    guard.formatReport(report),
+    'NTP set (pool.ntp.org, Europe/Amsterdam) · drift unknown (not probed, clock below floor), clock reads 2016-01-01 ⚠ clock is wrong'
+  );
+});
+
+test('run: the wall-clock zone from deps.time reaches the ladder: a Finnish panel with NTP off keeps Helsinki', async () => {
+  // Stockholm leads the defaults anyway, so the bench test above would pass
+  // with deps.time dropped on the floor. Helsinki would not.
+  const timer = fakeTimer({ ntp: { use: 'OFF', address: '', timeZone: 'Africa/Casablanca' } });
+  const clock = Date.parse('2016-01-01T10:00:00Z');
+  const report = await guard.run({
+    timer: timer,
+    time: { getLocalTimezone: () => 'Europe/Helsinki' },
+    fetchFn: () => new Promise(() => {}),
+    url: 'u',
+    now: fakeNow([clock, clock]),
+  });
+  assert.deepEqual(timer.calls, [{ use: 'ON', address: 'pool.ntp.org', timeZone: 'Europe/Helsinki' }]);
+  assert.equal(report.result.timeZone, 'Europe/Helsinki');
 });
 
 test('run: applyAllowed false holds an apply and writes nothing to the panel', async () => {

@@ -61,16 +61,21 @@
 
   /**
    * Time zones tried when the panel has none of its own. Tizen's zone list is
-   * shorter than the IANA one (signageOS documents the list it accepted, and
-   * Europe/Stockholm is not on it, while Europe/Amsterdam and Europe/Paris
-   * are). All three are CET/CEST, so whichever the firmware takes gives the
-   * same wall clock. Stockholm first in case the list is wider than that
-   * document says; an InvalidValuesError moves to the next.
+   * shorter than the IANA one. Measured on a QB43C (Tizen 7.0) on
+   * 2026-11-11 with lab/clock-probe: Europe/Stockholm is refused with
+   * InvalidValuesError code 26 "Unable to Set", Europe/Amsterdam and
+   * Europe/Paris are accepted, and the accepted zone becomes the panel's
+   * wall-clock zone (tizen.time.getLocalTimezone() follows it). All three
+   * are CET/CEST, so whichever the firmware takes gives the same wall
+   * clock. Stockholm stays first in case another firmware's list has it;
+   * the refusal costs one synchronous call.
    *
    * A zone the panel ALREADY has is tried before any of these (see
    * candidates()): the certificate problem is a UTC problem and needs no
-   * zone at all, and a Finnish panel on Europe/Helsinki must not have its
-   * wall clock, and its own On/Off timers in the menu, moved an hour west.
+   * zone at all, and a Finnish panel on Europe/Helsinki should keep it.
+   * Should, not must: if the firmware refuses that zone too, the ladder
+   * falls through to these and the wall clock lands an hour west (see
+   * candidates() for why that is accepted).
    */
   const TIME_ZONES = ['Europe/Stockholm', 'Europe/Amsterdam', 'Europe/Paris'];
 
@@ -79,10 +84,11 @@
    * next one". Samsung's setNTP reference lists TypeMismatchError and
    * NotSupportedError (and SecurityError); a forum report shows the firmware
    * answering a bad value with InvalidValuesError, which the reference does
-   * not list. Which of the three a refused zone actually produces is not
-   * measured, so all three move on: six synchronous calls at worst, and a
-   * ladder that stops on the one error the reference ties to a value would
-   * have its fallbacks never run. SecurityError and anything unknown mean
+   * not list. Measured 2026-11-11 on a QB43C: a refused zone produces
+   * InvalidValuesError (code 26, "Unable to Set"), for ON and OFF alike.
+   * All three still move on: six synchronous calls at worst, and a ladder
+   * that stops on the one error the reference ties to a value would have
+   * its fallbacks never run. SecurityError and anything unknown mean
    * the CALL is refused, and the next value would be refused the same way.
    * A pair built from the panel's OWN values is exempt either way (see
    * applyNtp()).
@@ -111,15 +117,31 @@
    *
    * The own ADDRESS counts only while NTP is ON: "the customer has a working
    * setup" is the whole argument for keeping it, and a panel with NTP off may
-   * still report some stale address nobody chose. The own ZONE is kept
-   * either way; it is the panel's wall clock, not a server.
+   * still report some stale address nobody chose.
+   *
+   * The own ZONE is the panel's wall-clock zone, read from tizen.time (see
+   * readLocalZone()), and only as a fallback the zone getNTP() reports, and
+   * that only while NTP is ON. Measured 2026-11-11 on a QB43C: with NTP OFF
+   * getNTP() reported timeZone "Africa/Casablanca" on a panel whose menu
+   * and tizen.time both said Europe/Stockholm: a placeholder, not a
+   * setting. Whether the firmware accepts it is not measured; a zone name
+   * from its own list probably is, and that would move the panel's wall
+   * clock to Morocco.
+   *
+   * A panel outside CET whose own zone is refused still falls through to
+   * the CET defaults and gets a wall clock an hour out; measured today,
+   * the firmware CAN refuse a valid IANA name (Stockholm). Accepted as the
+   * lesser harm against a certificate failure that blanks the screen, and
+   * not measured on any non-CET panel.
    *
    * @param {{use?: string, address?: string, timeZone?: string}} [own] What getNTP() reported.
+   * @param {string} [localZone] What readLocalZone() reported; '' or missing when nothing.
    * @returns {Array<{address: string, timeZone: string, own: boolean}>}
    */
-  function candidates(own) {
-    const ownAddress = own && own.use === 'ON' ? cleanValue(own.address) : '';
-    const ownZone = cleanValue(own && own.timeZone);
+  function candidates(own, localZone) {
+    const ntpOn = Boolean(own) && own.use === 'ON';
+    const ownAddress = ntpOn ? cleanValue(own.address) : '';
+    const ownZone = cleanValue(localZone) || (ntpOn ? cleanValue(own.timeZone) : '');
     const addresses = withOwnFirst(ownAddress, NTP_ADDRESSES);
     const zones = withOwnFirst(ownZone, TIME_ZONES);
     // `own` exempts a pair from stopping the search. A panel value that is
@@ -225,6 +247,26 @@
   }
 
   /**
+   * Reads the panel's wall-clock zone from the Tizen Time API. Measured
+   * 2026-11-11 on a QB43C: tizen.time.getLocalTimezone() returned
+   * Europe/Stockholm with NTP off, and followed every accepted setNTP zone.
+   *
+   * @param {object|undefined} time `tizen.time`, or undefined off a panel.
+   * @returns {string} The zone, or '' when there is no API or it fails.
+   */
+  function readLocalZone(time) {
+    if (!time || typeof time.getLocalTimezone !== 'function') {
+      return '';
+    }
+
+    try {
+      return cleanValue(time.getLocalTimezone());
+    } catch (error) {
+      return '';
+    }
+  }
+
+  /**
    * Whether to apply our NTP setting, given what the panel reports and what
    * was measured. The one case that LEAVES the panel alone is NTP already on
    * with a clock that agrees with the portal, or with a drift that could not
@@ -274,6 +316,11 @@
    * pair carrying the panel's own values is never the one that stops the
    * search: the firmware may reject what it reported in any way it likes,
    * and the defaults still deserve their turn.
+   *
+   * Measured 2026-11-11 on a QB43C: a call refused over its zone had still
+   * written its ADDRESS (getNTP() reported it afterwards). Harmless here,
+   * since the next pair carries the same address or a default, but a
+   * refusal is not a no-op on the panel.
    *
    * @param {object|undefined} timer `webapis.timer`, or undefined off a panel.
    * @param {Array<{address: string, timeZone: string, own?: boolean}>} pairs From candidates().
@@ -400,7 +447,7 @@
    * ten minutes for the life of the panel, and a router that blocks NTP must
    * not turn that into a setNTP every ten minutes forever.
    *
-   * @param {{timer: object|undefined, fetchFn: function, url: string, now: function(): number, applyAllowed?: boolean}} deps
+   * @param {{timer: object|undefined, time?: object|undefined, fetchFn: function, url: string, now: function(): number, applyAllowed?: boolean}} deps `time` is `tizen.time`.
    * @returns {Promise<{drift: object, clockMs: number, clockImplausible: boolean, before: object, decision: object, result: object|null, warn: boolean}>}
    */
   function run(deps) {
@@ -412,7 +459,8 @@
     const settle = (drift, decision) => {
       let result = null;
       if (decision.action === 'apply') {
-        result = applyAllowed ? applyNtp(deps.timer, candidates(before.info)) : { status: 'held' };
+        // The zone is read here, at the moment it is used, not on every tick.
+        result = applyAllowed ? applyNtp(deps.timer, candidates(before.info, readLocalZone(deps.time))) : { status: 'held' };
       }
 
       return {
@@ -530,6 +578,7 @@
     candidates: candidates,
     driftFromDateHeader: driftFromDateHeader,
     readNtp: readNtp,
+    readLocalZone: readLocalZone,
     decide: decide,
     applyNtp: applyNtp,
     measureDrift: measureDrift,
