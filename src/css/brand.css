@@ -610,12 +610,6 @@
   text-shadow: none;
 }
 
-/* A HUD value that is a finding, not a fact: the Clock row when the panel's
-   clock disagrees with the portal's by more than js/timeguard.js tolerates. */
-.device-info-item-value.is-warn {
-  color: var(--danger);
-}
-
 /* Mobile browser: style.css's 13px panel font and one-column layout lose to
    the rules above, so the mobile case is repeated here, after them. */
 /* stylelint-disable-next-line media-feature-range-notation -- Chrome 63 has no range syntax */

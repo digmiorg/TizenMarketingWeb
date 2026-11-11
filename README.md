@@ -44,9 +44,10 @@ QB43C and it paired and played. The one failure on the way there was the
 panel's own clock: with it wrong the panel reported *Unable to connect to
 server* (the TLS certificate cannot be validated against a wrong date), and
 correcting the clock in the panel's menu was the whole fix. The widget now
-tries to turn NTP on at start (Partner-signed builds only: `b2b/`, the bench)
-and shows the drift in the INFO panel (`js/timeguard.js`); as of 2026-11-11
-that code has run under node, not on a panel.
+attempts to turn NTP on at start on every build, and shows the drift in the
+INFO panel (`js/timeguard.js`); only a Partner-signed build (`b2b/`, the
+bench) can actually apply it, and the store build's attempt is reported as
+`NTP refused`. As of 2026-11-11 that code has run under node, not on a panel.
 What remains unmeasured is what the panel does with a package whose
 distributor certificate has expired (2027-01-01 for the re-signed one); see
 BUILD.md.
