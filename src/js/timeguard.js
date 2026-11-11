@@ -121,9 +121,16 @@
    * readLocalZone()), and only as a fallback the zone getNTP() reports, and
    * that only while NTP is ON. Measured 2026-11-11 on a QB43C: with NTP OFF
    * getNTP() reported timeZone "Africa/Casablanca" on a panel whose menu
-   * and tizen.time both said Europe/Stockholm, a placeholder, not a
-   * setting, and one the firmware would most likely have accepted, moving
-   * the panel's wall clock to Morocco.
+   * and tizen.time both said Europe/Stockholm: a placeholder, not a
+   * setting. Whether the firmware accepts it is not measured; a zone name
+   * from its own list probably is, and that would move the panel's wall
+   * clock to Morocco.
+   *
+   * A panel outside CET whose own zone is refused still falls through to
+   * the CET defaults and gets a wall clock an hour out; measured today,
+   * the firmware CAN refuse a valid IANA name (Stockholm). Accepted as the
+   * lesser harm against a certificate failure that blanks the screen, and
+   * not measured on any non-CET panel.
    *
    * @param {{use?: string, address?: string, timeZone?: string}} [own] What getNTP() reported.
    * @param {string} [localZone] What readLocalZone() reported; '' or missing when nothing.

@@ -505,6 +505,22 @@ test('run: the measured bench panel: NTP off, getNTP() zone a placeholder, Stock
   );
 });
 
+test('run: the wall-clock zone from deps.time reaches the ladder: a Finnish panel with NTP off keeps Helsinki', async () => {
+  // Stockholm leads the defaults anyway, so the bench test above would pass
+  // with deps.time dropped on the floor. Helsinki would not.
+  const timer = fakeTimer({ ntp: { use: 'OFF', address: '', timeZone: 'Africa/Casablanca' } });
+  const clock = Date.parse('2016-01-01T10:00:00Z');
+  const report = await guard.run({
+    timer: timer,
+    time: { getLocalTimezone: () => 'Europe/Helsinki' },
+    fetchFn: () => new Promise(() => {}),
+    url: 'u',
+    now: fakeNow([clock, clock]),
+  });
+  assert.deepEqual(timer.calls, [{ use: 'ON', address: 'pool.ntp.org', timeZone: 'Europe/Helsinki' }]);
+  assert.equal(report.result.timeZone, 'Europe/Helsinki');
+});
+
 test('run: applyAllowed false holds an apply and writes nothing to the panel', async () => {
   const timer = fakeTimer({ ntp: { use: 'OFF' } });
   const server = Date.parse('Thu, 12 Nov 2026 12:00:00 GMT');
