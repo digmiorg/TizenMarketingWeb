@@ -2390,8 +2390,9 @@ function startTimeGuard() {
     // and plays without a clock row; it does not pair at all without onload.
     try {
       const timer = window.webapis ? window.webapis.timer : undefined;
-      // tizen.time carries the panel's wall-clock zone; getNTP() reports a
-      // placeholder zone while NTP is off (measured, see candidates()).
+      // tizen.time carries the panel's wall-clock zone. getNTP() reported a
+      // placeholder zone while NTP was off, measured once on a QB43C (see
+      // candidates() in timeguard.js).
       const time = window.tizen ? window.tizen.time : undefined;
       const applyAllowed = monotonicNow() - lastApplyAt >= CLOCK_APPLY_BACKOFF_MS;
       guard

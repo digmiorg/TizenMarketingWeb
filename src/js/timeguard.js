@@ -72,8 +72,10 @@
    *
    * A zone the panel ALREADY has is tried before any of these (see
    * candidates()): the certificate problem is a UTC problem and needs no
-   * zone at all, and a Finnish panel on Europe/Helsinki must not have its
-   * wall clock, and its own On/Off timers in the menu, moved an hour west.
+   * zone at all, and a Finnish panel on Europe/Helsinki should keep it.
+   * Should, not must: if the firmware refuses that zone too, the ladder
+   * falls through to these and the wall clock lands an hour west (see
+   * candidates() for why that is accepted).
    */
   const TIME_ZONES = ['Europe/Stockholm', 'Europe/Amsterdam', 'Europe/Paris'];
 
@@ -137,8 +139,9 @@
    * @returns {Array<{address: string, timeZone: string, own: boolean}>}
    */
   function candidates(own, localZone) {
-    const ownAddress = own && own.use === 'ON' ? cleanValue(own.address) : '';
-    const ownZone = cleanValue(localZone) || (own && own.use === 'ON' ? cleanValue(own.timeZone) : '');
+    const ntpOn = Boolean(own) && own.use === 'ON';
+    const ownAddress = ntpOn ? cleanValue(own.address) : '';
+    const ownZone = cleanValue(localZone) || (ntpOn ? cleanValue(own.timeZone) : '');
     const addresses = withOwnFirst(ownAddress, NTP_ADDRESSES);
     const zones = withOwnFirst(ownZone, TIME_ZONES);
     // `own` exempts a pair from stopping the search. A panel value that is
@@ -452,12 +455,12 @@
     const clockImplausible = isClockImplausible(clockMs);
     const applyAllowed = deps.applyAllowed !== false;
     const before = readNtp(deps.timer);
-    const localZone = readLocalZone(deps.time);
 
     const settle = (drift, decision) => {
       let result = null;
       if (decision.action === 'apply') {
-        result = applyAllowed ? applyNtp(deps.timer, candidates(before.info, localZone)) : { status: 'held' };
+        // The zone is read here, at the moment it is used, not on every tick.
+        result = applyAllowed ? applyNtp(deps.timer, candidates(before.info, readLocalZone(deps.time))) : { status: 'held' };
       }
 
       return {

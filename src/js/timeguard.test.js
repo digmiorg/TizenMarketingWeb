@@ -83,6 +83,7 @@ test('candidates: the zone the panel\'s wall clock has leads, the CET defaults f
   assert.equal(guard.candidates({}).length, 6);
   assert.equal(guard.candidates(undefined).length, 6);
   assert.equal(guard.candidates(undefined, 42).length, 6, 'a non-string zone is no zone');
+  assert.equal(guard.candidates({ use: 'ON', timeZone: 42 }).length, 6, 'a non-string getNTP zone is no zone either');
 });
 
 test('candidates: the zone getNTP() reports counts only while NTP is ON; OFF reports a placeholder', () => {
