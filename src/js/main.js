@@ -2315,6 +2315,120 @@ function displayAppVersion() {
     appVersionElement.textContent = `${appVersion}`;
   }
 }
+
+/**
+ * How often the time guard runs again after start. NTP corrects the clock
+ * some time after setNTP returns, so the reading taken at start would
+ * otherwise stand in the INFO panel as a warning long after the clock was
+ * fixed; and these panels have no nightly reboot, so a clock that drifts or
+ * loses NTP weeks later has to be caught by the same run, not by a restart.
+ * Every run goes through the same decision: a panel whose clock is right is
+ * left alone, one whose clock is out gets NTP applied again.
+ */
+const CLOCK_GUARD_INTERVAL_MS = 10 * 60 * 1000;
+
+/**
+ * The least time between two setNTP calls. A router that blocks outbound NTP
+ * leaves the clock wrong whatever this widget writes, and without this every
+ * tick would write the same setting again, about 144 times a day for the
+ * life of the panel. What a firmware does on each write (flash, an NTP
+ * restart, a network reset) is not known, so the writes are rationed; the
+ * measurement and the warning are not.
+ */
+const CLOCK_APPLY_BACKOFF_MS = 60 * 60 * 1000;
+
+/**
+ * The portal URL whose `Date` header the drift is measured against. /up is
+ * Laravel's health route: no cookies, no body. Being on the portal's CORS path
+ * list only lets the request through; `Date` is not a CORS-safelisted
+ * response header, so reading it also needs the portal to send
+ * `Access-Control-Expose-Headers: Date` (digmi-web-admin config/cors.php).
+ * Until that is deployed, a WebView that enforces CORS shows
+ * `drift unknown (no Date header)` here, and the clock floor in
+ * js/timeguard.js is the only check that works.
+ */
+const CLOCK_PROBE_URL = `${baseUrl}/up`;
+
+/**
+ * Writes the time guard's report into the INFO panel's Clock row.
+ *
+ * @param {object} report From DigmiTimeGuard.run(), possibly with a newer drift.
+ */
+function displayClock(report) {
+  const clockElement = document.getElementById('device-clock');
+  if (!clockElement) {
+    return;
+  }
+
+  clockElement.textContent = window.DigmiTimeGuard.formatReport(report);
+  clockElement.classList.toggle('is-warn', report.warn);
+}
+
+/**
+ * Measures the panel's clock against the portal and turns NTP on if it is
+ * off or the clock is out (js/timeguard.js has the rules), then keeps the
+ * drift reading fresh. Guarded like brand.js above: if timeguard.js failed to
+ * load, the widget still pairs and plays, and the Clock row just stays empty.
+ */
+function startTimeGuard() {
+  const guard = window.DigmiTimeGuard;
+  if (!guard || typeof guard.run !== 'function') {
+    return;
+  }
+
+  const fetchFn = (url, options) => fetch(url, options);
+  const now = () => Date.now();
+  // monotonicNow(): performance.now() does not move when NTP steps the
+  // clock, which Date.now() would, and a step is exactly what a successful
+  // apply causes.
+  let lastApplyAt = -Infinity;
+
+  const tick = () => {
+    // Everything synchronous sits inside the try: a `webapis.timer` getter
+    // that throws on some firmware, or a fetch that throws rather than
+    // rejects, must not take window.onload down with it. The widget pairs
+    // and plays without a clock row; it does not pair at all without onload.
+    try {
+      const timer = window.webapis ? window.webapis.timer : undefined;
+      const applyAllowed = monotonicNow() - lastApplyAt >= CLOCK_APPLY_BACKOFF_MS;
+      guard
+        .run({ timer: timer, fetchFn: fetchFn, url: CLOCK_PROBE_URL, now: now, applyAllowed: applyAllowed })
+        .then((report) => {
+          // Only a setNTP that was actually attempted is rationed. "No
+          // Timer API" attempted nothing, and a row that then said "held"
+          // would claim an apply that never happened.
+          const attempted = report.result && (report.result.status === 'applied' || report.result.status === 'refused');
+          if (attempted) {
+            lastApplyAt = monotonicNow();
+          }
+          console.log('[timeguard] ' + guard.formatReport(report) + ' (' + report.decision.reason + ')');
+          displayClock(report);
+        })
+        .catch(reportTimeGuardFailure);
+    } catch (error) {
+      reportTimeGuardFailure(error);
+    }
+  };
+
+  tick();
+  // Up to a minute of jitter: panels are rebooted in groups and would
+  // otherwise probe the portal in lockstep for the rest of their uptime.
+  setInterval(tick, CLOCK_GUARD_INTERVAL_MS + Math.floor(Math.random() * 60 * 1000));
+}
+
+/**
+ * run() resolves on every refusal it knows about; this is the one it does
+ * not, and a row saying so beats an empty row.
+ *
+ * @param {*} error Whatever was thrown.
+ */
+function reportTimeGuardFailure(error) {
+  console.error('[timeguard] failed: ' + (error && error.message ? error.message : error));
+  const clockElement = document.getElementById('device-clock');
+  if (clockElement) {
+    clockElement.textContent = 'time guard failed: ' + (error && error.name ? error.name : error);
+  }
+}
 window.onload = function () {
   // Before the QR and before any status text: this swaps the page's Swedish
   // defaults for the screen's own language and hides the [data-box-only]
@@ -2329,6 +2443,10 @@ window.onload = function () {
   getDUID().then((duid) => {
     document.getElementById('device-duid').textContent = duid || 'Not available';
   });
+
+  // Independent of pairing, and started first: if the clock is wrong, every
+  // https call below is what fails, and the Clock row is where that shows.
+  startTimeGuard();
 
   getUUID()
     .then((uuid) => {

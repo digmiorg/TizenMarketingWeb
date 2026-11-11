@@ -25,6 +25,11 @@
 # has one source of truth and it is a file Samsung accepted. src/config.xml
 # keeps the SSSP values and explains why.
 #
+# It also STRIPS the two Partner-level privileges that js/timeguard.js needs
+# (devicetimer, networkbearerselection). The store signs at Public level, so
+# they would never be granted there, and a privilege list that differs from the
+# accepted package is the kind of thing a pre-test is entitled to refuse.
+#
 # WARNING: the package this produces will NOT install over SSSP or sdb. Its
 # signature describes a different package, and a panel fetching it directly
 # checks that. Prove the CONTENT on the bench with build-wgt.sh; upload this.
@@ -315,7 +320,7 @@ s = io.open(path, encoding='utf-8').read()
 # header comment in src/config.xml names all three on purpose, which is exactly
 # how someone arrives here; it is safe only because it omits the angle
 # brackets, and nothing but this check keeps it that way.
-hit = re.search(r'<!--(?:(?!-->).)*?(<tizen:application|<name>|<tizen:profile)', s, re.S)
+hit = re.search(r'<!--(?:(?!-->).)*?(<tizen:application|<name>|<tizen:profile|<tizen:privilege)', s, re.S)
 if hit:
     raise SystemExit(
         "ERROR: a comment in config.xml contains %s. This step rewrites those\n"
@@ -338,6 +343,18 @@ s = sub_exactly_once(r'<name>[^<]*</name>',
                      lambda m: '<name>' + name + '</name>', s, '<name> element')
 s = sub_exactly_once(r'(<tizen:profile[^>]*\sname=")[^"]*(")',
                      lambda m: m.group(1) + profile + m.group(2), s, '<tizen:profile> element')
+
+# Partner-level privileges the store never grants; see the header. Each must
+# be present exactly once (a missing one means src/config.xml changed under
+# this script, and the strip would be silently doing nothing), and the whole
+# line goes, indentation and newline included, so the result stays tidy.
+PARTNER_ONLY = (
+    'http://developer.samsung.com/privilege/devicetimer',
+    'http://tizen.org/privilege/networkbearerselection',
+)
+for priv in PARTNER_ONLY:
+    s = sub_exactly_once(r'[ \t]*<tizen:privilege\s+name="' + re.escape(priv) + r'"\s*/>[ \t]*\r?\n?',
+                         '', s, 'privilege ' + priv)
 io.open(path, 'w', encoding='utf-8').write(s)
 
 # Read back with a parser. ElementTree drops comments, so it cannot be fooled
@@ -352,7 +369,11 @@ for label, actual, want in got:
     if actual != want:
         raise SystemExit('ERROR: %s is %r after the rewrite but the accepted '
                          'package says %r' % (label, actual, want))
+left = [p.get('name') for p in root.findall('tizen:privilege', NS) if p.get('name') in PARTNER_ONLY]
+if left:
+    raise SystemExit('ERROR: partner-level privilege still declared after the strip: %s' % ', '.join(left))
 print("  Tizen ID %s, name '%s', profile %s" % (got[0][1], got[1][1], got[2][1]))
+print("  stripped %d partner-level privilege(s): %s" % (len(PARTNER_ONLY), ', '.join(PARTNER_ONLY)))
 PY
 
 # ------------------------------------------------------------- signature ---

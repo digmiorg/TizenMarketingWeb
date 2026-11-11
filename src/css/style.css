@@ -192,3 +192,11 @@ html.avplay-video body {
     opacity: 1;
   }
 }
+
+/* A HUD value that is a finding, not a fact: the Clock row when the panel's
+   clock disagrees with the portal's by more than js/timeguard.js tolerates.
+   Here and not in brand.css, which is a byte-for-byte copy of the signage
+   stylesheet and is replaced wholesale when that one changes. */
+.device-info-item-value.is-warn {
+  color: var(--danger);
+}

@@ -30,7 +30,16 @@ first was written down here, and the third arrived on 2026-11-10.
 There is one `src/config.xml` and it holds the SSSP values. The store build
 rewrites the Tizen ID, `<name>` and `<tizen:profile>` in a staged copy, taking
 all three from the reference package, and verifies the result against it before
-packaging. `src/config.xml` keeps the SSSP values deliberately: changing the
+packaging. It also strips the two Partner-level privileges `src/config.xml`
+declares for `webapis.timer.setNTP` (`devicetimer`, `networkbearerselection`):
+the store signs at Public level, so they would never be granted, and the
+store package's privilege list stays what it was before this change (it
+already differs from the accepted package by `tv.audio`; `src/config.xml`
+explains that one). On a
+store panel the INFO panel's Clock row is therefore expected to read `NTP
+refused: SecurityError`; the drift measurement beside it does not need the
+privilege. Neither half has been watched on a panel yet (as of 2026-11-11).
+`src/config.xml` keeps the SSSP values deliberately: changing the
 Tizen ID of an *installed* sideload may register a new application rather than
 upgrade one, and that would take `localStorage.myUUID` — the screen's pairing
 identity — with it. That is unmeasured, so the store build stays out of the
