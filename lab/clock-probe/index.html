@@ -89,8 +89,16 @@ so 4 and 6 use Amsterdam: a refusal of them then says something about OFF and th
       }
       var PROBE_TIMEOUT_MS = 15000;
       var probeInFlight = false;
+      var probeQueued = false;
+      // Keys 1-6 schedule a probe 3 s after setNTP. If one is still in flight then
+      // (a slow portal, or 7 pressed just before), the post-change drift must not
+      // be lost: remember it and run one fresh probe once the active one settles.
+      function settleProbe() {
+        probeInFlight = false;
+        if (probeQueued) { probeQueued = false; setTimeout(measureDrift, 0); }
+      }
       function measureDrift() {
-        if (probeInFlight) { log('probe already in flight'); return; }
+        if (probeInFlight) { probeQueued = true; log('probe already in flight, one more queued'); return; }
         probeInFlight = true;
         var sentAt = Date.now();
         set('drift', 'probing...');
@@ -98,7 +106,7 @@ so 4 and 6 use Amsterdam: a refusal of them then says something about OFF and th
           setTimeout(function () { reject({ name: 'TimeoutError', message: 'no answer in ' + PROBE_TIMEOUT_MS + ' ms' }); }, PROBE_TIMEOUT_MS);
         });
         Promise.race([fetch(PORTAL + '?t=' + sentAt, { method: 'HEAD', cache: 'no-store' }), timedOut]).then(function (res) {
-          probeInFlight = false;
+          settleProbe();
           var receivedAt = Date.now();
           var header = res.headers.get('Date');
           if (!header) { set('drift', 'HTTP ' + res.status + ' but no Date header', 'warn'); log('probe ' + res.status + ' no Date'); return; }
@@ -109,7 +117,7 @@ so 4 and 6 use Amsterdam: a refusal of them then says something about OFF and th
           set('drift', (d >= 0 ? '+' : '') + d + ' s  (HTTP ' + res.status + ', Date: ' + header + ')', Math.abs(d) > 60 ? 'warn' : 'ok');
           log('probe drift ' + d + ' s');
         }).catch(function (e) {
-          probeInFlight = false;
+          settleProbe();
           set('drift', 'probe failed: ' + why(e), 'warn');
           log('probe failed ' + why(e));
         });
