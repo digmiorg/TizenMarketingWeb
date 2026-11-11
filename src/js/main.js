@@ -2378,10 +2378,9 @@ function startTimeGuard() {
 
   const fetchFn = (url, options) => fetch(url, options);
   const now = () => Date.now();
-  // Monotonic-ish: performance.now() does not move when NTP steps the clock,
-  // which Date.now() would, and a step is exactly what a successful apply
-  // causes. Falls back to Date.now() where performance is missing.
-  const uptime = () => (window.performance && typeof window.performance.now === 'function' ? window.performance.now() : Date.now());
+  // monotonicNow(): performance.now() does not move when NTP steps the
+  // clock, which Date.now() would, and a step is exactly what a successful
+  // apply causes.
   let lastApplyAt = -Infinity;
 
   const tick = () => {
@@ -2391,12 +2390,16 @@ function startTimeGuard() {
     // and plays without a clock row; it does not pair at all without onload.
     try {
       const timer = window.webapis ? window.webapis.timer : undefined;
-      const applyAllowed = uptime() - lastApplyAt >= CLOCK_APPLY_BACKOFF_MS;
+      const applyAllowed = monotonicNow() - lastApplyAt >= CLOCK_APPLY_BACKOFF_MS;
       guard
         .run({ timer: timer, fetchFn: fetchFn, url: CLOCK_PROBE_URL, now: now, applyAllowed: applyAllowed })
         .then((report) => {
-          if (report.result && report.result.status !== 'held') {
-            lastApplyAt = uptime();
+          // Only a setNTP that was actually attempted is rationed. "No
+          // Timer API" attempted nothing, and a row that then said "held"
+          // would claim an apply that never happened.
+          const attempted = report.result && (report.result.status === 'applied' || report.result.status === 'refused');
+          if (attempted) {
+            lastApplyAt = monotonicNow();
           }
           console.log('[timeguard] ' + guard.formatReport(report) + ' (' + report.decision.reason + ')');
           displayClock(report);

@@ -76,14 +76,18 @@
 
   /**
    * Error names from the Timer API that mean "this VALUE was refused, try the
-   * next one". Everything else (SecurityError, NotSupportedError, UnknownError,
-   * a TypeMismatchError that says our object shape is wrong) means the call
-   * itself is refused, and the next value would be refused the same way.
-   * A pair built from the panel's OWN values is the exception: whatever the
-   * firmware says about a value it reported itself, the defaults still get
-   * their turn (see applyNtp()).
+   * next one". Samsung's setNTP reference lists TypeMismatchError and
+   * NotSupportedError (and SecurityError); a forum report shows the firmware
+   * answering a bad value with InvalidValuesError, which the reference does
+   * not list. Which of the three a refused zone actually produces is not
+   * measured, so all three move on: six synchronous calls at worst, and a
+   * ladder that stops on the one error the reference ties to a value would
+   * have its fallbacks never run. SecurityError and anything unknown mean
+   * the CALL is refused, and the next value would be refused the same way.
+   * A pair built from the panel's OWN values is exempt either way (see
+   * applyNtp()).
    */
-  const VALUE_REFUSALS = ['InvalidValuesError'];
+  const VALUE_REFUSALS = ['InvalidValuesError', 'TypeMismatchError', 'NotSupportedError'];
 
   /**
    * How long the drift probe may take before it is given up on. A stalled
@@ -118,6 +122,11 @@
     const ownZone = cleanValue(own && own.timeZone);
     const addresses = withOwnFirst(ownAddress, NTP_ADDRESSES);
     const zones = withOwnFirst(ownZone, TIME_ZONES);
+    // `own` exempts a pair from stopping the search. A panel value that is
+    // one of our own defaults (this widget set it on an earlier run) is a
+    // default, and a refusal of it means what a refusal of a default means.
+    const customAddress = ownAddress && NTP_ADDRESSES.indexOf(ownAddress) === -1 ? ownAddress : '';
+    const customZone = ownZone && TIME_ZONES.indexOf(ownZone) === -1 ? ownZone : '';
 
     const out = [];
     addresses.forEach((address) => {
@@ -125,7 +134,7 @@
         out.push({
           address: address,
           timeZone: timeZone,
-          own: address === ownAddress || timeZone === ownZone,
+          own: (customAddress !== '' && address === customAddress) || (customZone !== '' && timeZone === customZone),
         });
       });
     });
@@ -235,6 +244,14 @@
       return { action: 'apply', reason: 'the clock reads earlier than this build' };
     }
 
+    // A clock that agrees with the portal is left alone whatever getNTP()
+    // says about itself: a firmware that reports `use` oddly, or NTP off
+    // with a clock somebody set correctly, must not become a write every
+    // hour for the life of the panel. The clock is what matters.
+    if (driftSeconds !== null && Math.abs(driftSeconds) <= DRIFT_WARN_SECONDS) {
+      return { action: 'leave', reason: 'the clock agrees with the portal' };
+    }
+
     if (ntp.status !== 'read') {
       return { action: 'apply', reason: 'ntp setting ' + ntp.status };
     }
@@ -263,8 +280,12 @@
    * @returns {{status: 'absent'}|{status: 'applied', address: string, timeZone: string, attempts: number}|{status: 'refused', error: string, attempts: number}}
    */
   function applyNtp(timer, pairs) {
-    if (!timer || typeof timer.setNTP !== 'function') {
-      return { status: 'absent' };
+    if (!timer) {
+      return { status: 'absent', missing: 'timer' };
+    }
+
+    if (typeof timer.setNTP !== 'function') {
+      return { status: 'absent', missing: 'setNTP' };
     }
 
     let attempts = 0;
@@ -300,11 +321,30 @@
    */
   function measureDrift(fetchFn, url, now) {
     const sentAt = now();
+    // `cache: 'no-store'` arrived in Chrome 64 and the oldest engine this
+    // widget runs on is 63, where the member is dropped silently; the query
+    // string is the defence that works everywhere. A cached Date header
+    // would read as drift equal to the cache's age.
+    const probeUrl = url + (url.indexOf('?') === -1 ? '?' : '&') + 't=' + sentAt;
+    // AbortController is Chrome 66+; without it a stalled probe holds its
+    // socket until the engine gives up, which is survivable, and with it the
+    // timeout below closes the socket so the next tick does not stack one
+    // more hung request onto the per-host connection limit.
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const options = { method: 'HEAD', cache: 'no-store' };
+    if (controller) {
+      options.signal = controller.signal;
+    }
     // Started inside a promise so that a fetchFn that THROWS rather than
     // rejects still lands in the catch below, not in the caller's lap.
-    const request = Promise.resolve().then(() => fetchFn(url, { method: 'HEAD', cache: 'no-store' }));
+    const request = Promise.resolve().then(() => fetchFn(probeUrl, options));
+    const abort = () => {
+      if (controller) {
+        controller.abort();
+      }
+    };
 
-    return withTimeout(request, PROBE_TIMEOUT_MS)
+    return withTimeout(request, PROBE_TIMEOUT_MS, abort)
       .then((response) => {
         const receivedAt = now();
         const header = response && response.headers ? response.headers.get('date') : null;
@@ -327,9 +367,12 @@
    * @param {number} ms
    * @returns {Promise<T>}
    */
-  function withTimeout(promise, ms) {
+  function withTimeout(promise, ms, onTimeout) {
     return new Promise((resolve, reject) => {
       const handle = setTimeout(() => {
+        if (typeof onTimeout === 'function') {
+          onTimeout();
+        }
         reject({ name: 'TimeoutError', message: 'no answer within ' + ms + ' ms' });
       }, ms);
       promise.then(
@@ -384,15 +427,12 @@
     };
 
     if (clockImplausible) {
+      // Not probed: setNTP was just told to step the clock, and a round
+      // trip timed across that step reads as years of drift. The next tick
+      // measures against a clock that has settled, one way or the other.
       const decision = decide(before, null, true);
-      const early = settle({ status: 'unavailable', reason: 'not probed' }, decision);
 
-      return measureDrift(deps.fetchFn, deps.url, deps.now).then((drift) => {
-        early.drift = drift;
-        early.warn = true;
-
-        return early;
-      });
+      return Promise.resolve(settle({ status: 'unavailable', reason: 'not probed, clock below floor' }, decision));
     }
 
     return measureDrift(deps.fetchFn, deps.url, deps.now).then((drift) => {
@@ -432,8 +472,11 @@
     const result = report.result;
     if (result === null) {
       const info = report.before.info || {};
+      if (report.before.status === 'read' && info.use === 'ON') {
+        return 'NTP left on (' + (info.address || '?') + ', ' + (info.timeZone || '?') + ')';
+      }
 
-      return 'NTP left on (' + (info.address || '?') + ', ' + (info.timeZone || '?') + ')';
+      return 'NTP left as is (clock agrees)';
     }
 
     if (result.status === 'applied') {
@@ -447,7 +490,11 @@
     }
 
     if (result.status === 'held') {
-      return 'NTP apply held (applied recently)';
+      return 'NTP apply held (tried under an hour ago)';
+    }
+
+    if (result.missing === 'setNTP') {
+      return 'Timer API has no setNTP';
     }
 
     return 'no Timer API';
