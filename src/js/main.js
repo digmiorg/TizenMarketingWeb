@@ -2390,9 +2390,12 @@ function startTimeGuard() {
     // and plays without a clock row; it does not pair at all without onload.
     try {
       const timer = window.webapis ? window.webapis.timer : undefined;
+      // tizen.time carries the panel's wall-clock zone; getNTP() reports a
+      // placeholder zone while NTP is off (measured, see candidates()).
+      const time = window.tizen ? window.tizen.time : undefined;
       const applyAllowed = monotonicNow() - lastApplyAt >= CLOCK_APPLY_BACKOFF_MS;
       guard
-        .run({ timer: timer, fetchFn: fetchFn, url: CLOCK_PROBE_URL, now: now, applyAllowed: applyAllowed })
+        .run({ timer: timer, time: time, fetchFn: fetchFn, url: CLOCK_PROBE_URL, now: now, applyAllowed: applyAllowed })
         .then((report) => {
           // Only a setNTP that was actually attempted is rationed. "No
           // Timer API" attempted nothing, and a row that then said "held"
