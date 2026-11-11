@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Digmi clock probe</title>
+    <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
+    <style>
+      html, body { margin: 0; height: 100%; background: #101820; color: #e8eef4; font-family: monospace; font-size: 30px; }
+      #readout { padding: 40px; }
+      .row { margin: 0 0 28px 0; }
+      .k { color: #8fb4d9; }
+      .warn { color: #ff6b6b; }
+      .ok { color: #7bd88f; }
+      /* Newest line always visible: the box fills from the bottom and clips
+         the oldest at the top. */
+      #log { position: fixed; left: 0; right: 0; bottom: 0; height: 42vh; overflow: hidden; background: #000; padding: 20px 40px; font-size: 24px; white-space: pre-wrap; display: flex; flex-direction: column; justify-content: flex-end; }
+      #keys { color: #c9d4de; font-size: 24px; white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <div id="readout">
+      <div class="row"><span class="k">JS Date.now()   </span><span id="js"></span></div>
+      <div class="row"><span class="k">tizen.time      </span><span id="tz"></span></div>
+      <div class="row"><span class="k">time zone       </span><span id="zone"></span></div>
+      <div class="row"><span class="k">getNTP()        </span><span id="ntp"></span></div>
+      <div class="row"><span class="k">portal drift    </span><span id="drift"></span></div>
+      <div class="row"><span class="k">last action     </span><span id="action"></span></div>
+      <div id="keys">1 setNTP ON pool.ntp.org Europe/Stockholm · 2 Europe/Amsterdam · 3 Europe/Paris
+4 setNTP OFF (Amsterdam) · 5 ON with zone Nowhere/Nowhere · 6 ON address 216.239.35.0 Europe/Amsterdam
+7 getNTP + drift again · 0 reload
+Every key 1-6 touches the panel's real NTP state, a refused call too (it still writes the address);
+2 restores pool.ntp.org + Amsterdam before you leave. Stockholm is refused on QB43C, so 4 and 6 use
+Amsterdam: a refusal of them then says something about OFF and the bare address.</div>
+    </div>
+    <div id="log"></div>
+    <script>
+      var PORTAL = 'https://portal.digmi.eu/up';
+      var FLOOR_MS = Date.parse('2026-11-11T00:00:00Z');
+      var lines = [];
+      function stamp() { return new Date().toISOString().slice(11, 19); }
+      function log(s) {
+        lines.push(stamp() + ' ' + s);
+        if (lines.length > 10) lines.shift();
+        document.getElementById('log').textContent = lines.join('\n');
+      }
+      function set(id, text, cls) {
+        var el = document.getElementById(id);
+        el.textContent = text;
+        el.className = cls || '';
+      }
+      function why(e) {
+        if (!e) return 'null';
+        return (e.name || '?') + ' code=' + (e.code !== undefined ? e.code : '?') + ' "' + (e.message || '') + '"';
+      }
+      function tick() {
+        var now = new Date();
+        set('js', now.toISOString() + '  (' + now.toString() + ')', now.getTime() < FLOOR_MS ? 'warn' : 'ok');
+        try {
+          set('tz', tizen.time.getCurrentDateTime().toString());
+        } catch (e) { set('tz', 'tizen.time: ' + why(e), 'warn'); }
+        try {
+          set('zone', tizen.time.getLocalTimezone());
+        } catch (e) { set('zone', why(e), 'warn'); }
+      }
+      function readNtp() {
+        try {
+          if (!window.webapis || !webapis.timer) { set('ntp', 'webapis.timer missing', 'warn'); return; }
+          if (typeof webapis.timer.getNTP !== 'function') { set('ntp', 'getNTP missing', 'warn'); return; }
+          var info = webapis.timer.getNTP();
+          set('ntp', JSON.stringify(info));
+          log('getNTP ' + JSON.stringify(info));
+        } catch (e) { set('ntp', why(e), 'warn'); log('getNTP threw ' + why(e)); }
+      }
+      function setNtp(use, address, timeZone) {
+        var pair = { use: use, address: address, timeZone: timeZone };
+        try {
+          if (!window.webapis || !webapis.timer || typeof webapis.timer.setNTP !== 'function') {
+            set('action', 'setNTP missing', 'warn');
+            return;
+          }
+          var r = webapis.timer.setNTP(pair);
+          set('action', 'setNTP ' + JSON.stringify(pair) + ' -> ' + String(r), 'ok');
+          log('setNTP ' + JSON.stringify(pair) + ' -> ' + String(r));
+        } catch (e) {
+          set('action', 'setNTP ' + JSON.stringify(pair) + ' THREW ' + why(e), 'warn');
+          log('setNTP ' + JSON.stringify(pair) + ' THREW ' + why(e));
+        }
+        setTimeout(readNtp, 1500);
+        setTimeout(measureDrift, 3000);
+      }
+      var PROBE_TIMEOUT_MS = 15000;
+      var probeInFlight = false;
+      var probeQueued = false;
+      // Keys 1-6 schedule a probe 3 s after setNTP. If one is still in flight then
+      // (a slow portal, or 7 pressed just before), the post-change drift must not
+      // be lost: remember it and run one fresh probe once the active one settles.
+      function settleProbe() {
+        probeInFlight = false;
+        if (probeQueued) { probeQueued = false; setTimeout(measureDrift, 0); }
+      }
+      function measureDrift() {
+        if (probeInFlight) { probeQueued = true; log('probe already in flight, one more queued'); return; }
+        probeInFlight = true;
+        var sentAt = Date.now();
+        set('drift', 'probing...');
+        // Abort the request on timeout where the engine offers it (Tizen 7 does),
+        // so a stalled portal does not pile up one hung socket per press.
+        var controller = typeof AbortController === 'function' ? new AbortController() : null;
+        var timeoutId;
+        var timedOut = new Promise(function (resolve, reject) {
+          timeoutId = setTimeout(function () {
+            // reject BEFORE abort: abort() rejects the fetch synchronously and would
+            // win the race, turning the readout into AbortError instead of TimeoutError.
+            reject({ name: 'TimeoutError', message: 'no answer in ' + PROBE_TIMEOUT_MS + ' ms' });
+            if (controller) { controller.abort(); }
+          }, PROBE_TIMEOUT_MS);
+        });
+        var init = { method: 'HEAD', cache: 'no-store' };
+        if (controller) { init.signal = controller.signal; }
+        Promise.race([fetch(PORTAL + '?t=' + sentAt, init), timedOut]).then(function (res) {
+          clearTimeout(timeoutId);
+          settleProbe();
+          var receivedAt = Date.now();
+          var header = res.headers.get('Date');
+          if (!header) { set('drift', 'HTTP ' + res.status + ' but no Date header', 'warn'); log('probe ' + res.status + ' no Date'); return; }
+          var server = Date.parse(header);
+          if (isNaN(server)) { set('drift', 'HTTP ' + res.status + ' but Date unparseable: ' + header, 'warn'); log('probe ' + res.status + ' Date unparseable'); return; }
+          var mid = (sentAt + receivedAt) / 2;
+          var d = Math.round((mid - server) / 1000);
+          set('drift', (d >= 0 ? '+' : '') + d + ' s  (HTTP ' + res.status + ', Date: ' + header + ')', Math.abs(d) > 60 ? 'warn' : 'ok');
+          log('probe drift ' + d + ' s');
+        }).catch(function (e) {
+          clearTimeout(timeoutId);
+          settleProbe();
+          // A bare TypeError is all fetch says for DNS, refused, no network, CORS or
+          // TLS; a clock outside the certificate window (future as well as past) is
+          // the TLS case, and the one this probe exists to catch.
+          var hint = e && e.name === 'TypeError' ? ' (network/TLS failure; a clock outside the cert window is one cause)' : '';
+          set('drift', 'probe failed: ' + why(e) + hint, 'warn');
+          log('probe failed ' + why(e) + hint);
+        });
+      }
+      function keys() {
+        var want = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+        var firstFailure = '';
+        for (var i = 0; i < want.length; i++) {
+          try { tizen.tvinputdevice.registerKey(want[i]); } catch (e) { if (!firstFailure) { firstFailure = want[i] + ': ' + why(e); } }
+        }
+        if (firstFailure) { log('registerKey failed, first: ' + firstFailure); }
+        document.addEventListener('keydown', function (e) {
+          if (e.repeat) return;
+          var k = e.keyCode;
+          log('key ' + k);
+          if (k === 49) setNtp('ON', 'pool.ntp.org', 'Europe/Stockholm');
+          else if (k === 50) setNtp('ON', 'pool.ntp.org', 'Europe/Amsterdam');
+          else if (k === 51) setNtp('ON', 'pool.ntp.org', 'Europe/Paris');
+          else if (k === 52) setNtp('OFF', 'pool.ntp.org', 'Europe/Amsterdam');
+          else if (k === 53) setNtp('ON', 'pool.ntp.org', 'Nowhere/Nowhere');
+          else if (k === 54) setNtp('ON', '216.239.35.0', 'Europe/Amsterdam');
+          else if (k === 55) { readNtp(); measureDrift(); }
+          else if (k === 48) location.reload();
+        });
+      }
+      window.onload = function () {
+        log('clock probe up');
+        keys();
+        tick();
+        setInterval(tick, 1000);
+        readNtp();
+        measureDrift();
+      };
+    </script>
+  </body>
+</html>
